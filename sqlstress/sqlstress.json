@@ -1,0 +1,7 @@
+{
+  "threads": 8,
+  "duration": "60s",
+  "pause": "200ms",
+  "queries": "queries",
+  "database": "PachadataFormation"
+}
