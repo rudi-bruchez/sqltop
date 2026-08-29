@@ -46,6 +46,19 @@ Two things cannot be tested locally and stay open until pointed at the real
 thing: Azure SQL Database, which cannot be containerised, and Kerberos against a
 real domain.
 
+## Commits
+
+Commits are authored by the repository owner alone. Do not add
+`Co-Authored-By` or `Claude-Session` trailers, or any other attribution
+footer, to commit messages. This applies to every agent working in this
+repository, not only the main session.
+
+Messages are prose explaining why, not a bullet list of what changed. No bold,
+no em-dashes.
+
 ## Before committing
 
-`gofmt` clean, `go vet ./...` clean, and the bench still builds.
+`gofmt` clean and `go vet ./...` clean.
+
+`bench/` is a local rendering harness and is deliberately not tracked in git.
+It still has to build when the tree does, but only on a machine that has it.

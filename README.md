@@ -3,8 +3,9 @@
 A `top` for SQL servers: real-time monitoring of active requests, with a short
 rolling history so a query can be reviewed after it has finished.
 
-Status: early. No collector yet. The rendering strategy for the main screen has
-been settled by measurement, see `bench/`.
+Status: early. The rendering strategy for the main screen was settled by
+measurement against four candidates, using a local harness that is not tracked
+here.
 
 ## Shape of the project
 
@@ -27,5 +28,5 @@ material, not project documentation.
 
 | Path | Contents |
 |---|---|
-| `bench/` | Rendering test bench and the decision it produced |
+| `docs/plans/` | Implementation plans |
 | `docs/` | Research notes and the initial specification draft |
