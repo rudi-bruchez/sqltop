@@ -76,9 +76,20 @@ func (c *Collector) Run(ctx context.Context) error {
 	// Identify is run once up front so the server tiers build their queries
 	// from a real version and real capabilities rather than guessing. If it
 	// fails here, the tiers still start: SampleRequests works on a
-	// conservative query even without Identify. There is deliberately no
-	// re-run of this preflight later; see the note on that in the task
-	// report, this collector's known gap against spec section 4.4.
+	// conservative query even without Identify.
+	//
+	// Debt against spec section 4.4: three of its sentences are not done.
+	// The status bar carries no next-attempt time, the retention window is
+	// never marked stale while disconnected, and this preflight is not
+	// re-run on an actual reconnection (only the retry backoff in loop is
+	// done). All three were left because an earlier attempt at the third
+	// re-ran Identify on every failed retry rather than only on a genuine
+	// reconnect, which loaded a server that was merely refusing queries
+	// instead of protecting it, the very spin 4.4's backoff exists to
+	// prevent. The way out is a real reconnect signal, for instance the
+	// first tier success after a run of failures, that fires Identify once
+	// and that a next-attempt time and a stale marker could also hang off;
+	// nothing here tracks that signal yet.
 	info, caps, err := c.src.Identify(ctx)
 	c.mu.Lock()
 	c.info, c.caps = info, caps
@@ -267,6 +278,11 @@ func (c *Collector) okCost() {
 // one-second tier even when both are healthy, and this cannot tell them
 // apart. Doing better needs a timestamp on model.Figure itself, which it
 // does not carry; that is a UI-plan change, not a collector one.
+//
+// At is the zero time.Time until the first server-tier sample has actually
+// succeeded. Nothing downstream reads it yet, but a caller computing an age
+// from a zero time would render an age of about two thousand years, so this
+// is written down for whoever adds that reader.
 func (c *Collector) Server() model.ServerSample {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -392,4 +393,197 @@ func TestCollectorReadPathIsSafeWhileTiersAreWriting(t *testing.T) {
 	<-done
 	close(stop)
 	readers.Wait()
+}
+
+// TestSampleSkipsTheSourceOnceCtxIsAlreadyCancelled kills the mutation of
+// removing the ctx.Err() check at the top of sample: without it, sample
+// would go on to call SampleRequests (or SampleServer) against a context
+// that is already done, which is exactly the extra Source call the fix
+// round 2 review measured (63 ms to return instead of 24 ms, one extra call
+// placed after cancel).
+func TestSampleSkipsTheSourceOnceCtxIsAlreadyCancelled(t *testing.T) {
+	src := &countingSource{Source: fake.New(nil)}
+	w := window.New(time.Minute, 100)
+	c := New(src, w, NewBudget(50, baseTiers()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if ok := c.sample(ctx, model.TierRequests); ok {
+		t.Fatal("sample must report failure once ctx is already cancelled")
+	}
+	// countingSource's SampleRequests override counts calls; it is not the
+	// one under test here (this test overrides ctx, not the source's own
+	// error), so a call reaching it at all is the mutation's signature.
+	if got := atomic.LoadInt32(&src.calls); got != 0 {
+		t.Fatalf("sample placed %d SampleRequests call(s) after ctx was already cancelled, want 0", got)
+	}
+}
+
+// cancelDuringSampleServerSource cancels ctx itself from inside
+// SampleServer, simulating cancellation landing in the gap between the
+// counters tier's two calls, and counts how many times Cost is reached
+// afterward.
+type cancelDuringSampleServerSource struct {
+	*fake.Source
+	cancel    context.CancelFunc
+	costCalls int32
+}
+
+func (s *cancelDuringSampleServerSource) SampleServer(ctx context.Context, tier model.Tier) (model.ServerSample, error) {
+	s.cancel()
+	return s.Source.SampleServer(ctx, tier)
+}
+
+func (s *cancelDuringSampleServerSource) Cost(ctx context.Context) (model.Cost, error) {
+	atomic.AddInt32(&s.costCalls, 1)
+	return s.Source.Cost(ctx)
+}
+
+// TestSampleSkipsCostOnceCtxIsCancelledMidRound kills the mutation of
+// removing the second ctx.Err() check, the one guarding the counters tier's
+// call to Cost after SampleServer has already returned. This is the call
+// the review's 63 ms number was mostly about: a source that does not honour
+// ctx cannot be interrupted mid-call, but the collector must not place a
+// second, avoidable call once it already knows shutdown was asked for.
+func TestSampleSkipsCostOnceCtxIsCancelledMidRound(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &cancelDuringSampleServerSource{Source: fake.New(nil)}
+	src.cancel = cancel
+	w := window.New(time.Minute, 100)
+	c := New(src, w, NewBudget(50, baseTiers()))
+
+	c.sample(ctx, model.TierCounters)
+
+	if got := atomic.LoadInt32(&src.costCalls); got != 0 {
+		t.Fatalf("Cost was called %d time(s) after ctx was cancelled mid-round (inside SampleServer), want 0", got)
+	}
+}
+
+// breaksAfterFirstSource lets SampleServer succeed until told to break, then
+// fails every call from then on, so a test can pin down exactly when the
+// last successful merge into Collector.figures happened.
+type breaksAfterFirstSource struct {
+	*fake.Source
+	broken int32
+}
+
+func (s *breaksAfterFirstSource) SampleServer(ctx context.Context, tier model.Tier) (model.ServerSample, error) {
+	if atomic.LoadInt32(&s.broken) == 1 {
+		return model.ServerSample{}, errors.New("broke")
+	}
+	return s.Source.SampleServer(ctx, tier)
+}
+
+// TestServerAtDoesNotDriftOnceTheSourceBreaks kills the mutation of
+// Server() restamping At with time.Now() at read time instead of the time
+// of the sample that actually produced the figures: with that mutation, two
+// reads a second apart would differ by about a second even though nothing
+// could have merged in between.
+func TestServerAtDoesNotDriftOnceTheSourceBreaks(t *testing.T) {
+	src := &breaksAfterFirstSource{Source: fake.New(nil)}
+	w := window.New(time.Minute, 100)
+	tiers := baseTiers()
+	tiers.Counters = config.Duration(20 * time.Millisecond)
+	tiers.Space = config.Duration(20 * time.Millisecond)
+	c := New(src, w, NewBudget(50, tiers))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		c.Run(ctx)
+		close(done)
+	}()
+
+	// Let at least one server-tier sample land, then break the source so no
+	// further merge can ever happen again for the rest of this run. A second
+	// settle wait follows the flip: SampleServer checks the flag at its own
+	// top, so a call already past that check when the flag flips can still
+	// land (and write figuresAt) microseconds later. Both tiers here poll
+	// every 20 ms and the fake does no real work, so any such straggler is
+	// long done well within this margin; without it, first below can itself
+	// race a straggler's write and the test flakes on the two reads
+	// differing by microseconds instead of the intended second.
+	time.Sleep(100 * time.Millisecond)
+	atomic.StoreInt32(&src.broken, 1)
+	time.Sleep(100 * time.Millisecond)
+
+	first := c.Server().At
+	if first.IsZero() {
+		t.Fatal("Server().At is still zero after the source had 100 ms to succeed at least once")
+	}
+
+	time.Sleep(time.Second)
+	second := c.Server().At
+	<-done
+
+	if !second.Equal(first) {
+		t.Fatalf("Server().At moved from %v to %v a second later despite every call in between having failed: it must reflect the last real sample, not the instant it is read", first, second)
+	}
+}
+
+// costFailsCountingSource makes Cost fail on every call while everything
+// else, SampleServer included, keeps succeeding normally, and counts how
+// many times SampleServer(TierCounters) is actually called.
+type costFailsCountingSource struct {
+	*fake.Source
+	counterCalls int32
+}
+
+func (s *costFailsCountingSource) SampleServer(ctx context.Context, tier model.Tier) (model.ServerSample, error) {
+	if tier == model.TierCounters {
+		atomic.AddInt32(&s.counterCalls, 1)
+	}
+	return s.Source.SampleServer(ctx, tier)
+}
+
+func (s *costFailsCountingSource) Cost(context.Context) (model.Cost, error) {
+	return model.Cost{}, errors.New("cost boom")
+}
+
+// TestCollectorCostFailureDoesNotThrottleTheCountersTier kills the mutation
+// of letting a Cost failure alone fail the counters tier: if it did, the
+// tier would back off (floored at one second) instead of sampling at its
+// configured 20 ms period, and a 1 s run would produce one or two calls
+// instead of close to fifty.
+func TestCollectorCostFailureDoesNotThrottleTheCountersTier(t *testing.T) {
+	src := &costFailsCountingSource{Source: fake.New(nil)}
+	w := window.New(time.Minute, 1000)
+	tiers := baseTiers()
+	tiers.Counters = config.Duration(20 * time.Millisecond)
+	c := New(src, w, NewBudget(50, tiers))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	calls := atomic.LoadInt32(&src.counterCalls)
+	t.Logf("Cost failing throughout a 1 s run at a 20 ms counters period: SampleServer(TierCounters) called %d times", calls)
+	if calls < 30 {
+		t.Fatalf("SampleServer(TierCounters) was called only %d times in 1 s at a 20 ms period despite SampleServer itself always succeeding: a failing Cost read must not throttle the tier, want close to 50", calls)
+	}
+}
+
+// TestCollectorCostFailureReachesTheStatusBar kills the mutation of a Cost
+// failure being swallowed instead of surfaced: it asserts the error text
+// actually reaches Status().Message rather than merely trusting the comment
+// above failCost's call site.
+func TestCollectorCostFailureReachesTheStatusBar(t *testing.T) {
+	src := &costFailsCountingSource{Source: fake.New(nil)}
+	w := window.New(time.Minute, 1000)
+	tiers := baseTiers()
+	tiers.Counters = config.Duration(20 * time.Millisecond)
+	c := New(src, w, NewBudget(50, tiers))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	msg := c.Status().Message
+	t.Logf("status message with Cost permanently failing: %q", msg)
+	if !strings.Contains(msg, "reading own cost") {
+		t.Fatalf("status message %q does not mention the cost read failure: a failing Cost must be visible in the status bar, not silent", msg)
+	}
 }
