@@ -48,13 +48,9 @@ real domain.
 
 ## Commits
 
-Commits are authored by the repository owner alone. Do not add
-`Co-Authored-By` or `Claude-Session` trailers, or any other attribution
-footer, to commit messages. This applies to every agent working in this
-repository, not only the main session.
-
-Messages are prose explaining why, not a bullet list of what changed. No bold,
-no em-dashes.
+The rule lives in the machine-wide `~/.claude/CLAUDE.md`: commits carry no
+attribution trailer, and the message is prose explaining why. Repeated here
+only so an agent reading this file alone does not have to guess.
 
 ## Before committing
 
