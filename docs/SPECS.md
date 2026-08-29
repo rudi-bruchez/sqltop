@@ -41,6 +41,59 @@ PostgreSQL and MySQL follow. No SQL Server concept leaks into the core model.
 
 English everywhere. Code, comments, UI, docs.
 
+### 2.1 Implementation principles
+
+KISS, idiomatic Go, and an explicit watch on technical debt. Stated as rules
+that can actually be checked, because a principle nobody can fail is decoration.
+
+Standard library first. A dependency needs a stated reason, in the commit that
+introduces it. The whole budget for the MVP is the SQL Server driver and its
+krb5 provider; `modernc.org/sqlite` joins it only when local persistence
+arrives. Tabulator was measured and rejected rather than kept out of taste, and
+Go dependencies face the same bar.
+
+No abstraction before the second implementation. The `Source` interface earns
+its place because Azure SQL Database is a real second implementation inside the
+MVP, not because PostgreSQL might happen one day. Nothing else gets an interface
+until there are two concrete users of it.
+
+Boring concurrency. One goroutine per collection tier, channels to hand results
+off, one mutex around the retention window. No worker pools, no custom
+scheduler, no clever lock-free structure. The tool spends its time waiting on
+the network, not on CPU.
+
+Errors carry context and are never swallowed. A source that fails degrades what
+the interface shows and says so in the status bar; it does not panic, and it
+does not silently display stale numbers as if they were fresh.
+
+Options must earn themselves. Every entry in the configuration file exists
+because someone would realistically change it. A knob added "in case" is debt
+with a nice name.
+
+Debt is written down, not absorbed. A shortcut is recorded where it lives, with
+the reason and what it would take to undo, the way `bench/README.md` records its
+open items. An undocumented shortcut is the only kind that is unacceptable.
+
+Measure before optimising. There is precedent: the renderer decision cost two
+days of benchmarking and overturned two of my own predictions. Guessing at
+performance in this codebase has a poor track record.
+
+`gofmt` clean and `go vet` clean before any commit.
+
+Test the pure parts and do not mock a database. What deserves tests here is
+arithmetic and shaping: counter delta and ratio computation, blocking-chain
+flattening, retention-window eviction, capability gating, configuration
+resolution order. Testing that a SQL string equals a SQL string proves nothing.
+
+The specific debt risk of this project, worth naming because it is not obvious:
+the hand-rolled renderer growing into a half-finished grid library. It was
+chosen for being ten times cheaper than Tabulator on the refresh loop, not for
+being a framework. Sorting, column resizing and filters are wanted and are
+specified. Virtual columns, plugin systems, a theming engine and a generic
+formatter API are not; each would trade away the reason the thing was chosen.
+If it ever needs those, the honest move is to revisit the measurement, not to
+grow a library by accident.
+
 ## 3. Target and requirements
 
 | Item | MVP | Later |
