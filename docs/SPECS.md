@@ -578,7 +578,32 @@ Never in the loop. `sys.dm_exec_query_plan`, `sys.dm_exec_text_query_plan` and
 Never enabled by the tool. Trace flags, database scoped configurations, and any
 server-wide profiling setting. The tool reads; it does not reconfigure.
 
-## 11. Explicitly not in scope
+## 11. Versioning
+
+The tool reports its own version, and starts at 0.1.
+
+Scheme. Zero-major while the shape can still change: 0.1 is the collector and a
+working request grid, 0.2 adds the dashboard, the views and the plan panel, and
+1.0 is the first version usable by someone who did not write it. Inside that,
+the middle number moves when a milestone lands and the last one when a fix
+ships. Nothing here promises API stability, because there is no API.
+
+Where the number lives. A single constant in `internal/buildinfo`, no build
+flags and no code generation. The commit and the dirty flag come from
+`runtime/debug.ReadBuildInfo`, which the toolchain fills in on its own from Go
+1.18 onward, so a plain `go build` produces a binary that can say exactly which
+tree it came from. Nothing has to be passed at build time for that to work,
+which is the point: a version that depends on the build command is a version
+that is wrong the first time someone builds it differently.
+
+Where it shows. `sqltop --version` prints it and exits. The status endpoint
+carries it, and the interface header shows it beside the instance name, because
+the first question about a bug report is which build produced it.
+
+Releases are tagged `v0.1.0` and so on, matching the constant. The tag is cut
+when the milestone works, not when the constant changes.
+
+## 12. Explicitly not in scope
 
 No headless or unattended capture mode, ever. Servers already have Extended
 Events and tracing for recording without a human present, and they do it better.
@@ -590,7 +615,7 @@ No alerting, no thresholds, no notifications.
 
 No configuration of the monitored server. The tool reads.
 
-## 12. Later versions
+## 13. Later versions
 
 Local persistence. SQLite in pure Go (`modernc.org/sqlite`) for replaying a
 capture after the fact, with the samples, the session and request tables, a
@@ -602,7 +627,7 @@ the DMVs cannot give.
 
 PostgreSQL and MySQL sources.
 
-## 13. Settled
+## 14. Settled
 
 The questions this draft opened have been answered and folded in above: target
 2019 and later with graceful degradation below, Azure SQL Database in the MVP,
@@ -615,7 +640,7 @@ dashboard figures survive on Azure SQL Database has to be confirmed against a
 live instance. The capability mechanism of section 4.1 is what absorbs the
 answer without disturbing the rest.
 
-### 13.1 How the empirical questions get answered
+### 14.1 How the empirical questions get answered
 
 Local SQL Server instances run in Podman, so most of it needs no cloud account
 and no shared server. Development images are already present on the workstation

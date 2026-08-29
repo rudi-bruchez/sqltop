@@ -8,7 +8,9 @@
 
 **Tech Stack:** Go 1.27, standard library, `github.com/microsoft/go-mssqldb` plus its `integratedauth/krb5` provider. No other Go dependency. No front-end framework, no build step.
 
-**Spec:** `docs/SPECS.md` (637 lines, scope settled). Read it alongside this plan; every task argues from a numbered section of it.
+**Version:** this plan delivers 0.1.0. Tag `v0.1.0` when task 14 works, not before.
+
+**Spec:** `docs/SPECS.md` (scope settled). Read it alongside this plan; every task argues from a numbered section of it.
 
 ## Global Constraints
 
@@ -25,6 +27,7 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 - The HTTP server binds `127.0.0.1` only, with no flag to widen it. Default port 8420. Every request carries a per-run token. (Spec 4.3)
 - Only dependency added in this plan: `github.com/microsoft/go-mssqldb` and `github.com/microsoft/go-mssqldb/integratedauth/krb5`. Any other needs a reason in the commit that introduces it. (Spec 2.1)
 - English everywhere: code, comments, commits, UI. (CLAUDE.md)
+- The version is a constant in `internal/buildinfo`, starting at 0.1.0, with the commit taken from `runtime/debug.ReadBuildInfo` and never from build flags. (Spec 11)
 - `gofmt` clean and `go vet ./...` clean before every commit. (Spec 2.1)
 
 ## Scope
@@ -73,6 +76,7 @@ Never mock a database to assert that a SQL string equals a SQL string. (Spec 2.1
 ### Task 1: Module skeleton, dotenv and configuration
 
 **Files:**
+- Create: `internal/buildinfo/buildinfo.go`, `internal/buildinfo/buildinfo_test.go`
 - Create: `internal/dotenv/dotenv.go`, `internal/dotenv/dotenv_test.go`
 - Create: `internal/config/config.go`, `internal/config/config_test.go`
 - Create: `cmd/sqltop/main.go`
@@ -82,6 +86,7 @@ Never mock a database to assert that a SQL string equals a SQL string. (Spec 2.1
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
+  - `buildinfo.Version` constant, `buildinfo.String() string`, `buildinfo.Revision() (rev string, dirty bool)`
   - `dotenv.Load(path string) error`
   - `config.Config` struct with fields `Instances []config.Instance`, `Tiers config.Tiers`, `Retention time.Duration`, `Server config.Server`, `Budget config.Budget`
   - `config.Instance{Name, DSN string}`
@@ -535,7 +540,109 @@ func Load(path string) error {
 Run: `go test ./internal/dotenv/ -v`
 Expected: PASS, two tests.
 
-- [ ] **Step 9: Wire a minimal main that proves resolution works**
+- [ ] **Step 9: Write the failing buildinfo test**
+
+Create `internal/buildinfo/buildinfo_test.go`:
+
+```go
+package buildinfo
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestVersionStartsAtZeroOne(t *testing.T) {
+	if !strings.HasPrefix(Version, "0.1.") {
+		t.Fatalf("Version = %q, want the 0.1 series", Version)
+	}
+}
+
+func TestStringAlwaysCarriesTheVersion(t *testing.T) {
+	got := String()
+	if !strings.Contains(got, Version) {
+		t.Fatalf("String() = %q, want it to contain %q", got, Version)
+	}
+}
+
+func TestRevisionDoesNotPanicWithoutBuildInfo(t *testing.T) {
+	// go test builds without VCS stamping in some configurations, so this
+	// must degrade to an empty revision rather than failing.
+	rev, _ := Revision()
+	if strings.Contains(rev, " ") {
+		t.Fatalf("revision = %q, want a bare hash or nothing", rev)
+	}
+}
+```
+
+- [ ] **Step 10: Run it to verify it fails**
+
+Run: `go test ./internal/buildinfo/ -v`
+Expected: FAIL to build, `undefined: Version`.
+
+- [ ] **Step 11: Implement buildinfo**
+
+Create `internal/buildinfo/buildinfo.go`:
+
+```go
+// Package buildinfo reports which build of sqltop is running.
+//
+// The version is a constant, and the commit comes from the toolchain rather
+// than from build flags: runtime/debug.ReadBuildInfo carries the VCS revision
+// and dirty state that `go build` records on its own. A version that depends
+// on the build command is a version that is wrong the first time someone
+// builds it differently.
+package buildinfo
+
+import "runtime/debug"
+
+// Version follows spec section 11: zero-major while the shape can change.
+// 0.1 is the collector and a working request grid.
+const Version = "0.1.0"
+
+// Revision returns the commit this binary was built from, and whether the
+// tree was dirty. Both are empty and false when the build carried no VCS
+// information, which happens for `go run` and in some test configurations.
+func Revision() (rev string, dirty bool) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false
+	}
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	return rev, dirty
+}
+
+// String is what --version prints and what the interface header shows.
+func String() string {
+	out := "sqltop " + Version
+	rev, dirty := Revision()
+	if rev != "" {
+		if len(rev) > 12 {
+			rev = rev[:12]
+		}
+		out += " (" + rev
+		if dirty {
+			out += ", dirty"
+		}
+		out += ")"
+	}
+	return out
+}
+```
+
+- [ ] **Step 12: Run the buildinfo tests to verify they pass**
+
+Run: `go test ./internal/buildinfo/ -v`
+Expected: PASS, three tests.
+
+- [ ] **Step 13: Wire a minimal main that proves resolution works**
 
 Create `cmd/sqltop/main.go`:
 
@@ -550,6 +657,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/dotenv"
 )
@@ -558,7 +666,13 @@ func main() {
 	configPath := flag.String("config", "", "path to sqltop.json (default: beside the binary, then the user config directory)")
 	envPath := flag.String("env", ".env", "path to the .env file holding secrets")
 	showConfig := flag.Bool("show-config", false, "print the resolved configuration and exit")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(buildinfo.String())
+		return
+	}
 
 	if err := dotenv.Load(*envPath); err != nil {
 		log.Printf("warning: %s: %v", *envPath, err)
@@ -602,15 +716,21 @@ SQLTOP_CONN=
 SQLTOP_TEST_DSN=
 ```
 
-- [ ] **Step 10: Verify the binary resolves and prints defaults**
+- [ ] **Step 14: Verify the version and the resolved defaults**
 
 Run:
+```bash
+go run ./cmd/sqltop -version
+go run ./cmd/sqltop -show-config
+```
+The first prints `sqltop 0.1.0`, with a commit in parentheses when built rather
+than run. Then:
 ```bash
 go run ./cmd/sqltop -show-config
 ```
 Expected: `configuration from: (built-in defaults, no file found)` on stderr, and a JSON document on stdout with `"port": 8420`, `"retention": "15m0s"`, `"requests": "1s"`, `"livePlan": "2s"`, `"maxSamples": 500000`.
 
-- [ ] **Step 11: Verify the no-CGO constraint still holds**
+- [ ] **Step 15: Verify the no-CGO constraint still holds**
 
 Run:
 ```bash
@@ -618,11 +738,17 @@ CGO_ENABLED=0 go build ./... && gofmt -l . && go vet ./...
 ```
 Expected: no output from any of the three.
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 16: Commit**
 
 ```bash
-git add internal/dotenv internal/config cmd/sqltop .env.example
-git commit -m "Add configuration loading and .env support
+git add internal/buildinfo internal/dotenv internal/config cmd/sqltop .env.example
+git commit -m "Add configuration loading, .env support and the version
+
+The version is a constant starting at 0.1.0, and the commit comes from
+runtime/debug.ReadBuildInfo rather than from build flags: a plain go
+build already records the VCS revision and dirty state, so nothing has
+to be passed at build time. A version that depends on the build command
+is wrong the first time someone builds it differently.
 
 Resolution order is explicit --config, then beside the binary, then the
 user configuration directory, first hit wins, so portable and per-user
@@ -3581,6 +3707,7 @@ import (
 	"hash/fnv"
 	"strconv"
 
+	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
@@ -3618,6 +3745,7 @@ type Ref struct {
 }
 
 type StatusPayload struct {
+	Sqltop    string `json:"sqltop"`
 	Connected bool   `json:"connected"`
 	Message   string `json:"message,omitempty"`
 	Instance  string `json:"instance"`
@@ -3683,6 +3811,7 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 		Rows:    make([]Row, 0, len(rows)),
 		Figures: figures,
 		Status: StatusPayload{
+			Sqltop:    buildinfo.String(),
 			Connected: st.Connected,
 			Message:   st.Message,
 			Instance:  st.Info.Instance,
@@ -3873,6 +4002,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/window"
@@ -3926,6 +4056,7 @@ func (s *Server) Handler() http.Handler {
 		st := s.col.Status()
 		oldest, samples, capped := s.win.Depth()
 		writeJSON(rw, map[string]any{
+			"sqltop":    buildinfo.String(),
 			"connected": st.Connected,
 			"message":   st.Message,
 			"instance":  st.Info.Instance,
@@ -4161,7 +4292,7 @@ Expected: PASS, eleven tests.
 
 Replace `internal/web/assets/index.html`, and create `app.js` and `style.css`.
 
-Copy `bench/web/style.css` verbatim except for the Tabulator rule at the end, which has no reason to exist here. Copy the structural half of `bench/web/index.html`: the header, the `plainScroll` container, its table, and the status bar. Drop the four mode radios, the load sliders, the stress controls and the stats tiles; those belong to the bench.
+Copy `bench/web/style.css` verbatim except for the Tabulator rule at the end, which has no reason to exist here. Copy the structural half of `bench/web/index.html`: the header, the `plainScroll` container, its table, and the status bar. Drop the four mode radios, the load sliders, the stress controls and the stats tiles; those belong to the bench. The header needs five ids the script writes into: `build`, `dot`, `instance`, `version`, `message`, plus `rowCount` and `seq` in the status bar. `build` carries `buildinfo.String()`, because the first question about a bug report is which build produced it.
 
 `app.js` keeps exactly the renderer the bench validated, and adds the reference lookup:
 
@@ -4292,6 +4423,7 @@ function layout() {
 
 function applyStatus(st, seq) {
   $("dot").classList.toggle("live", !!st.connected);
+  if (st.sqltop) $("build").textContent = st.sqltop;
   $("instance").textContent = st.instance || "connecting...";
   $("version").textContent = st.version || "";
   $("message").textContent = st.message || "";
