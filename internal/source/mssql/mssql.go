@@ -489,7 +489,3 @@ func (s *Source) QueryText(context.Context, model.RequestRef) (string, error) {
 func (s *Source) Plan(context.Context, model.RequestRef, bool) (model.Plan, error) {
 	return model.Plan{}, errNotInThisPlan
 }
-
-func (s *Source) SampleServer(context.Context, model.Tier) (model.ServerSample, error) {
-	return model.ServerSample{Figures: map[string]model.Figure{}}, nil // task 9
-}

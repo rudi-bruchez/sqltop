@@ -211,3 +211,107 @@ func TestSampleRequestsExcludesItself(t *testing.T) {
 		}
 	}
 }
+
+func TestSampleServerCountersNeedTwoTicks(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := s.SampleServer(ctx, model.TierCounters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := first.Figures["batch_requests_sec"]; !ok {
+		t.Fatal("the key must be present even before it has a value")
+	} else if f.Available {
+		t.Fatal("a rate cannot exist on the first tick")
+	}
+	if f := first.Figures["page_life_expectancy"]; !f.Available || f.Value <= 0 {
+		t.Fatalf("PLE = %+v, want a raw value available immediately", f)
+	}
+	if f := first.Figures["total_server_memory_kb"]; !f.Available || f.Value <= 0 {
+		t.Fatalf("committed memory = %+v, want a positive raw value from the counters", f)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	second, err := s.SampleServer(ctx, model.TierCounters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := second.Figures["batch_requests_sec"]; !f.Available {
+		t.Fatal("the second tick must produce a rate")
+	}
+}
+
+func TestSampleServerSpaceTier(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SampleServer(ctx, model.TierSpace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := got.Figures["tempdb_used_mb"]; !f.Available {
+		t.Fatal("tempdb usage must be available on a container instance")
+	}
+	if _, present := got.Figures["total_server_memory_mb"]; present {
+		t.Fatal("server memory belongs to the counter catalogue, not the space tier: one figure, one source")
+	}
+}
+
+// TestEveryQueryCarriesTheHints guards the three requirements that are easy to
+// forget the day someone adds a query: read uncommitted comes from the session,
+// but RECOMPILE keeps the plan out of the cache and MAXDOP 1 keeps a monitoring
+// query from taking parallel workers on the server it is watching. Both are per
+// statement, and SQL Server allows only one OPTION clause per query, so they
+// have to travel together.
+func TestEveryQueryCarriesTheHints(t *testing.T) {
+	queries := map[string]string{
+		"identify": identifyQuery,
+		"cost":     costQuery,
+		// requestsQueryTemplate, not a built s.requestsQuery: task 8 made the
+		// requests query version- and capability-dependent, built once per
+		// server by buildRequestsQuery (see requests_test.go's
+		// TestBuiltQueryGates for the per-shape check). The trailing OPTION
+		// clause is fixed text in the template, outside every substitution,
+		// so the template alone already proves every built shape carries it.
+		"requests":     requestsQueryTemplate,
+		"counters":     countersQuery,
+		"space":        spaceQuery,
+		"versionStore": versionStoreQuery,
+		"cpuHistory":   cpuHistoryQuery,
+	}
+	for name, q := range queries {
+		if !strings.Contains(q, "OPTION (RECOMPILE, MAXDOP 1)") {
+			t.Errorf("%s query is missing OPTION (RECOMPILE, MAXDOP 1)", name)
+		}
+		if strings.Count(strings.ToUpper(q), "OPTION (") != 1 {
+			t.Errorf("%s query has %d OPTION clauses, SQL Server allows one", name, strings.Count(strings.ToUpper(q), "OPTION ("))
+		}
+	}
+}
+
+func TestUnavailableFigureIsMarkedNotOmitted(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	info, _, err := s.Identify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsAzureSQLDB {
+		t.Skip("this asserts the on-premises path")
+	}
+	got, err := s.SampleServer(ctx, model.TierCPUHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Figures["sql_cpu_percent"]; !ok {
+		t.Fatal("a figure this source cannot produce must still appear with Available false, so one tile can vanish without its neighbours")
+	}
+}
