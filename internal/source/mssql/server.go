@@ -33,8 +33,15 @@ WHERE RTRIM(LTRIM(counter_name)) IN (` + strings.Join(names, ",") + `)
 OPTION (RECOMPILE, MAXDOP 1)`
 }
 
+// SampleServer feeds the dashboard on the slower tiers. Called before
+// Identify has ever run, s.caps is the zero value, so every capability-gated
+// read below finds nothing granted and the sample comes back with every
+// figure present and unavailable rather than an error: an honest, empty
+// dashboard rather than a crash. Task 11 orders Identify before the first
+// SampleServer call, so this is a startup-ordering guard rather than a path
+// the collector is meant to exercise on every tick.
 func (s *Source) SampleServer(ctx context.Context, tier model.Tier) (model.ServerSample, error) {
-	out := model.ServerSample{At: time.Now(), Figures: map[string]model.Figure{}}
+	out := model.ServerSample{At: time.Now()}
 
 	switch tier {
 	case model.TierCounters:
@@ -42,17 +49,31 @@ func (s *Source) SampleServer(ctx context.Context, tier model.Tier) (model.Serve
 		if err != nil {
 			return out, err
 		}
+		// counterState.apply is safe to call concurrently with a query on
+		// this Source only because the collection plan runs one goroutine
+		// per tier (spec section 10); apply itself mutates counterState's
+		// prev/prevAt/seeded fields with no locking of its own. Taking s.mu
+		// here costs nothing on the one-goroutine-per-tier path and stops
+		// that invariant from being the only thing standing between this
+		// call and a data race.
+		s.mu.Lock()
 		out.Figures = s.counter.apply(out.At, raw)
+		s.mu.Unlock()
 
 	case model.TierSpace:
+		out.Figures = map[string]model.Figure{}
 		if err := s.readSpace(ctx, out.Figures); err != nil {
 			return out, err
 		}
 
 	case model.TierCPUHistory:
+		out.Figures = map[string]model.Figure{}
 		if err := s.readCPUHistory(ctx, out.Figures); err != nil {
 			return out, err
 		}
+
+	default:
+		return out, fmt.Errorf("mssql: sample server: unsupported tier %s", tier)
 	}
 	return out, nil
 }
@@ -68,26 +89,14 @@ func (s *Source) snapshot() (model.ServerInfo, model.Capabilities) {
 	return s.info, s.caps
 }
 
-// hasInstanceWideView reports whether sys.dm_os_performance_counters and
-// tempdb.sys.dm_db_file_space_usage are worth attempting. Both require VIEW
-// SERVER STATE (VIEW SERVER PERFORMANCE STATE from SQL Server 2022), which
-// probe already tested as CapInstanceWideView for on-premises and Managed
-// Instance. Azure SQL Database is the one server this was never tested on -
-// probe skips the whole HAS_PERMS_BY_NAME check there, since a scoped single
-// database answers permission questions differently - but the views
-// themselves exist and answer for the current database under a permission
-// commonly granted there. IsAzureSQLDB alone stands in for the untested
-// capability rather than skipping the query outright: the object is not
-// absent, only differently gated.
-func hasInstanceWideView(info model.ServerInfo, caps model.Capabilities) bool {
-	return info.IsAzureSQLDB || caps.Has(model.CapInstanceWideView)
-}
-
 func (s *Source) readCounters(ctx context.Context) (map[string]int64, error) {
-	info, caps := s.snapshot()
-	if !hasInstanceWideView(info, caps) {
-		// Known in advance from the probe: a login without the right would
-		// otherwise pay for a failing round trip every second, forever.
+	_, caps := s.snapshot()
+	if !caps.Has(model.CapInstanceWideView) {
+		// Known in advance from the probe, on every server including Azure
+		// SQL Database (mssql.go's probe tests the capability there too, by
+		// reading the two views themselves rather than asking
+		// HAS_PERMS_BY_NAME): a login without the right would otherwise pay
+		// for a failing round trip every second, forever.
 		return nil, nil
 	}
 
@@ -103,9 +112,9 @@ func (s *Source) readCounters(ctx context.Context) (map[string]int64, error) {
 	})
 	if err != nil {
 		if isCapabilityAbsent(err) {
-			// The one case hasInstanceWideView could not rule out ahead of
-			// time: an Azure SQL Database tier whose service objective needs
-			// a role this login does not hold.
+			// The probe answered "yes" and rights changed since, or a rare
+			// permission edge the probe's own query did not hit. Either way
+			// the server itself said no, not the connection.
 			return nil, nil
 		}
 		return nil, fmt.Errorf("mssql: counters: %w", err)
@@ -115,7 +124,13 @@ func (s *Source) readCounters(ctx context.Context) (map[string]int64, error) {
 	for _, d := range counterDefs {
 		for k, v := range byName {
 			obj, n, _ := strings.Cut(k, "|")
-			if !strings.HasSuffix(obj, d.object) {
+			// ":"+d.object, not d.object alone: two object names that share
+			// a trailing word - "Buffer Manager" and "Memory Manager" both
+			// end in "Manager" - must not be able to match each other's
+			// suffix. The colon is what SQL Server always puts right before
+			// the object name, so anchoring on it makes this an exact match
+			// at the same cost as the loose one.
+			if !strings.HasSuffix(obj, ":"+d.object) {
 				continue
 			}
 			if n == d.name {
@@ -136,9 +151,9 @@ func (s *Source) readCounters(ctx context.Context) (map[string]int64, error) {
 //
 // Every column read here has been on sys.dm_db_file_space_usage since before
 // SQL Server 2012, the tool's own floor (spec section 3), so nothing here
-// needs a version gate. It does need the capability gate hasInstanceWideView
-// applies in readSpace: the permission this view requires is the same one
-// the performance counters need.
+// needs a version gate. It does need the capability gate readSpace applies:
+// the permission this view requires is the same one the performance
+// counters need, CapInstanceWideView.
 const spaceQuery = `
 SELECT
     (SELECT SUM(user_object_reserved_page_count + internal_object_reserved_page_count
@@ -161,11 +176,11 @@ SELECT ISNULL(SUM(reserved_space_kb), 0) FROM sys.dm_tran_version_store_space_us
 OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) error {
-	info, caps := s.snapshot()
+	_, caps := s.snapshot()
 
 	into["tempdb_used_mb"] = model.Figure{Unit: "MB", Available: false}
 	into["tempdb_free_mb"] = model.Figure{Unit: "MB", Available: false}
-	if hasInstanceWideView(info, caps) {
+	if caps.Has(model.CapInstanceWideView) {
 		var usedMB, freeMB float64
 		err := s.queryRow(ctx, spaceQuery, &usedMB, &freeMB)
 		switch {
@@ -173,8 +188,8 @@ func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) er
 			into["tempdb_used_mb"] = model.Figure{Value: usedMB, Unit: "MB", Available: true}
 			into["tempdb_free_mb"] = model.Figure{Value: freeMB, Unit: "MB", Available: true}
 		case isCapabilityAbsent(err):
-			// Left unavailable above: the Azure SQL Database case
-			// hasInstanceWideView could not rule out ahead of time.
+			// Left unavailable above: the probe said yes and rights changed
+			// since, the same edge readCounters allows for.
 		default:
 			return fmt.Errorf("mssql: space: %w", err)
 		}
@@ -189,8 +204,14 @@ func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) er
 	into["version_store_mb"] = model.Figure{Unit: "MB", Available: false}
 	if caps.Has(model.CapVersionStoreUsage) {
 		var kb float64
-		if err := s.queryRow(ctx, versionStoreQuery, &kb); err == nil {
+		err := s.queryRow(ctx, versionStoreQuery, &kb)
+		switch {
+		case err == nil:
 			into["version_store_mb"] = model.Figure{Value: kb / 1024.0, Unit: "MB", Available: true}
+		case isCapabilityAbsent(err):
+			// Left unavailable above.
+		default:
+			return fmt.Errorf("mssql: version store: %w", err)
 		}
 	}
 	return nil
@@ -227,10 +248,36 @@ func (s *Source) readCPUHistory(ctx context.Context, into map[string]model.Figur
 		return nil
 	}
 	var sqlCPU, idle int
-	if err := s.queryRow(ctx, cpuHistoryQuery, &sqlCPU, &idle); err != nil {
+	err := s.queryRow(ctx, cpuHistoryQuery, &sqlCPU, &idle)
+	switch {
+	case err == nil:
+		// fall through to the figures below
+	case isCapabilityAbsent(err):
 		return nil // absent history is not an error, it is an unavailable figure
+	default:
+		return err
 	}
+
 	into["sql_cpu_percent"] = model.Figure{Value: float64(sqlCPU), Unit: "%", Available: true}
-	into["other_cpu_percent"] = model.Figure{Value: float64(100 - idle - sqlCPU), Unit: "%", Available: true}
+
+	// SystemIdle is not populated by SQL Server on Linux: every record this
+	// tool has read from a Linux container's ring buffer carries idle == 0
+	// while ProcessUtilization moves normally, which is also the platform
+	// this project's own tests run on. Publishing other = 100 - idle - sqlCPU
+	// there would report other processes pegged at 100% forever on a box
+	// sitting idle, exactly the plausible-looking lie Available exists to
+	// prevent. This costs a true reading on a genuinely saturated Windows
+	// host, where idle is populated and the subtraction means something, but
+	// unavailable beats wrong.
+	if idle > 0 {
+		other := 100 - idle - sqlCPU
+		if other < 0 {
+			// Rounding across two independently sampled percentages can
+			// undershoot zero by a point or two; a negative "other" is not
+			// a plausible reading either.
+			other = 0
+		}
+		into["other_cpu_percent"] = model.Figure{Value: float64(other), Unit: "%", Available: true}
+	}
 	return nil
 }

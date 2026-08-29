@@ -369,6 +369,24 @@ func majorVersion(product string) int {
 	return n
 }
 
+// canQueryTemplate is can's shape, named so the query-hint sweep in
+// mssql_test.go can see it without duplicating it: %s is the DM object,
+// substituted with fmt.Sprintf rather than concatenation.
+const canQueryTemplate = "SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS x FROM %s) AS probe OPTION (RECOMPILE, MAXDOP 1)"
+
+// instanceWideViewGrantQuery answers, on a real instance or a managed
+// instance, whether this login holds the right that gates
+// sys.dm_os_performance_counters and sys.dm_db_file_space_usage: VIEW
+// SERVER STATE, or VIEW SERVER PERFORMANCE STATE from SQL Server 2022.
+// Azure SQL Database has no server-level state to hold that right over, so
+// probe answers the same question for it a different way - see the
+// IsAzureSQLDB branch below.
+const instanceWideViewGrantQuery = `
+SELECT CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1
+              OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1
+         THEN 1 ELSE 0 END
+OPTION (RECOMPILE, MAXDOP 1)`
+
 // probe asks the server what actually works rather than inferring rights from
 // the version. A login can hold VIEW SERVER STATE on paper and be denied one
 // view, and Azure SQL Database quietly returns only the current session when
@@ -390,7 +408,7 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 	// error means the connection died mid-probe and is returned instead.
 	can := func(from string) (bool, error) {
 		var n int
-		q := "SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS x FROM " + from + ") AS probe OPTION (RECOMPILE, MAXDOP 1)"
+		q := fmt.Sprintf(canQueryTemplate, from)
 		err := s.queryRow(ctx, q, &n)
 		switch {
 		case err == nil:
@@ -402,22 +420,43 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 		}
 	}
 
+	// CapInstanceWideView means whichever right actually gates the two
+	// server.go tiers that need it: VIEW SERVER STATE or VIEW SERVER
+	// PERFORMANCE STATE on a real instance or a managed instance, and the
+	// database-scoped equivalent on Azure SQL Database, which has no
+	// server-level state to hold that right over. Different rights, same
+	// question: can this login read sys.dm_os_performance_counters and
+	// sys.dm_db_file_space_usage.
 	if !info.IsAzureSQLDB {
 		// Ask the server what the login holds rather than counting visible
 		// sessions. Counting works in practice, since an instance always has
 		// dozens of system sessions, but it answers a different question and
 		// would be wrong the day it is asked on something quieter.
 		var granted int
-		err := s.queryRow(ctx,
-			`SELECT CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1
-			              OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1
-			         THEN 1 ELSE 0 END
-			 OPTION (RECOMPILE, MAXDOP 1)`, &granted)
+		err := s.queryRow(ctx, instanceWideViewGrantQuery, &granted)
 		switch {
 		case err == nil && granted == 1:
 			caps = caps.With(model.CapInstanceWideView)
 		case err != nil && !isCapabilityAbsent(err):
 			return 0, err
+		}
+	} else {
+		// A scoped single database cannot be asked about server-level
+		// state, so the question becomes whether the login can actually
+		// read the two views the capability gates, tested the same way
+		// every other DMV capability here is tested. Both are required:
+		// either succeeding alone would leave the other tier gated open
+		// onto a query that fails every tick.
+		countersOK, err := can("sys.dm_os_performance_counters")
+		if err != nil {
+			return 0, err
+		}
+		spaceOK, err := can("tempdb.sys.dm_db_file_space_usage")
+		if err != nil {
+			return 0, err
+		}
+		if countersOK && spaceOK {
+			caps = caps.With(model.CapInstanceWideView)
 		}
 	}
 

@@ -286,6 +286,14 @@ func TestEveryQueryCarriesTheHints(t *testing.T) {
 		"space":        spaceQuery,
 		"versionStore": versionStoreQuery,
 		"cpuHistory":   cpuHistoryQuery,
+		"spid":         spidQuery,
+		// instanceWideViewGrantQuery and canQueryTemplate are probe's own
+		// queries (mssql.go): easy to forget here because probe runs once,
+		// inside Identify, rather than on a collection tier, but they carry
+		// the same RECOMPILE/MAXDOP 1 obligation as every other statement
+		// this source sends.
+		"instanceWideViewGrant": instanceWideViewGrantQuery,
+		"can":                   canQueryTemplate,
 	}
 	for name, q := range queries {
 		if !strings.Contains(q, "OPTION (RECOMPILE, MAXDOP 1)") {
@@ -313,5 +321,36 @@ func TestUnavailableFigureIsMarkedNotOmitted(t *testing.T) {
 	}
 	if _, ok := got.Figures["sql_cpu_percent"]; !ok {
 		t.Fatal("a figure this source cannot produce must still appear with Available false, so one tile can vanish without its neighbours")
+	}
+}
+
+// TestOtherCPUPercentUnavailableWhenIdleIsZero guards a fabrication that
+// reached the container running these tests: SQL Server on Linux never
+// populates SystemIdle in the scheduler-monitor ring buffer record, so a
+// straight 100-idle-sqlCPU would report other processes pegged at 100% of
+// the CPU on a box that is otherwise idle, marked Available. Skips rather
+// than asserts the opposite on any engine where SystemIdle turns out to be
+// populated, since the figure is legitimately available there.
+func TestOtherCPUPercentUnavailableWhenIdleIsZero(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var sqlCPU, idle int
+	if err := s.queryRow(ctx, cpuHistoryQuery, &sqlCPU, &idle); err != nil {
+		t.Skip("no scheduler-monitor record available yet on this engine")
+	}
+	if idle != 0 {
+		t.Skip("this engine populates SystemIdle; the Linux gap this test guards does not apply here")
+	}
+
+	got, err := s.SampleServer(ctx, model.TierCPUHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := got.Figures["other_cpu_percent"]; f.Available {
+		t.Fatalf("other_cpu_percent = %+v with idle == 0, want unavailable rather than a fabricated 100%%", f)
 	}
 }
