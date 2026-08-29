@@ -2024,7 +2024,7 @@ observation budget gets measured in server CPU rather than round-trip."
 - Consumes: `source.Source`, `model.*`.
 - Produces: `mssql.New() *mssql.Source` satisfying `source.Source`, and `mssql.ErrVersionTooOld`.
 
-Three requirements apply to every query this package sends, and `TestEveryQueryCarriesTheHints` enforces two of them mechanically. The session runs `READ UNCOMMITTED`, set through the connector's `SessionInitSQL` so it survives a reset rather than being a one-off after the first connect. Every statement ends with `OPTION (RECOMPILE, MAXDOP 1)`: `RECOMPILE` so the collector's own queries do not accumulate in the plan cache of the server it is watching, and `MAXDOP 1` so a monitoring query never takes parallel workers. They share one clause because SQL Server allows only one per statement.
+Three requirements apply to every query this package sends. `TestEveryQueryCarriesTheHints` enforces two of them mechanically, and lives in task 9 because it sweeps every query constant in the package and the last of them is not written until then. The session runs `READ UNCOMMITTED`, set through the connector's `SessionInitSQL` so it survives a reset rather than being a one-off after the first connect. Every statement ends with `OPTION (RECOMPILE, MAXDOP 1)`: `RECOMPILE` so the collector's own queries do not accumulate in the plan cache of the server it is watching, and `MAXDOP 1` so a monitoring query never takes parallel workers. They share one clause because SQL Server allows only one per statement.
 
 The preflight probes rather than infers. A login may hold `VIEW SERVER STATE` on paper and be denied a specific view, and Azure SQL Database returns only the current session when the right is missing rather than failing. Spec 3.1 and 3.2.
 
@@ -2105,31 +2105,6 @@ func TestSatisfiesSource(t *testing.T) {
 	var _ source.Source = New()
 }
 
-// TestEveryQueryCarriesTheHints guards the three requirements that are easy to
-// forget the day someone adds a query: read uncommitted comes from the session,
-// but RECOMPILE keeps the plan out of the cache and MAXDOP 1 keeps a monitoring
-// query from taking parallel workers on the server it is watching. Both are per
-// statement, and SQL Server allows only one OPTION clause per query, so they
-// have to travel together.
-func TestEveryQueryCarriesTheHints(t *testing.T) {
-	queries := map[string]string{
-		"identify":   identifyQuery,
-		"cost":       costQuery,
-		"requests":   requestsQuery,
-		"counters":   countersQuery,
-		"space":      spaceQuery,
-		"cpuHistory": cpuHistoryQuery,
-	}
-	for name, q := range queries {
-		if !strings.Contains(q, "OPTION (RECOMPILE, MAXDOP 1)") {
-			t.Errorf("%s query is missing OPTION (RECOMPILE, MAXDOP 1)", name)
-		}
-		if strings.Count(strings.ToUpper(q), "OPTION (") != 1 {
-			t.Errorf("%s query has %d OPTION clauses, SQL Server allows one", name, strings.Count(strings.ToUpper(q), "OPTION ("))
-		}
-	}
-}
-
 func TestSessionIsReadUncommitted(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
@@ -2145,29 +2120,6 @@ func TestSessionIsReadUncommitted(t *testing.T) {
 	}
 	if level != "read uncommitted" {
 		t.Fatalf("isolation level = %q, want read uncommitted: a monitoring tool must not take shared locks on the server it is watching", level)
-	}
-}
-
-func TestIsolationSurvivesASessionReset(t *testing.T) {
-	// SessionInitSQL is what makes this true. A one-off SET after connecting
-	// would be lost the moment database/sql resets or re-establishes the
-	// connection, and the tool would start locking without anyone noticing.
-	s := open(t)
-	ctx := context.Background()
-
-	for i := 0; i < 5; i++ {
-		if _, err := s.SampleRequests(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var level int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT transaction_isolation_level FROM sys.dm_exec_sessions
-		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level); err != nil {
-		t.Fatal(err)
-	}
-	if level != 1 {
-		t.Fatalf("isolation level = %d after several queries, want 1", level)
 	}
 }
 
@@ -2586,6 +2538,29 @@ func TestSampleRequestsSeesALongQuery(t *testing.T) {
 	}
 }
 
+func TestIsolationSurvivesASessionReset(t *testing.T) {
+	// SessionInitSQL is what makes this true. A one-off SET after connecting
+	// would be lost the moment database/sql resets or re-establishes the
+	// connection, and the tool would start locking without anyone noticing.
+	s := open(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.SampleRequests(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var level int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT transaction_isolation_level FROM sys.dm_exec_sessions
+		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level); err != nil {
+		t.Fatal(err)
+	}
+	if level != 1 {
+		t.Fatalf("isolation level = %d after several queries, want 1", level)
+	}
+}
+
 func TestSampleRequestsExcludesItself(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
@@ -2747,7 +2722,7 @@ Each tier answers a different question at a different price, which is the whole 
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `internal/source/mssql/mssql_test.go`:
+Append to `internal/source/mssql/mssql_test.go`. `TestEveryQueryCarriesTheHints` sweeps every query constant in the package, so it lands here, with the last of them:
 
 ```go
 func TestSampleServerCountersNeedTwoTicks(t *testing.T) {
@@ -2768,6 +2743,9 @@ func TestSampleServerCountersNeedTwoTicks(t *testing.T) {
 	}
 	if f := first.Figures["page_life_expectancy"]; !f.Available || f.Value <= 0 {
 		t.Fatalf("PLE = %+v, want a raw value available immediately", f)
+	}
+	if f := first.Figures["total_server_memory_kb"]; !f.Available || f.Value <= 0 {
+		t.Fatalf("committed memory = %+v, want a positive raw value from the counters", f)
 	}
 
 	time.Sleep(1200 * time.Millisecond)
@@ -2795,8 +2773,33 @@ func TestSampleServerSpaceTier(t *testing.T) {
 	if f := got.Figures["tempdb_used_mb"]; !f.Available {
 		t.Fatal("tempdb usage must be available on a container instance")
 	}
-	if f := got.Figures["total_server_memory_mb"]; !f.Available || f.Value <= 0 {
-		t.Fatalf("committed memory = %+v, want a positive value", f)
+	if _, present := got.Figures["total_server_memory_mb"]; present {
+		t.Fatal("server memory belongs to the counter catalogue, not the space tier: one figure, one source")
+	}
+}
+
+// TestEveryQueryCarriesTheHints guards the three requirements that are easy to
+// forget the day someone adds a query: read uncommitted comes from the session,
+// but RECOMPILE keeps the plan out of the cache and MAXDOP 1 keeps a monitoring
+// query from taking parallel workers on the server it is watching. Both are per
+// statement, and SQL Server allows only one OPTION clause per query, so they
+// have to travel together.
+func TestEveryQueryCarriesTheHints(t *testing.T) {
+	queries := map[string]string{
+		"identify":   identifyQuery,
+		"cost":       costQuery,
+		"requests":   requestsQuery,
+		"counters":   countersQuery,
+		"space":      spaceQuery,
+		"cpuHistory": cpuHistoryQuery,
+	}
+	for name, q := range queries {
+		if !strings.Contains(q, "OPTION (RECOMPILE, MAXDOP 1)") {
+			t.Errorf("%s query is missing OPTION (RECOMPILE, MAXDOP 1)", name)
+		}
+		if strings.Count(strings.ToUpper(q), "OPTION (") != 1 {
+			t.Errorf("%s query has %d OPTION clauses, SQL Server allows one", name, strings.Count(strings.ToUpper(q), "OPTION ("))
+		}
 	}
 }
 
@@ -2926,27 +2929,26 @@ func (s *Source) readCounters(ctx context.Context) (map[string]int64, error) {
 	return raw, nil
 }
 
+// spaceQuery covers only what the performance counters do not. Server memory
+// lives in the counter catalogue instead, both because it belongs in the same
+// single round trip as the rest and because memory pressure moves faster than
+// the five second space tier would show it.
 const spaceQuery = `
 SELECT
     (SELECT SUM(user_object_reserved_page_count + internal_object_reserved_page_count
               + version_store_reserved_page_count) * 8.0 / 1024.0
        FROM tempdb.sys.dm_db_file_space_usage),
     (SELECT SUM(unallocated_extent_page_count) * 8.0 / 1024.0
-       FROM tempdb.sys.dm_db_file_space_usage),
-    (SELECT committed_kb / 1024.0 FROM sys.dm_os_sys_info),
-    (SELECT committed_target_kb / 1024.0 FROM sys.dm_os_sys_info)
+       FROM tempdb.sys.dm_db_file_space_usage)
 OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) error {
-	var usedMB, freeMB, committedMB, targetMB float64
-	err := s.db.QueryRowContext(ctx, spaceQuery).Scan(&usedMB, &freeMB, &committedMB, &targetMB)
-	if err != nil {
+	var usedMB, freeMB float64
+	if err := s.db.QueryRowContext(ctx, spaceQuery).Scan(&usedMB, &freeMB); err != nil {
 		return fmt.Errorf("mssql: space: %w", err)
 	}
 	into["tempdb_used_mb"] = model.Figure{Value: usedMB, Unit: "MB", Available: true}
 	into["tempdb_free_mb"] = model.Figure{Value: freeMB, Unit: "MB", Available: true}
-	into["total_server_memory_mb"] = model.Figure{Value: committedMB, Unit: "MB", Available: true}
-	into["target_server_memory_mb"] = model.Figure{Value: targetMB, Unit: "MB", Available: true}
 
 	// Version store is its own view and its own capability: cheap by
 	// documentation, since it does not walk individual version records.
