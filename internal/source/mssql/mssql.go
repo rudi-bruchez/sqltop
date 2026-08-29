@@ -51,9 +51,25 @@ type Source struct {
 	info    model.ServerInfo
 	caps    model.Capabilities
 	counter *counterState
+
+	// requestsQuery is what SampleRequests actually sends, built once by
+	// Identify from the version and capabilities it just found: r.dop does
+	// not exist before SQL Server 2016, and sys.dm_db_task_space_usage needs
+	// a right a login may not hold. New sets it from a zero-value
+	// model.ServerInfo and model.Capabilities, which is already the fully
+	// conservative build - see buildRequestsQuery - so a SampleRequests
+	// called before Identify still returns real rows, with dop and
+	// tempdb_mb pinned at zero, rather than erroring or blocking on a
+	// version nobody has probed yet.
+	requestsQuery string
 }
 
-func New() *Source { return &Source{counter: newCounterState()} }
+func New() *Source {
+	return &Source{
+		counter:       newCounterState(),
+		requestsQuery: buildRequestsQuery(model.ServerInfo{}, 0),
+	}
+}
 
 // sessionInit runs once, when the pinned connection is first established, and
 // again on the rare re-pin after Source has discovered the previous
@@ -125,9 +141,11 @@ func (s *Source) Close() error {
 
 // connLocked returns the pinned connection, re-pinning a fresh one from the
 // pool if the previous one was declared dead, and re-reading @@SPID onto it:
-// a re-pinned connection is a different session, and s.spid naming the wrong
-// one would make the request sampler exclude the wrong session instead of
-// the tool's own. Callers must hold s.mu.
+// a re-pinned connection is a different session, and s.spid would otherwise
+// keep naming a session that no longer exists. The request sampler excludes
+// the tool's own session by writing @@SPID directly into its query, not by
+// comparing against s.spid; s.spid is read only by tests today. Callers must
+// hold s.mu.
 //
 // Returns sql.ErrConnDone, the same failure a dead pinned connection reports,
 // if Close has already torn the pool down; nothing here may dereference a nil
@@ -182,18 +200,72 @@ func (s *Source) queryRow(ctx context.Context, query string, dest ...any) error 
 		return err
 	}
 	err = conn.QueryRowContext(ctx, query).Scan(dest...)
+	s.repairLocked(conn, err)
+	return err
+}
+
+// query runs one query under the same lock queryRow uses, holding it for the
+// whole query-plus-scan cycle rather than just the call that starts it: a
+// *sql.Conn can have another batch put on the wire while a previous result
+// set is still streaming, and here the result set streams over the pinned
+// connection across the whole rows.Next() loop, not just QueryContext.
+//
+// scan is called once per row, with s.mu held; it must not call back into
+// Source. rows.Close() runs inside an inner closure so it happens - even on
+// a panic in scan, during the unwind - before repairLocked gets to look at
+// the connection: closing a stream and then asking whether the connection
+// survived it is a different question from asking mid-stream.
+func (s *Source) query(ctx context.Context, q string, scan func(*sql.Rows) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conn, err := s.connLocked(ctx)
+	if err != nil {
+		return err
+	}
+
+	err = func() error {
+		rows, err := conn.QueryContext(ctx, q)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			if err := scan(rows); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	}()
+
+	s.repairLocked(conn, err)
+	return err
+}
+
+// repairLocked closes and drops the pinned connection when err shows it is
+// dead, so the next connLocked call re-pins a fresh one from the pool
+// instead of handing out a connection nothing can use again. Callers must
+// hold s.mu.
+//
+// Close it, not just drop the reference: database/sql's pool still counts
+// this *sql.Conn as open and in use until Close says otherwise, and with
+// MaxOpenConns(1) the next pool.Conn(ctx) inside connLocked would block
+// forever waiting for a slot that only Close frees. The underlying
+// transport close is local, not a network round trip to a server that may
+// already be gone, so this does not block on the dead connection either.
+//
+// conn.Close() runs before s.db is cleared, not the other way around, even
+// though nothing can observe the field between the two statements while
+// s.mu is held: clearing s.db first would leave the invariant "the pool has
+// a free slot whenever s.db is nil" false for the duration of the Close
+// call, and the next person reading this in a different order would have no
+// way to tell that from an oversight.
+func (s *Source) repairLocked(conn *sql.Conn, err error) {
 	if err != nil && (errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) || connDeadLocked(conn)) {
-		// Close it, not just drop the reference: database/sql's pool still
-		// counts this *sql.Conn as open and in use until Close says
-		// otherwise, and with MaxOpenConns(1) the next pool.Conn(ctx) inside
-		// connLocked would block forever waiting for a slot that only Close
-		// frees. The underlying transport close is local, not a network
-		// round trip to a server that may already be gone, so this does not
-		// block on the dead connection either.
 		conn.Close()
 		s.db = nil
 	}
-	return err
 }
 
 // connDeadLocked reports whether the driver has already marked conn dead,
@@ -271,11 +343,13 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 		return info, 0, fmt.Errorf("mssql: probing capabilities: %w", err)
 	}
 
-	// Nothing outside reads s.info/s.caps yet, but task 8 and 9 sampling
-	// goroutines will, while the collector may be re-identifying, so the
-	// write goes under the same lock every query uses.
+	// Task 9's sampling goroutine reads s.info/s.caps, while the collector
+	// may be re-identifying, so the write goes under the same lock every
+	// query uses. requestsQuery is rebuilt here rather than kept as a fixed
+	// const so it matches what this server and this login actually support.
 	s.mu.Lock()
 	s.info, s.caps = info, caps
+	s.requestsQuery = buildRequestsQuery(info, caps)
 	s.mu.Unlock()
 
 	return info, caps, nil

@@ -151,6 +151,15 @@ func TestSampleRequestsSeesALongQuery(t *testing.T) {
 	if found.Command == "" {
 		t.Error("command must be filled: it is a filter and sort column")
 	}
+	if !strings.Contains(found.Program, "go-mssqldb") {
+		t.Errorf("program = %q, want the driver's default app name: a transposition in the login_name/host_name/program_name block would still pass every other check here", found.Program)
+	}
+	if found.Host == "" {
+		t.Error("host must be filled")
+	}
+	if found.Program == found.Host {
+		t.Error("program and host are adjacent same-typed columns from the same table; equal values would hide a transposition between them")
+	}
 	if found.ElapsedMs <= 0 {
 		t.Errorf("elapsed = %d ms, want a positive value after 1.5 seconds", found.ElapsedMs)
 	}
