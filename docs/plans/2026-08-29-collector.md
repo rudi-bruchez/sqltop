@@ -1593,6 +1593,7 @@ Create `internal/source/mssql/counters.go`:
 package mssql
 
 import (
+	"maps"
 	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
@@ -1713,9 +1714,12 @@ func (s *counterState) apply(at time.Time, raw map[string]int64) map[string]mode
 		}
 	}
 
-	for k, v := range raw {
-		s.prev[k] = v
-	}
+	// Replace rather than merge. A counter that drops out of one reading and
+	// returns later must not be differentiated against a stale value from
+	// several ticks ago: that would produce an inflated rate that still looks
+	// plausible. Losing its history means it reports unavailable for one tick
+	// and then resumes correctly.
+	s.prev = maps.Clone(raw)
 	s.prevAt = at
 	s.seeded = true
 	return out
@@ -1725,7 +1729,9 @@ func (s *counterState) apply(at time.Time, raw map[string]int64) map[string]mode
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `go test ./internal/source/mssql/ -v`
-Expected: PASS, eight tests.
+Expected: PASS, eleven tests. Three of them were added by this task's first
+review: a catalogue key absent from the reading, a genuine zero rate, and a
+counter that vanishes and returns without inventing a rate.
 
 - [ ] **Step 5: Commit**
 
