@@ -124,8 +124,19 @@ type ServerInfo struct {
 	ProductVersion string
 	MajorVersion   int
 	IsAzureSQLDB   bool
+	IsAzureMI      bool
 	StartedAt      time.Time
 }
+
+// IsAzure reports whether this is one of the Azure engines, whose reported
+// product version says nothing about their feature level: both answer 12.0.x
+// while sitting at or above the newest boxed release. Every decision that
+// would otherwise read MajorVersion to gate a feature has to ask this first,
+// or Azure gets treated as SQL Server 2014 and loses columns it has.
+//
+// IsAzureSQLDB on its own stays the right question for the other kind of
+// decision, the one about what a scoped single database does not have at all.
+func (i ServerInfo) IsAzure() bool { return i.IsAzureSQLDB || i.IsAzureMI }
 
 // Plan is deliberately opaque. Showplan XML, an EXPLAIN tree and a MySQL plan
 // have nothing in common, so the renderer dispatches on Format rather than the

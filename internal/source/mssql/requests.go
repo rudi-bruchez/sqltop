@@ -89,7 +89,7 @@ OPTION (RECOMPILE, MAXDOP 1)`
 // SampleRequests on the same connection.
 func buildRequestsQuery(info model.ServerInfo, caps model.Capabilities) string {
 	dopExpr := "0"
-	if info.IsAzureSQLDB || info.MajorVersion >= 13 {
+	if info.IsAzure() || info.MajorVersion >= 13 {
 		dopExpr = "ISNULL(r.dop, 0)"
 	}
 

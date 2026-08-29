@@ -331,10 +331,13 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	info.Edition = edition.String
 	info.ProductVersion = version.String
 	info.MajorVersion = majorVersion(version.String)
-	// EngineEdition 5 is Azure SQL Database, 8 is Managed Instance.
+	// EngineEdition 5 is Azure SQL Database, 8 is Managed Instance. The two
+	// are kept apart because they differ in what they expose: a scoped single
+	// database has no instance-wide DMVs, a managed instance does.
 	info.IsAzureSQLDB = engineEdition == 5
+	info.IsAzureMI = engineEdition == 8
 
-	if !info.IsAzureSQLDB && info.MajorVersion > 0 && info.MajorVersion < 11 {
+	if !info.IsAzure() && info.MajorVersion > 0 && info.MajorVersion < 11 {
 		return info, 0, fmt.Errorf("%w (found %s)", ErrVersionTooOld, info.ProductVersion)
 	}
 
@@ -434,12 +437,13 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 		},
 		{
 			// Lightweight profiling v3 is on by default from 2019 and on
-			// Azure SQL Database. Below that it needs trace flag 7412, which
-			// the tool will not set, so the feature is simply absent. Spec
-			// section 3.
+			// both Azure engines, whose 12.0.x product version would
+			// otherwise read as 2014 here. Below that it needs trace flag
+			// 7412, which the tool will not set, so the feature is simply
+			// absent. Spec section 3.
 			from: "sys.dm_exec_query_statistics_xml(@@SPID)",
 			cap:  model.CapLivePlanProgress,
-			skip: !info.IsAzureSQLDB && info.MajorVersion < 15,
+			skip: !info.IsAzure() && info.MajorVersion < 15,
 		},
 	}
 	for _, c := range checks {

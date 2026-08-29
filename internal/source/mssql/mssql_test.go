@@ -160,6 +160,12 @@ func TestSampleRequestsSeesALongQuery(t *testing.T) {
 	if found.Program == found.Host {
 		t.Error("program and host are adjacent same-typed columns from the same table; equal values would hide a transposition between them")
 	}
+	if found.Login == "" {
+		t.Error("login must be filled")
+	}
+	if found.Login == found.Host {
+		t.Error("login and host swapped would leave both assertions above passing; they have to differ for the block to be pinned")
+	}
 	if found.ElapsedMs <= 0 {
 		t.Errorf("elapsed = %d ms, want a positive value after 1.5 seconds", found.ElapsedMs)
 	}
