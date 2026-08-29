@@ -15,7 +15,7 @@ Settled before any of it was written:
 - The main-screen renderer, chosen by measurement over four candidates. The
   hand-rolled virtualised grid refreshes in 4.8 ms against Tabulator's 46.8 at
   800 rows, freezes for none of the wall clock against 5 to 17 %, and never
-  loses the selected row. `bench/` keeps the harness that proved it.
+  loses the selected row. The measurements are in `docs/SPECS.md` section 10.1.
 - The wire protocol, which sends per-session invariants once rather than every
   tick after the bench measured 47 % of the payload as redundant.
 - The observation budget, measured as server CPU from the tool's own session

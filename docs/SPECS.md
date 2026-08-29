@@ -4,7 +4,7 @@ A `top` for SQL servers. Real-time view of what an instance is doing right now,
 with enough short history to review a query after it has finished.
 
 Status: scope settled. Supersedes the initial French sketch (see git history). The
-rendering strategy is already settled by measurement, see `bench/README.md`.
+rendering strategy is already settled by measurement, recorded in section 10.1.
 
 ## 1. Purpose
 
@@ -71,8 +71,7 @@ because someone would realistically change it. A knob added "in case" is debt
 with a nice name.
 
 Debt is written down, not absorbed. A shortcut is recorded where it lives, with
-the reason and what it would take to undo, the way `bench/README.md` records its
-open items. An undocumented shortcut is the only kind that is unacceptable.
+the reason and what it would take to undo. An undocumented shortcut is the only kind that is unacceptable.
 
 Measure before optimising. There is precedent: the renderer decision cost two
 days of benchmarking and overturned two of my own predictions. Guessing at
@@ -170,7 +169,7 @@ what the rate and ratio counters differentiate against.
 
 Presentation. A local HTTP server, embedded assets, SSE push to the browser. The
 grid is a hand-rolled virtualised renderer; Tabulator was measured and rejected
-(`bench/README.md`).
+(section 10.1).
 
 ### 4.1 The source layer
 
@@ -577,6 +576,66 @@ Never in the loop. `sys.dm_exec_query_plan`, `sys.dm_exec_text_query_plan` and
 
 Never enabled by the tool. Trace flags, database scoped configurations, and any
 server-wide profiling setting. The tool reads; it does not reconfigure.
+
+### 10.1 The measurements behind these numbers
+
+The rendering budget and the wire protocol are not estimates. Four strategies
+were built against a synthetic load and measured before any of this was
+specified. The harness that produced them is a local one, deliberately not
+tracked in this repository, so its results live here.
+
+Chrome 151, Linux x86_64, 800 rows, 1 Hz, 5 % churn:
+
+| Renderer | Ticks | apply p50 | apply p95 | frame p95 | Time frozen | Scroll lost | Selection lost |
+|---|---|---|---|---|---|---|---|
+| Hand-rolled, virtualised | 120 | 4.8 ms | 5.8 ms | 15.5 ms | 0 s (0 %) | 0 | 0 |
+| Tabulator `setData` | 120 | 46.8 ms | 51.3 ms | 54.8 ms | 6.0 s of 120 s (5 %) | 120 of 120 | 0 |
+
+Firefox 153, Linux x86_64, 1 Hz, 5 % churn:
+
+| Renderer | Rows | Ticks | apply p50 | apply p95 | frame p95 | Time frozen | Selection lost |
+|---|---|---|---|---|---|---|---|
+| Hand-rolled, virtualised | 760 | 124 | 12 ms | 17 ms | 36 ms | 5.0 s of 124 s (4 %) | 0 |
+| Tabulator `replaceData` | 760 | 122 | 163 ms | 178 ms | 182 ms | 20.3 s of 122 s (17 %) | 4 |
+| Tabulator `replaceData` | 880 | 121 | 163 ms | 181 ms | 186 ms | 20.4 s of 121 s (17 %) | 8 |
+| Tabulator `setData` | 300 | 11 | 78 ms | 115 ms | 116 ms | 0.9 s of 11 s (8 %) | not tested |
+| Tabulator `updateData` over a delta feed | 300 | - | interface became unresponsive | | | | |
+
+Chrome is two to three times faster than Firefox on both renderers, but the
+ratio between them does not move: a factor of ten.
+
+Three results decided the design.
+
+Scroll position lost on 120 ticks out of 120 is the sharpest of them. It is the
+documented behaviour of `setData`, which returns the list to the top on every
+call: once a second, the rows jump back to the beginning. That eliminates the
+mode whatever its speed, which is why section 10 states a budget in frozen time
+and lost state rather than in milliseconds alone.
+
+Time frozen, 17 % against nothing, is why the hand-rolled renderer won. A grid
+that blocks a sixth of the wall clock is not a real-time monitor.
+
+The delta feed became unresponsive and is why the protocol sends snapshots. It
+also saves nothing on the wire: measured at 300 rows, a snapshot weighed 167 kB
+and a delta 168 kB, because on active requests every counter moves every second
+and so every row ends up in the delta anyway.
+
+The reference table of section 4 comes from the same measurement. Out of 565
+bytes per row:
+
+| Field | Share | Changes between ticks |
+|---|---|---|
+| SQL text | 24 % | Never, for a given request |
+| CPU history | 16 % | One point out of twenty-four |
+| Program name | 7 % | Never |
+
+That is 47 % of the payload repeated every second for nothing, which is what
+the per-session reference table removes.
+
+One caveat carried forward: these runs measured a grid that only displayed. The
+16 ms budget has not been verified with sorting and filtering active, and both
+change the per-refresh work. It has to be re-measured when they arrive rather
+than assumed to hold.
 
 ## 11. Versioning
 
