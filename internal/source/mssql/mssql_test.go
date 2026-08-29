@@ -10,12 +10,19 @@ import (
 	"github.com/rudi-bruchez/sqltop/internal/source"
 )
 
+var _ source.Source = (*Source)(nil)
+
 // open connects to the container, or skips. Integration tests must never fail
-// on a machine without Podman; `go test ./...` stays green there.
+// on a machine without Podman; `go test ./...` stays green there. Setting
+// SQLTOP_REQUIRE_DB turns that skip into a failure, for a run that must not
+// silently report green with zero database coverage.
 func open(t *testing.T) *Source {
 	t.Helper()
 	dsn := os.Getenv("SQLTOP_TEST_DSN")
 	if dsn == "" {
+		if os.Getenv("SQLTOP_REQUIRE_DB") != "" {
+			t.Fatal("SQLTOP_TEST_DSN is unset and SQLTOP_REQUIRE_DB is set; run: eval \"$(scripts/testdb.sh)\"")
+		}
 		t.Skip("SQLTOP_TEST_DSN is unset; run: eval \"$(scripts/testdb.sh)\"")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -27,10 +34,6 @@ func open(t *testing.T) *Source {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
-}
-
-func TestSatisfiesSource(t *testing.T) {
-	var _ source.Source = New()
 }
 
 func TestSessionIsReadUncommitted(t *testing.T) {
@@ -60,7 +63,7 @@ func TestIdentifyReportsVersionAndCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	if info.MajorVersion < 12 {
-		t.Fatalf("major version = %d, want at least 12; below that the tool refuses to connect", info.MajorVersion)
+		t.Fatalf("major version = %d, want at least 12; below 11 the tool refuses to connect", info.MajorVersion)
 	}
 	if info.ProductVersion == "" || info.Edition == "" {
 		t.Fatalf("info = %+v, want the product version and edition filled", info)

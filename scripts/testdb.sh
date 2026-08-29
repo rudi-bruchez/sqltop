@@ -22,9 +22,11 @@ elif [ "$(podman inspect -f '{{.State.Running}}' "$NAME")" != "true" ]; then
 fi
 
 # Wait for the engine to accept connections rather than guessing at a sleep.
+# The password goes through SQLCMDPASSWORD in the environment, not -P: a
+# command-line argument is visible in ps to any local user on the machine.
 for _ in $(seq 1 60); do
-  if podman exec "$NAME" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
-      -P "$PASSWORD" -C -Q "SELECT 1" >/dev/null 2>&1; then
+  if podman exec -e SQLCMDPASSWORD="$PASSWORD" "$NAME" \
+      /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "SELECT 1" >/dev/null 2>&1; then
     echo "export SQLTOP_TEST_DSN='sqlserver://sa:${PASSWORD}@127.0.0.1:${PORT}?encrypt=disable'"
     exit 0
   fi
