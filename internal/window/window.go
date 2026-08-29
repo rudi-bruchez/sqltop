@@ -28,6 +28,9 @@ func New(retention time.Duration, maxSamples int) *Window {
 	return &Window{retention: retention, maxSample: maxSamples}
 }
 
+// Append takes ownership of rows: the window keeps the slice rather than
+// copying it, so the caller must not touch it afterwards. The collector
+// satisfies this by passing a freshly built slice on every tick.
 func (w *Window) Append(at time.Time, rows []model.RequestSample) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -60,13 +63,19 @@ func (w *Window) evictLocked(now time.Time) {
 	}
 }
 
+// Latest returns a copy. Handing out the live backing slice would let any
+// caller corrupt the window by sorting or mutating in place, which would
+// undermine the mutex that makes this structure safe in the first place.
 func (w *Window) Latest() []model.RequestSample {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	if len(w.ticks) == 0 {
 		return nil
 	}
-	return w.ticks[len(w.ticks)-1].rows
+	rows := w.ticks[len(w.ticks)-1].rows
+	out := make([]model.RequestSample, len(rows))
+	copy(out, rows)
+	return out
 }
 
 func (w *Window) History(ref model.RequestRef) []model.RequestSample {
