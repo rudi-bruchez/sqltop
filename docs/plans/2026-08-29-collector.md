@@ -105,6 +105,15 @@ import (
 	"testing"
 )
 
+// seams points the resolution at temporary directories for one test.
+func seams(t *testing.T, binary, user string) {
+	t.Helper()
+	oldBinary, oldUser := binaryDir, userConfigDir
+	binaryDir = func() string { return binary }
+	userConfigDir = func() string { return user }
+	t.Cleanup(func() { binaryDir, userConfigDir = oldBinary, oldUser })
+}
+
 func TestResolveExplicitMissingIsError(t *testing.T) {
 	_, err := Resolve(filepath.Join(t.TempDir(), "nope.json"))
 	if err == nil {
@@ -118,8 +127,7 @@ func TestResolvePrefersBesideBinary(t *testing.T) {
 	if err := os.WriteFile(beside, []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SQLTOP_BINARY_DIR", dir)      // test seam, see Step 3
-	t.Setenv("SQLTOP_USER_CONFIG_DIR", t.TempDir())
+	seams(t, dir, t.TempDir())
 
 	got, err := Resolve("")
 	if err != nil {
@@ -136,8 +144,7 @@ func TestResolveFallsBackToUserDir(t *testing.T) {
 	if err := os.WriteFile(want, []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SQLTOP_BINARY_DIR", t.TempDir())
-	t.Setenv("SQLTOP_USER_CONFIG_DIR", userDir)
+	seams(t, t.TempDir(), userDir)
 
 	got, err := Resolve("")
 	if err != nil {
@@ -149,8 +156,7 @@ func TestResolveFallsBackToUserDir(t *testing.T) {
 }
 
 func TestResolveNoFileIsNotAnError(t *testing.T) {
-	t.Setenv("SQLTOP_BINARY_DIR", t.TempDir())
-	t.Setenv("SQLTOP_USER_CONFIG_DIR", t.TempDir())
+	seams(t, t.TempDir(), t.TempDir())
 
 	got, err := Resolve("")
 	if err != nil {
@@ -172,7 +178,7 @@ func TestLoadPartialFileKeepsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Retention.Minutes() != 5 {
+	if time.Duration(got.Retention).Minutes() != 5 {
 		t.Fatalf("retention = %v, want 5m", got.Retention)
 	}
 	if got.Server.Port != Default().Server.Port {
@@ -182,7 +188,35 @@ func TestLoadPartialFileKeepsDefaults(t *testing.T) {
 		t.Fatalf("requests tier = %v, want the default %v", got.Tiers.Requests, Default().Tiers.Requests)
 	}
 }
+
+func TestSaveRoundTripsThroughTheUserDirectory(t *testing.T) {
+	// Save is used by the UI plan when a layout changes, but it is written
+	// and tested here so it does not ship as untested code nobody exercises.
+	user := t.TempDir()
+	seams(t, filepath.Join(t.TempDir(), "not-writable-because-absent"), user)
+
+	cfg := Default()
+	cfg.Retention = Duration(7 * time.Minute)
+
+	path, err := Save(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path) != user {
+		t.Fatalf("saved to %q, want the user directory %q when the binary directory is not writable", path, user)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Duration(back.Retention) != 7*time.Minute {
+		t.Fatalf("round trip lost the value: %v", back.Retention)
+	}
+}
 ```
+
+The test file needs `"time"` in its imports.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -209,10 +243,9 @@ import (
 // Duration is a time.Duration that marshals as "1s", "15m".
 type Duration time.Duration
 
-func (d Duration) String() string        { return time.Duration(d).String() }
-func (d Duration) Std() time.Duration    { return time.Duration(d) }
-func (d Duration) Minutes() float64      { return time.Duration(d).Minutes() }
-func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
+func (d Duration) String() string                { return time.Duration(d).String() }
+func (d Duration) Std() time.Duration            { return time.Duration(d) }
+func (d Duration) MarshalJSON() ([]byte, error)  { return json.Marshal(d.String()) }
 
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
@@ -281,29 +314,27 @@ func Default() Config {
 	}
 }
 
-// binaryDir and userConfigDir are indirected through the environment so the
-// tests can place them in temporary directories. Empty in normal operation.
-func binaryDir() string {
-	if d := os.Getenv("SQLTOP_BINARY_DIR"); d != "" {
-		return d
+// Package-level seams the tests override with temporary directories. They are
+// variables rather than environment lookups on purpose: an environment
+// variable would also let a user silently redirect where their configuration
+// is read from, which is a surprise nobody asked for.
+var (
+	binaryDir = func() string {
+		exe, err := os.Executable()
+		if err != nil {
+			return ""
+		}
+		return filepath.Dir(exe)
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	return filepath.Dir(exe)
-}
 
-func userConfigDir() string {
-	if d := os.Getenv("SQLTOP_USER_CONFIG_DIR"); d != "" {
-		return d
+	userConfigDir = func() string {
+		d, err := os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(d, "sqltop")
 	}
-	d, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(d, "sqltop")
-}
+)
 
 // Resolve returns the configuration file to use, or "" when there is none and
 // built-in defaults apply. Order: explicit, beside the binary, user directory.
@@ -930,8 +961,8 @@ func TestEvictsByCountAndReportsCapped(t *testing.T) {
 	}
 
 	_, samples, capped := w.Depth()
-	if samples > 10 {
-		t.Fatalf("window holds %d samples, want at most the cap of 10", samples)
+	if samples != 10 {
+		t.Fatalf("window holds %d samples, want exactly the cap of 10: one sample per tick means eviction lands on the boundary", samples)
 	}
 	if !capped {
 		t.Fatal("Depth() must report capped=true once the count limit has bitten, so the UI can say the window is shorter than asked")
@@ -1506,8 +1537,12 @@ var counterDefs = []counterDef{
 	{key: "full_scans_sec", object: "Access Methods", name: "Full Scans/sec", kind: kindPerSecond, unit: "/s"},
 	{key: "open_transactions", object: "Transactions", name: "Transactions", kind: kindRaw, unit: ""},
 	{key: "longest_transaction_s", object: "Transactions", name: "Longest Transaction Running Time", kind: kindRaw, unit: "s"},
-	{key: "version_store_kb", object: "Transactions", name: "Version Store Size (KB)", kind: kindRaw, unit: "KB"},
-	{key: "tempdb_free_kb", object: "Transactions", name: "Free Space in tempdb (KB)", kind: kindRaw, unit: "KB"},
+	// Version store size and tempdb free space are deliberately absent here.
+	// Both also exist as counters, but the space tier reads them from
+	// sys.dm_db_file_space_usage and sys.dm_tran_version_store_space_usage,
+	// which spec section 6 names and which are per-database rather than
+	// instance-wide. Two sources for one number is how dashboards start
+	// disagreeing with themselves.
 	{key: "target_server_memory_kb", object: "Memory Manager", name: "Target Server Memory (KB)", kind: kindRaw, unit: "KB"},
 	{key: "total_server_memory_kb", object: "Memory Manager", name: "Total Server Memory (KB)", kind: kindRaw, unit: "KB"},
 	{key: "memory_grants_pending", object: "Memory Manager", name: "Memory Grants Pending", kind: kindRaw, unit: ""},
@@ -2138,11 +2173,16 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) model.Capabil
 	}
 
 	if !info.IsAzureSQLDB {
-		// More than our own session visible means the state right is real.
-		var sessions int
+		// Ask the server what the login holds rather than counting visible
+		// sessions. Counting works in practice, since an instance always has
+		// dozens of system sessions, but it answers a different question and
+		// would be wrong the day it is asked on something quieter.
+		var granted int
 		if err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE session_id <> @@SPID`).
-			Scan(&sessions); err == nil && sessions > 0 {
+			`SELECT CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1
+			              OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1
+			         THEN 1 ELSE 0 END`).
+			Scan(&granted); err == nil && granted == 1 {
 			caps = caps.With(model.CapInstanceWideView)
 		}
 	}
@@ -2402,6 +2442,10 @@ SELECT
     ISNULL(r.dop, 0),
     ISNULL(s.open_transaction_count, 0),
     ISNULL(r.percent_complete, 0),
+    CASE ISNULL(s.transaction_isolation_level, 0)
+        WHEN 0 THEN '' WHEN 1 THEN 'read uncommitted' WHEN 2 THEN 'read committed'
+        WHEN 3 THEN 'repeatable read' WHEN 4 THEN 'serializable' WHEN 5 THEN 'snapshot'
+        ELSE '' END,
     RTRIM(ISNULL(r.wait_type, '')),
     ISNULL(r.wait_time, 0),
     RTRIM(ISNULL(r.wait_resource, '')),
@@ -2440,6 +2484,7 @@ func (s *Source) SampleRequests(ctx context.Context) ([]model.RequestSample, err
 			&r.Login, &r.Host, &r.Program, &r.Command, &r.BlockedBy,
 			&r.ElapsedMs, &r.CPUMs, &r.LogicalReads, &r.PhysicalReads, &r.Writes,
 			&r.TempdbMB, &r.MemoryGrantMB, &r.DOP, &r.OpenTran, &r.PercentComplete,
+			&r.IsolationLevel,
 			&r.WaitType, &r.WaitMs, &r.WaitResource, &r.QueryHash, &r.SQLText,
 		)
 		if err != nil {
@@ -3296,9 +3341,16 @@ func (c *Collector) sample(ctx context.Context, tier model.Tier) {
 			c.fail("sampling requests: " + err.Error())
 			return
 		}
+		// The tick is stamped with the sample's own time, not the
+		// collector's. Two clocks would drift apart under load, and the one
+		// that matters for age eviction is the one the rows carry.
+		at := time.Now()
+		if len(rows) > 0 && !rows[0].At.IsZero() {
+			at = rows[0].At
+		}
 		// Flattening is engine-neutral, so it happens here rather than in
 		// any source. Spec section 4.
-		c.win.Append(time.Now(), window.Flatten(rows))
+		c.win.Append(at, window.Flatten(rows))
 		c.ok()
 		return
 	}
@@ -3324,9 +3376,15 @@ func (c *Collector) costLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if cost, err := c.src.Cost(ctx); err == nil {
-				c.bud.Observe(cost)
+			cost, err := c.src.Cost(ctx)
+			if err != nil {
+				// Never swallowed: without this reading the budget stops
+				// updating and the throttle stops reacting, which must be
+				// visible rather than silent.
+				c.fail("reading own cost: " + err.Error())
+				continue
 			}
+			c.bud.Observe(cost)
 		}
 	}
 }
@@ -3520,6 +3578,7 @@ Create `internal/web/protocol.go`:
 package web
 
 import (
+	"hash/fnv"
 	"strconv"
 
 	"github.com/rudi-bruchez/sqltop/internal/collector"
@@ -3596,10 +3655,25 @@ func fingerprint(r model.RequestSample) string {
 	if r.QueryHash != "" {
 		return r.QueryHash
 	}
-	// No query hash, for instance on a request with no cached plan. Fall back
-	// to the length of the text, which is enough to notice a change without
-	// hashing the whole string on every tick.
-	return strconv.Itoa(len(r.SQLText))
+	// No query hash, for instance a request with no cached plan. Hash the
+	// text. An earlier draft used its length, which collides: two sessions
+	// running different statements of the same length would have shared a
+	// reference key, and the second would have shown the first one's SQL.
+	// FNV rather than a cryptographic hash because nothing here is a secret.
+	h := fnv.New64a()
+	h.Write([]byte(r.SQLText))
+	return strconv.FormatUint(h.Sum64(), 16)
+}
+
+// maxRefSQL caps what a reference carries. A megabyte batch would otherwise
+// sit in the reference table and cross the wire once at full size.
+const maxRefSQL = 64 * 1024
+
+func clip(s string) string {
+	if len(s) <= maxRefSQL {
+		return s
+	}
+	return s[:maxRefSQL] + "\n-- truncated by sqltop"
 }
 
 func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.Figure, st collector.Status) SnapshotPayload {
@@ -3625,7 +3699,7 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 			if out.Refs == nil {
 				out.Refs = map[string]Ref{}
 			}
-			out.Refs[key] = Ref{SQL: r.SQLText, Program: r.Program, Login: r.Login, Host: r.Host}
+			out.Refs[key] = Ref{SQL: clip(r.SQLText), Program: r.Program, Login: r.Login, Host: r.Host}
 			e.sent[key] = key
 		}
 
@@ -3717,7 +3791,7 @@ func newTestServer(t *testing.T) *Server {
 	w.Append(time.Now(), []model.RequestSample{{Ref: model.RequestRef{SessionID: 51}, SQLText: "SELECT 1"}})
 	c := collector.New(fake.New(nil), w, collector.NewBudget(50, config.Default().Tiers))
 
-	s, err := NewServer(c, w, config.Server{Port: 0})
+	s, err := NewServer(c, w, config.Server{Port: 0}, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3812,12 +3886,18 @@ type Server struct {
 	win      *window.Window
 	token    string
 	listener net.Listener
+	// push is the stream period. It follows the requests tier, so changing
+	// that in the configuration file changes what the browser receives too.
+	push time.Duration
 }
 
 // NewServer binds 127.0.0.1 and nothing else. There is deliberately no option
 // to widen it: this interface can eventually kill sessions on a production
 // server, and a bind on all interfaces would hand that to the network.
-func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Server, error) {
+func NewServer(c *collector.Collector, w *window.Window, cfg config.Server, push time.Duration) (*Server, error) {
+	if push <= 0 {
+		push = time.Second
+	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Port))
 	if err != nil {
 		return nil, fmt.Errorf("web: listen: %w", err)
@@ -3827,7 +3907,7 @@ func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Se
 		ln.Close()
 		return nil, fmt.Errorf("web: token: %w", err)
 	}
-	return &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln}, nil
+	return &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln, push: push}, nil
 }
 
 func (s *Server) URL() string {
@@ -4057,7 +4137,7 @@ func (s *Server) stream(rw http.ResponseWriter, req *http.Request) {
 	if !send() {
 		return
 	}
-	t := time.NewTicker(time.Second)
+	t := time.NewTicker(s.push)
 	defer t.Stop()
 	for {
 		select {
@@ -4262,7 +4342,7 @@ Replace the `log.Fatal("not implemented yet")` line in `cmd/sqltop/main.go` with
 	col := collector.New(src, win, collector.NewBudget(cfg.Budget.ServerCPUMsPerSecond, cfg.Tiers))
 	go col.Run(ctx)
 
-	srv, err := web.NewServer(col, win, cfg.Server)
+	srv, err := web.NewServer(col, win, cfg.Server, cfg.Tiers.Requests.Std())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -4328,6 +4408,53 @@ renderer and has to stay able to prove the choice again."
 
 ---
 
+## Verified against a live engine before execution
+
+An external review raised four things that could only be settled by asking a
+real server. SQL Server 2022 (16.0.4265.3) in Podman, queried through
+`github.com/microsoft/go-mssqldb`, which is what will actually run them.
+
+`QUOTED_IDENTIFIER` is `ON` on a fresh driver connection, so the XML methods in
+`cpuHistoryQuery` work. The same query pasted into `sqlcmd -Q` fails with error
+1934, which is a `sqlcmd` default and not a property of the query; testing
+through the wrong client would have sent this implementation chasing a
+namespace problem it does not have.
+
+`HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')` returns 1 and is the check
+task 7 now uses. Counting sessions, which the first draft did, returns 82 on an
+idle container because an instance always carries dozens of system sessions, so
+it would have worked; it simply answers a different question.
+
+`RING_BUFFER_SCHEDULER_MONITOR` exists as a type but held zero records at one
+minute of uptime, because the engine writes one a minute. The CPU history is
+therefore legitimately empty on a freshly started server, which is why
+`readCPUHistory` treats an absent row as an unavailable figure rather than an
+error, and why the integration test asserts the key is present rather than that
+it carries a value.
+
+The buffer cache hit ratio counter and its base both read 76 on that instance,
+which is the lifetime ratio of 100 % that makes the raw counter useless and the
+windowed delta of task 5 necessary.
+
+## Coverage gaps, listed rather than discovered later
+
+These are spec requirements this plan does not implement. They are not
+oversights; they are the UI plan's, and naming them here is what stops an
+executor from either inventing them or assuming they exist.
+
+Scheduler load (spec 6). `CapSchedulerLoad` is probed in task 7 but no figure
+is produced. The capability is deliberately ahead of its consumer: the probe is
+one line and knowing the answer at connection time is worth more than the
+symmetry.
+
+Memory clerks and plan cache breakdown (spec 6). Task 9 produces committed and
+target server memory only. The clerk-level split is dashboard work.
+
+Isolation level is now collected by task 8 but nothing displays it, since the
+grid here carries a reduced column set.
+
+Everything else absent is listed in the Self-Review below.
+
 ## Self-Review
 
 **Spec coverage.** Section 2 constraints are enforced by the build and vet steps in tasks 1, 7 and 14. Section 2.1 shapes the dependency budget (task 7 is the only `go get`) and the test strategy throughout. Section 3 lands in task 7's preflight, including the version floor and the probe-rather-than-infer rule. Section 3.3 is verified by the cross-compilation step in task 7. Section 4 is tasks 3, 4, 6, 11 and 12. Section 4.1 is tasks 2 and 6. Section 4.3 is task 13. Section 6 is tasks 5 and 9. Section 8.3 is task 1. Section 10 is tasks 10 and 11.
@@ -4336,7 +4463,9 @@ Deliberately absent, and listed here so the gaps are visible rather than forgott
 
 **Types.** `model.RequestSample` is written by task 8, given `Depth` by task 4, stored by task 3, and read by task 12. `model.Cost` is produced by task 7 and consumed by task 10. `model.Figure` is produced by tasks 5 and 9 and consumed by tasks 11 and 12. `config.Tiers` is produced by task 1 and consumed by tasks 10 and 11. `collector.Status` is produced by task 11 and consumed by tasks 12 and 13. The `Source` interface in task 6 is implemented by task 7 for `Open`, `Close`, `Identify` and `Cost`, task 8 for `SampleRequests`, and task 9 for `SampleServer`; `QueryText` and `Plan` are stubbed in task 7 returning `errNotInThisPlan`, so `mssql.Source` satisfies the interface from that task onward and `TestSatisfiesSource` compiles; the stubs for `SampleRequests` and `SampleServer` are deleted by tasks 8 and 9 respectively.
 
-**Known risk carried forward.** The 16 ms rendering budget was verified on a passive grid. Sorting and filtering are not in this plan, so the number still holds for what ships here, but it must be re-measured with the bench when they arrive.
+**Review findings not applied, with reasons.** Two of the external review's points do not hold. The XML namespace concern in `cpuHistoryQuery` is unfounded through the driver, as the verification section records. And the claim that the spec has no section 9.1 is wrong: `docs/SPECS.md` line 510 carries it, so the reference to the kill flow stands.
+
+**Known risk carried forward.** The 16 ms rendering budget was verified on a passive grid, and the reference-table lookup added in task 14 puts one extra map read per cell in the path. Sorting and filtering are not in this plan, so the number still holds for what ships here, but it must be re-measured with the bench when they arrive.
 
 ## Execution Handoff
 
