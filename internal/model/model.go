@@ -105,10 +105,15 @@ type RequestSample struct {
 
 // Figure is one dashboard number. Available reports whether this source can
 // produce it at all, which is different from it being zero.
+//
+// JSON tags added for internal/web's wire protocol (task 12 fix round 1):
+// without them the field carries a capitalised Go name onto the wire while
+// every other payload type uses short lowercase tags, which a JavaScript
+// client would have to special-case.
 type Figure struct {
-	Value     float64
-	Unit      string
-	Available bool
+	Value     float64 `json:"value"`
+	Unit      string  `json:"unit"`
+	Available bool    `json:"available"`
 }
 
 // ServerSample is one observation of the instance as a whole.

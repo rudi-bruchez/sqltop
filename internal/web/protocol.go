@@ -4,7 +4,9 @@ package web
 import (
 	"hash/fnv"
 	"strconv"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/collector"
@@ -13,10 +15,35 @@ import (
 
 // Row is one grid line on the wire. It deliberately lacks the SQL text, the
 // program name, the login and the host: those never change for a session, so
-// they travel once in Refs. The bench measured them as 47 % of the payload,
-// resent every second for nothing. Spec section 10.1.
+// they travel once in Refs. Section 10.1 measured SQL text at 24 % and
+// program name at 7 % of a row's bytes (31 % together; login and host were
+// not broken out on their own in that measurement, but they are the same
+// kind of per-session invariant and travel the same way).
+//
+// Debt: section 10.1's other 16 % is CPU history, and it is not here at all.
+// Spec section 4.4 gives it a different mechanism from the rest of this
+// table: history is appended one point at a time on the client, never
+// resent as a series. Nothing in this package implements that; there is no
+// history field on Row or Ref, no append endpoint, and no test. The way out
+// is a small ring buffer's worth of points added to Ref (history belongs
+// with the session's invariants, not repeated per row) plus a client that
+// appends the new point it receives instead of replacing what it already
+// drew.
+//
+// Debt: section 8.1 lists five more grid columns this Row does not carry:
+// physical_reads, wait_resource, open_tran, isolation_level, query_hash. A
+// realistic row today runs about 210 bytes on the wire; adding all five
+// measured out at 328 bytes, +56 %, which at 800 rows and 1 Hz is roughly
+// 94 kB/s extra. Two of the five are per-statement invariants, not per-tick
+// values, and belong in Ref when they land: query_hash (already used
+// server-side by fingerprint below, just not sent to the client) and
+// isolation_level. The other three, physical_reads, open_tran and
+// wait_resource, change tick to tick and belong here on Row. Writing this
+// down now is what keeps the omission a decision for whoever adds the rest
+// of the grid, not something they have to rediscover.
 type Row struct {
 	SPID      int64   `json:"spid"`
+	RequestID int32   `json:"rqid"`
 	RefKey    string  `json:"ref"`
 	Status    string  `json:"st"`
 	Database  string  `json:"db"`
@@ -49,12 +76,48 @@ type Ref struct {
 // Collector.messageLocked, which assembles it from the preflight, each
 // tier's own error and the cost reader before a throttle explanation ever
 // gets a turn. There is nothing to unflatten here, only to pass through.
+//
+// Caps carries collector.Status.Caps, which spec section 4.1 calls the
+// load-bearing piece of the whole source abstraction: the UI is supposed to
+// grey what a source cannot provide and render n/a rather than a plausible
+// zero, and StatusPayload is the only channel this protocol gives the
+// client to learn that. It is a list of names rather than the raw bitset,
+// so a JavaScript consumer can test capability membership without knowing
+// Go's bit layout for model.Capabilities.
 type StatusPayload struct {
-	Sqltop    string `json:"sqltop"`
-	Connected bool   `json:"connected"`
-	Message   string `json:"message,omitempty"`
-	Instance  string `json:"instance"`
-	Version   string `json:"version"`
+	Sqltop    string   `json:"sqltop"`
+	Connected bool     `json:"connected"`
+	Message   string   `json:"message,omitempty"`
+	Instance  string   `json:"instance"`
+	Version   string   `json:"version"`
+	Caps      []string `json:"caps,omitempty"`
+}
+
+// capName is checked against every bit in model.Capabilities in this fixed
+// order. New capabilities in model must be added here too, or they reach
+// this package's caller but never the wire.
+var capName = []struct {
+	cap  model.Capability
+	name string
+}{
+	{model.CapLivePlanProgress, "livePlanProgress"},
+	{model.CapInstanceWideView, "instanceWideView"},
+	{model.CapTempdbPerTask, "tempdbPerTask"},
+	{model.CapWaitStatsCumulative, "waitStatsCumulative"},
+	{model.CapSchedulerLoad, "schedulerLoad"},
+	{model.CapKillSession, "killSession"},
+	{model.CapVersionStoreUsage, "versionStoreUsage"},
+	{model.CapRingBufferCPU, "ringBufferCPU"},
+}
+
+func capNames(c model.Capabilities) []string {
+	var out []string
+	for _, e := range capName {
+		if c.Has(e.cap) {
+			out = append(out, e.name)
+		}
+	}
+	return out
 }
 
 // SnapshotPayload is one tick as the browser sees it.
@@ -68,9 +131,15 @@ type SnapshotPayload struct {
 }
 
 // Encoder remembers which references a client already holds. One encoder per
-// connected client, since two clients may have joined at different times and
-// so each needs its own view of what has already been sent.
+// connected client is still the intended use (two clients may have joined at
+// different times, so each needs its own view of what has already been
+// sent), but mu makes a shared encoder safe rather than merely documented as
+// unsafe: a lock on one map is not an abstraction worth withholding, and the
+// alternative is e.sent taking a concurrent write from two goroutines,
+// which is not a bug an HTTP handler's recover() can catch, only a fatal
+// throw that takes the process down.
 type Encoder struct {
+	mu   sync.Mutex
 	seq  uint64
 	sent map[string]struct{} // ref keys already delivered to this client
 }
@@ -79,29 +148,59 @@ func NewEncoder() *Encoder { return &Encoder{sent: map[string]struct{}{}} }
 
 // known reports how many sessions the encoder is currently tracking. It
 // exists for the eviction test; nothing outside the package needs it.
-func (e *Encoder) known() int { return len(e.sent) }
+func (e *Encoder) known() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.sent)
+}
 
-// refKey identifies one session's current statement. It includes a
-// fingerprint of the statement, not just the session ID, so a session that
-// moves on to a different query gets a new reference rather than the grid
-// showing the previous query's text under the new one.
+// refKey identifies one session's current reference entry. It includes a
+// fingerprint of everything Ref carries, not just the session ID, so a
+// session whose statement, login, host or program changes gets a new
+// reference rather than the grid showing stale text under a row that has
+// moved on.
+//
+// This was wrong in the first round in a way that matters for an operator
+// who can kill sessions from this tool. SQL Server reuses session IDs
+// routinely: alice on SSMS from PC1 disconnects, the server hands her
+// session ID to bob on sqlcmd from PC2 running the identical SELECT 1
+// (health probes and shared procedure calls make identical statement text
+// across different logins ordinary, not exotic), and a key built from the
+// session ID and the statement alone is unchanged. No new reference goes
+// out, the client keeps alice's entry, and the grid shows bob's row
+// labelled alice, SSMS, PC1. Folding Login, Host and Program into the key
+// closes that.
 func refKey(r model.RequestSample) string {
 	return strconv.FormatInt(r.Ref.SessionID, 10) + ":" + fingerprint(r)
 }
 
-// fingerprint identifies a statement cheaply. QueryHash is what the engine
-// already computed and is preferred; when it is empty (no cached plan, for
-// instance) the SQL text is hashed instead. Hashed rather than compared by
-// length: an earlier version of this idea used the text's length, which
-// collides whenever two different statements happen to be the same size, and
-// the second session would then have displayed the first one's SQL. FNV
-// rather than a cryptographic hash because nothing here is a secret, only a
-// key to deduplicate on.
+// fingerprint identifies a reference's content cheaply. It used to prefer
+// QueryHash over hashing the text, on the reasoning that the engine had
+// already done the work. That was the second half of the session-reuse bug:
+// QueryHash is computed over the parameterised shape of a statement, so a
+// session moving from WHERE id = 1 to WHERE id = 999999 keeps the same hash
+// while spec section 8.1 defines sql_text as the current statement,
+// extracted by offsets, literals included. Preferring the hash meant the
+// grid kept showing the first literal forever.
+//
+// So everything that identifies a reference's content goes into one FNV-64a
+// digest: Login, Host and Program (closing the session-reuse bug above),
+// QueryHash when the engine supplies one (cheap and a real signal, just not
+// sufficient on its own), and the SQL text itself (so a literal change is
+// never missed even when QueryHash does not catch it). FNV rather than a
+// cryptographic hash because nothing here is a secret, only a key to
+// deduplicate on. Fields are separated by a NUL byte so "ab"+"c" cannot
+// collide with "a"+"bc".
 func fingerprint(r model.RequestSample) string {
-	if r.QueryHash != "" {
-		return r.QueryHash
-	}
 	h := fnv.New64a()
+	h.Write([]byte(r.Login))
+	h.Write([]byte{0})
+	h.Write([]byte(r.Host))
+	h.Write([]byte{0})
+	h.Write([]byte(r.Program))
+	h.Write([]byte{0})
+	h.Write([]byte(r.QueryHash))
+	h.Write([]byte{0})
 	h.Write([]byte(r.SQLText))
 	return strconv.FormatUint(h.Sum64(), 16)
 }
@@ -116,15 +215,29 @@ func clip(s string) string {
 	if len(s) <= maxRefSQL {
 		return s
 	}
-	return s[:maxRefSQL] + "\n-- truncated by sqltop"
+	cut := maxRefSQL
+	// Back up to a rune boundary. Slicing at a raw byte count can land
+	// inside a multi-byte character, producing invalid UTF-8 that a browser
+	// renders as a replacement glyph on any non-ASCII batch.
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n-- truncated by sqltop"
 }
 
 // Snapshot turns one tick of request samples, dashboard figures and
-// collector status into what this client receives next. Figures is passed
-// through as given: model.Figure already distinguishes a real zero from
-// Available: false, and wrapping it here would only risk losing that
-// distinction again.
+// collector status into what this client receives next. figures is copied
+// rather than stored by reference: the collector happens to hand over a
+// fresh map under its own read lock today, so aliasing it is not currently
+// unsafe, but Snapshot has no way to enforce that a future caller keeps
+// doing so, and the copy is a handful of entries once a second.
+// model.Figure itself is passed through unwrapped either way: it already
+// distinguishes a real zero from Available: false, and wrapping it here
+// would only risk losing that distinction again.
 func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.Figure, st collector.Status) SnapshotPayload {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	e.seq++
 	out := SnapshotPayload{
 		Seq: e.seq,
@@ -132,16 +245,23 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 		// sampled: rows can be empty (a session churn with nothing running)
 		// or span more than one sample time, and the client only needs a
 		// single instant to measure its own staleness against.
-		TS:      time.Now().UnixMilli(),
-		Rows:    make([]Row, 0, len(rows)),
-		Figures: figures,
+		TS:   time.Now().UnixMilli(),
+		Rows: make([]Row, 0, len(rows)),
 		Status: StatusPayload{
 			Sqltop:    buildinfo.String(),
 			Connected: st.Connected,
 			Message:   st.Message,
 			Instance:  st.Info.Instance,
 			Version:   st.Info.ProductVersion,
+			Caps:      capNames(st.Caps),
 		},
+	}
+
+	if figures != nil {
+		out.Figures = make(map[string]model.Figure, len(figures))
+		for k, v := range figures {
+			out.Figures[k] = v
+		}
 	}
 
 	alive := make(map[string]struct{}, len(rows))
@@ -158,7 +278,7 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 		}
 
 		out.Rows = append(out.Rows, Row{
-			SPID: r.Ref.SessionID, RefKey: key, Status: r.Status, Database: r.Database,
+			SPID: r.Ref.SessionID, RequestID: r.Ref.RequestID, RefKey: key, Status: r.Status, Database: r.Database,
 			Command: r.Command, BlockedBy: r.BlockedBy, Depth: r.Depth,
 			ElapsedMs: r.ElapsedMs, CPUMs: r.CPUMs, Reads: r.LogicalReads, Writes: r.Writes,
 			TempdbMB: r.TempdbMB, GrantMB: r.MemoryGrantMB, DOP: r.DOP,
