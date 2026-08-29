@@ -18,6 +18,7 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 
 - Pure Go, no CGO. `CGO_ENABLED=0 go build ./...` must succeed, and the result must cross-compile to `windows/amd64`, `darwin/arm64` and `linux/arm64`. (Spec 2)
 - Read-only on the monitored server. No object created, nothing configured, no trace flag set. (Spec 2)
+- Every collection query runs under `READ UNCOMMITTED` and ends with `OPTION (RECOMPILE, MAXDOP 1)`. The isolation level is set through the connector's `SessionInitSQL` so it survives a session reset; the hint is per statement because there is only one `OPTION` clause allowed per query.
 - Plan retrieval is on demand only and never enters the polling loop. (Spec 2, 10)
 - Secrets come from the environment via `.env`, never from the config file and never in code. (Spec 8.3, CLAUDE.md)
 - Target is SQL Server 2019 and later. 2016 SP1 to 2017 degrade (no live plan progress). 2012 to 2016 RTM are the floor (no plan progress at all). Below 2012 the tool refuses to connect and says why. (Spec 3)
@@ -2023,6 +2024,8 @@ observation budget gets measured in server CPU rather than round-trip."
 - Consumes: `source.Source`, `model.*`.
 - Produces: `mssql.New() *mssql.Source` satisfying `source.Source`, and `mssql.ErrVersionTooOld`.
 
+Three requirements apply to every query this package sends, and `TestEveryQueryCarriesTheHints` enforces two of them mechanically. The session runs `READ UNCOMMITTED`, set through the connector's `SessionInitSQL` so it survives a reset rather than being a one-off after the first connect. Every statement ends with `OPTION (RECOMPILE, MAXDOP 1)`: `RECOMPILE` so the collector's own queries do not accumulate in the plan cache of the server it is watching, and `MAXDOP 1` so a monitoring query never takes parallel workers. They share one clause because SQL Server allows only one per statement.
+
 The preflight probes rather than infers. A login may hold `VIEW SERVER STATE` on paper and be denied a specific view, and Azure SQL Database returns only the current session when the right is missing rather than failing. Spec 3.1 and 3.2.
 
 - [ ] **Step 1: Write the container script**
@@ -2100,6 +2103,72 @@ func open(t *testing.T) *Source {
 
 func TestSatisfiesSource(t *testing.T) {
 	var _ source.Source = New()
+}
+
+// TestEveryQueryCarriesTheHints guards the three requirements that are easy to
+// forget the day someone adds a query: read uncommitted comes from the session,
+// but RECOMPILE keeps the plan out of the cache and MAXDOP 1 keeps a monitoring
+// query from taking parallel workers on the server it is watching. Both are per
+// statement, and SQL Server allows only one OPTION clause per query, so they
+// have to travel together.
+func TestEveryQueryCarriesTheHints(t *testing.T) {
+	queries := map[string]string{
+		"identify":   identifyQuery,
+		"cost":       costQuery,
+		"requests":   requestsQuery,
+		"counters":   countersQuery,
+		"space":      spaceQuery,
+		"cpuHistory": cpuHistoryQuery,
+	}
+	for name, q := range queries {
+		if !strings.Contains(q, "OPTION (RECOMPILE, MAXDOP 1)") {
+			t.Errorf("%s query is missing OPTION (RECOMPILE, MAXDOP 1)", name)
+		}
+		if strings.Count(strings.ToUpper(q), "OPTION (") != 1 {
+			t.Errorf("%s query has %d OPTION clauses, SQL Server allows one", name, strings.Count(strings.ToUpper(q), "OPTION ("))
+		}
+	}
+}
+
+func TestSessionIsReadUncommitted(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	var level string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT CASE transaction_isolation_level
+		    WHEN 1 THEN 'read uncommitted' ELSE 'other' END
+		FROM sys.dm_exec_sessions WHERE session_id = @@SPID
+		OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if level != "read uncommitted" {
+		t.Fatalf("isolation level = %q, want read uncommitted: a monitoring tool must not take shared locks on the server it is watching", level)
+	}
+}
+
+func TestIsolationSurvivesASessionReset(t *testing.T) {
+	// SessionInitSQL is what makes this true. A one-off SET after connecting
+	// would be lost the moment database/sql resets or re-establishes the
+	// connection, and the tool would start locking without anyone noticing.
+	s := open(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.SampleRequests(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var level int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT transaction_isolation_level FROM sys.dm_exec_sessions
+		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level); err != nil {
+		t.Fatal(err)
+	}
+	if level != 1 {
+		t.Fatalf("isolation level = %d after several queries, want 1", level)
+	}
 }
 
 func TestIdentifyReportsVersionAndCapabilities(t *testing.T) {
@@ -2189,7 +2258,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/microsoft/go-mssqldb"
+	mssql "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/integratedauth/krb5"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
@@ -2209,11 +2278,21 @@ type Source struct {
 
 func New() *Source { return &Source{counter: newCounterState()} }
 
+// sessionInit runs on every new or reset session, so the settings survive a
+// reconnection rather than being a one-off after the first connect.
+//
+// READ UNCOMMITTED because a monitoring tool must not take shared locks on the
+// server it is watching. NOCOUNT because the row counts are noise on the wire.
+const sessionInit = `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SET NOCOUNT ON;`
+
 func (s *Source) Open(ctx context.Context, dsn string) error {
-	db, err := sql.Open("sqlserver", dsn)
+	connector, err := mssql.NewConnector(dsn)
 	if err != nil {
 		return fmt.Errorf("mssql: open: %w", err)
 	}
+	connector.SessionInitSQL = sessionInit
+	db := sql.OpenDB(connector)
+
 	// One connection, always the same one, because Cost reads @@SPID and a
 	// pool would hand us a different session on every call.
 	db.SetMaxOpenConns(1)
@@ -2245,7 +2324,8 @@ SELECT
     CAST(SERVERPROPERTY('MachineName')     AS nvarchar(256)),
     CAST(SERVERPROPERTY('Edition')         AS nvarchar(256)),
     CAST(SERVERPROPERTY('ProductVersion')  AS nvarchar(64)),
-    CAST(SERVERPROPERTY('EngineEdition')   AS int)`
+    CAST(SERVERPROPERTY('EngineEdition')   AS int)
+OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabilities, error) {
 	var info model.ServerInfo
@@ -2292,9 +2372,11 @@ func majorVersion(product string) int {
 func (s *Source) probe(ctx context.Context, info model.ServerInfo) model.Capabilities {
 	var caps model.Capabilities
 
+	// Every probe carries the hint too, so nothing this package sends can
+	// take a parallel worker or leave a plan behind.
 	can := func(query string) bool {
 		var one int
-		err := s.db.QueryRowContext(ctx, query).Scan(&one)
+		err := s.db.QueryRowContext(ctx, query+" OPTION (RECOMPILE, MAXDOP 1)").Scan(&one)
 		return err == nil
 	}
 
@@ -2307,7 +2389,8 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) model.Capabil
 		if err := s.db.QueryRowContext(ctx,
 			`SELECT CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1
 			              OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1
-			         THEN 1 ELSE 0 END`).
+			         THEN 1 ELSE 0 END
+			 OPTION (RECOMPILE, MAXDOP 1)`).
 			Scan(&granted); err == nil && granted == 1 {
 			caps = caps.With(model.CapInstanceWideView)
 		}
@@ -2342,7 +2425,8 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) model.Capabil
 const costQuery = `
 SELECT cpu_time, logical_reads
 FROM sys.dm_exec_sessions
-WHERE session_id = @@SPID`
+WHERE session_id = @@SPID
+OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) Cost(ctx context.Context) (model.Cost, error) {
 	var c model.Cost
@@ -2518,7 +2602,7 @@ func TestSampleRequestsExcludesItself(t *testing.T) {
 }
 ```
 
-Add `"database/sql"` and `"strings"` to that file's imports.
+Add `"database/sql"` and `"strings"` to that file's imports if they are not already there.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -2591,7 +2675,8 @@ FROM sys.dm_exec_requests AS r
         FROM sys.dm_db_task_space_usage AS u
         WHERE u.session_id = r.session_id
     ) AS tsu
-WHERE r.session_id <> @@SPID`
+WHERE r.session_id <> @@SPID
+OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) SampleRequests(ctx context.Context) ([]model.RequestSample, error) {
 	now := time.Now()
@@ -2775,7 +2860,8 @@ func buildCountersQuery() string {
 SELECT RTRIM(LTRIM(object_name)), RTRIM(LTRIM(counter_name)), cntr_value
 FROM sys.dm_os_performance_counters
 WHERE RTRIM(LTRIM(counter_name)) IN (` + strings.Join(names, ",") + `)
-  AND (instance_name IS NULL OR RTRIM(LTRIM(instance_name)) IN (N'', N'_Total'))`
+  AND (instance_name IS NULL OR RTRIM(LTRIM(instance_name)) IN (N'', N'_Total'))
+OPTION (RECOMPILE, MAXDOP 1)`
 }
 
 func (s *Source) SampleServer(ctx context.Context, tier model.Tier) (model.ServerSample, error) {
@@ -2848,7 +2934,8 @@ SELECT
     (SELECT SUM(unallocated_extent_page_count) * 8.0 / 1024.0
        FROM tempdb.sys.dm_db_file_space_usage),
     (SELECT committed_kb / 1024.0 FROM sys.dm_os_sys_info),
-    (SELECT committed_target_kb / 1024.0 FROM sys.dm_os_sys_info)`
+    (SELECT committed_target_kb / 1024.0 FROM sys.dm_os_sys_info)
+OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) error {
 	var usedMB, freeMB, committedMB, targetMB float64
@@ -2867,7 +2954,8 @@ func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) er
 	if s.caps.Has(model.CapVersionStoreUsage) {
 		var kb float64
 		if err := s.db.QueryRowContext(ctx,
-			`SELECT ISNULL(SUM(reserved_space_kb), 0) FROM sys.dm_tran_version_store_space_usage`).
+			`SELECT ISNULL(SUM(reserved_space_kb), 0) FROM sys.dm_tran_version_store_space_usage
+			 OPTION (RECOMPILE, MAXDOP 1)`).
 			Scan(&kb); err == nil {
 			into["version_store_mb"] = model.Figure{Value: kb / 1024.0, Unit: "MB", Available: true}
 		}
@@ -2887,7 +2975,8 @@ FROM (
     WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
       AND record LIKE '%<SystemHealth>%'
 ) AS x
-ORDER BY timestamp DESC`
+ORDER BY timestamp DESC
+OPTION (RECOMPILE, MAXDOP 1)`
 
 func (s *Source) readCPUHistory(ctx context.Context, into map[string]model.Figure) error {
 	// The keys always exist so one tile can be unavailable without its
