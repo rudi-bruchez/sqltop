@@ -1402,67 +1402,34 @@ import (
 // a row, because a request missing from the grid is worse than one shown at
 // the wrong indentation.
 func Flatten(rows []model.RequestSample) []model.RequestSample {
-	children := make(map[int64][]model.RequestSample, len(rows))
-	present := make(map[int64]bool, len(rows))
-	for _, r := range rows {
-		present[r.Ref.SessionID] = true
-	}
-
-	var roots []model.RequestSample
-	for _, r := range rows {
-		parent := r.BlockedBy
-		if parent == 0 || parent == r.Ref.SessionID || !present[parent] {
-			roots = append(roots, r)
-			continue
-		}
-		children[parent] = append(children[parent], r)
-	}
-
-	bySPID := func(s []model.RequestSample) {
-		sort.Slice(s, func(i, j int) bool { return s[i].Ref.SessionID < s[j].Ref.SessionID })
-	}
-	bySPID(roots)
-	for k := range children {
-		bySPID(children[k])
-	}
-
-	out := make([]model.RequestSample, 0, len(rows))
-	seen := make(map[int64]bool, len(rows))
-
-	var walk func(r model.RequestSample, depth int)
-	walk = func(r model.RequestSample, depth int) {
-		if seen[r.Ref.SessionID] {
-			return // cycle, or a row reachable twice: emit it once
-		}
-		seen[r.Ref.SessionID] = true
-		r.Depth = depth
-		out = append(out, r)
-		for _, c := range children[r.Ref.SessionID] {
-			walk(c, depth+1)
-		}
-	}
-
-	for _, r := range roots {
-		walk(r, 0)
-	}
-
-	// A pure cycle has no root, so nothing above reached it. Emit whatever
-	// is left at depth zero rather than losing it.
-	if len(out) < len(rows) {
-		leftovers := make([]model.RequestSample, 0, len(rows)-len(out))
-		for _, r := range rows {
-			if !seen[r.Ref.SessionID] {
-				leftovers = append(leftovers, r)
-			}
-		}
-		bySPID(leftovers)
-		for _, r := range leftovers {
-			walk(r, 0)
-		}
-	}
-	return out
+	// Identity is the full RequestRef, parenthood is the session id. Keying
+	// both by session id would drop every request but one whenever MARS gives
+	// a session several concurrent ones, and a request missing from the grid
+	// cannot be noticed at all. blocking_session_id names a session and not a
+	// request, so children hang under the first row emitted for that session,
+	// which emitted tracks so they are attached once rather than per sibling.
+	//
+	// See the shipped implementation in internal/window/blocking.go: this
+	// block records the design, the file is the source of truth.
+	//
+	//   children map[int64][]RequestSample   parent session -> blocked rows
+	//   present  map[int64]bool              session ids in this sample
+	//   seen     map[model.RequestRef]bool   rows already emitted
+	//   emitted  map[int64]bool              sessions whose children ran
+	//
+	// A row is a root when it is unblocked, blocked by itself, or blocked by a
+	// session absent from the sample. Roots and sibling lists sort by session
+	// then request id, so the same input always renders the same way. After
+	// the roots are walked, any row still unseen belongs to a pure cycle and
+	// is emitted at depth zero rather than lost.
 }
 ```
+
+Six tests cover the shapes named above, plus four that the first review of this
+task added after finding the session-id defect: both requests of one session
+surviving, a three-node cycle, a cycle with a tail, and two independent cycles
+in one sample. Each asserts which rows survived, not merely how many, because a
+regression that duplicates one row while dropping another keeps the count.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
