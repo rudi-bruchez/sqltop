@@ -412,10 +412,6 @@ func (s *Source) Plan(context.Context, model.RequestRef, bool) (model.Plan, erro
 	return model.Plan{}, errNotInThisPlan
 }
 
-func (s *Source) SampleRequests(context.Context) ([]model.RequestSample, error) {
-	return nil, nil // task 8
-}
-
 func (s *Source) SampleServer(context.Context, model.Tier) (model.ServerSample, error) {
 	return model.ServerSample{Figures: map[string]model.Figure{}}, nil // task 9
 }

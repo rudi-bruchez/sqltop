@@ -2,7 +2,9 @@ package mssql
 
 import (
 	"context"
+	"database/sql"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,5 +101,98 @@ func TestCostIsCumulativeAndNonZero(t *testing.T) {
 	}
 	if second.LogicalReads <= first.LogicalReads {
 		t.Error("twenty samples should have cost some logical reads; a flat zero means we are reading the wrong session")
+	}
+}
+
+func TestSampleRequestsSeesALongQuery(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second connection runs something slow enough to be caught.
+	victim, err := sql.Open("sqlserver", os.Getenv("SQLTOP_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer victim.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		victim.ExecContext(ctx, `WAITFOR DELAY '00:00:06'`)
+	}()
+	defer func() { <-done }()
+
+	time.Sleep(1500 * time.Millisecond)
+
+	rows, err := s.SampleRequests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var found *model.RequestSample
+	for i := range rows {
+		if strings.Contains(rows[i].SQLText, "WAITFOR DELAY") {
+			found = &rows[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("the running WAITFOR was not in the %d sampled rows", len(rows))
+	}
+	if found.Ref.SessionID == 0 {
+		t.Error("session id must be filled")
+	}
+	if found.Database == "" {
+		t.Error("database must be filled: it is a filter and sort column")
+	}
+	if found.Command == "" {
+		t.Error("command must be filled: it is a filter and sort column")
+	}
+	if found.ElapsedMs <= 0 {
+		t.Errorf("elapsed = %d ms, want a positive value after 1.5 seconds", found.ElapsedMs)
+	}
+	if found.Depth != 0 {
+		t.Error("Depth is the window's job, not the source's")
+	}
+}
+
+func TestIsolationSurvivesASessionReset(t *testing.T) {
+	// SessionInitSQL is what makes this true. A one-off SET after connecting
+	// would be lost the moment database/sql resets or re-establishes the
+	// connection, and the tool would start locking without anyone noticing.
+	s := open(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.SampleRequests(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var level int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT transaction_isolation_level FROM sys.dm_exec_sessions
+		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level); err != nil {
+		t.Fatal(err)
+	}
+	if level != 1 {
+		t.Fatalf("isolation level = %d after several queries, want 1", level)
+	}
+}
+
+func TestSampleRequestsExcludesItself(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	rows, err := s.SampleRequests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Ref.SessionID == s.spid {
+			t.Fatal("the tool must not report its own collection query as activity")
+		}
 	}
 }
