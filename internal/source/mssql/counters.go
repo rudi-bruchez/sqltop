@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"maps"
 	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
@@ -110,6 +111,8 @@ func (s *counterState) apply(at time.Time, raw map[string]int64) map[string]mode
 			case !s.seeded || !had || !hadBase || !hasBase:
 				out[d.key] = model.Figure{Unit: d.unit, Available: false}
 			case cur < prev || curBase < prevBase:
+				// Either half went backwards, which means the instance restarted
+				// between the two samples. Both causes lead to the same answer.
 				out[d.key] = model.Figure{Unit: d.unit, Available: false}
 			case dn <= 0:
 				// No lookups in the interval. Reporting zero percent would
@@ -121,9 +124,12 @@ func (s *counterState) apply(at time.Time, raw map[string]int64) map[string]mode
 		}
 	}
 
-	for k, v := range raw {
-		s.prev[k] = v
-	}
+	// Replace rather than merge. A counter that drops out of one reading and
+	// returns later must not be differentiated against a stale value from
+	// several ticks ago: that would produce an inflated rate that still looks
+	// plausible. Losing its history means it reports unavailable for one tick
+	// and then resumes correctly.
+	s.prev = maps.Clone(raw)
 	s.prevAt = at
 	s.seeded = true
 	return out
