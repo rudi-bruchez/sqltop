@@ -3,6 +3,7 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -252,10 +253,16 @@ func (s *Source) readCPUHistory(ctx context.Context, into map[string]model.Figur
 	switch {
 	case err == nil:
 		// fall through to the figures below
-	case isCapabilityAbsent(err):
-		return nil // absent history is not an error, it is an unavailable figure
+	case errors.Is(err, sql.ErrNoRows) || isCapabilityAbsent(err):
+		// No row at all is the normal state for the first minute after an
+		// instance starts: the engine writes one SchedulerMonitor record a
+		// minute, and probe grants the capability from a COUNT(*), which
+		// answers whether the login may read the buffer rather than whether
+		// there is anything in it yet. An empty buffer is an unavailable
+		// figure, not a failure.
+		return nil
 	default:
-		return err
+		return fmt.Errorf("mssql: cpu history: %w", err)
 	}
 
 	into["sql_cpu_percent"] = model.Figure{Value: float64(sqlCPU), Unit: "%", Available: true}
