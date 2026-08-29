@@ -1,0 +1,145 @@
+// Package model holds the engine-neutral types. Nothing here may name a DMV,
+// a showplan, or any other SQL Server concept: that is the whole point of the
+// source abstraction in spec section 4.1.
+package model
+
+import "time"
+
+// Tier names a collection schedule. Spec section 10.
+type Tier int
+
+const (
+	TierRequests Tier = iota
+	TierCounters
+	TierSpace
+	TierCPUHistory
+)
+
+func (t Tier) String() string {
+	switch t {
+	case TierRequests:
+		return "requests"
+	case TierCounters:
+		return "counters"
+	case TierSpace:
+		return "space"
+	case TierCPUHistory:
+		return "cpuHistory"
+	}
+	return "unknown"
+}
+
+// Capability is something a source may or may not be able to do on this
+// server, at this version, with these rights.
+type Capability uint32
+
+const (
+	CapLivePlanProgress Capability = 1 << iota
+	CapInstanceWideView
+	CapTempdbPerTask
+	CapWaitStatsCumulative
+	CapSchedulerLoad
+	CapKillSession
+	CapVersionStoreUsage
+	CapRingBufferCPU
+)
+
+type Capabilities uint32
+
+func Caps(list ...Capability) Capabilities {
+	var c Capabilities
+	for _, x := range list {
+		c |= Capabilities(x)
+	}
+	return c
+}
+
+func (c Capabilities) Has(x Capability) bool          { return c&Capabilities(x) != 0 }
+func (c Capabilities) With(x Capability) Capabilities { return c | Capabilities(x) }
+
+// RequestRef identifies one running request across ticks.
+type RequestRef struct {
+	SessionID int64
+	RequestID int32
+}
+
+// RequestSample is one observation of one active request at one instant.
+// One row per sample, never one row per query: a request active for twelve
+// minutes must leave a series that can be replayed. Spec section 4.
+type RequestSample struct {
+	At  time.Time
+	Ref RequestRef
+
+	Status    string
+	Database  string
+	Login     string
+	Host      string
+	Program   string
+	Command   string
+	BlockedBy int64
+	// Depth is filled by the window, not the source: flattening the blocking
+	// chain is engine-neutral work. Spec section 4.
+	Depth int
+
+	ElapsedMs       int64
+	CPUMs           int64
+	LogicalReads    int64
+	PhysicalReads   int64
+	Writes          int64
+	TempdbMB        float64
+	MemoryGrantMB   float64
+	DOP             int
+	OpenTran        int
+	PercentComplete float64
+
+	WaitType     string
+	WaitMs       int64
+	WaitResource string
+
+	IsolationLevel string
+	QueryHash      string
+	// SQLText is sent once per session in the reference table, not on every
+	// tick. Spec section 4.
+	SQLText string
+}
+
+// Figure is one dashboard number. Available reports whether this source can
+// produce it at all, which is different from it being zero.
+type Figure struct {
+	Value     float64
+	Unit      string
+	Available bool
+}
+
+// ServerSample is one observation of the instance as a whole.
+type ServerSample struct {
+	At      time.Time
+	Figures map[string]Figure
+}
+
+type ServerInfo struct {
+	Instance       string
+	Host           string
+	Edition        string
+	ProductVersion string
+	MajorVersion   int
+	IsAzureSQLDB   bool
+	StartedAt      time.Time
+}
+
+// Plan is deliberately opaque. Showplan XML, an EXPLAIN tree and a MySQL plan
+// have nothing in common, so the renderer dispatches on Format rather than the
+// model pretending they unify. Spec section 4.1.
+type Plan struct {
+	Format  string // "showplan-xml" for SQL Server
+	Payload []byte
+	Live    bool // carries in-flight row counts
+}
+
+// Cost is what the tool has spent on the server, read from its own session.
+// Spec section 10.
+type Cost struct {
+	At           time.Time
+	CPUMs        int64
+	LogicalReads int64
+}
