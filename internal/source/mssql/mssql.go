@@ -7,6 +7,7 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strconv"
@@ -78,14 +79,22 @@ func (s *Source) Open(ctx context.Context, dsn string) error {
 	pool.SetMaxOpenConns(1)
 	pool.SetMaxIdleConns(1)
 	pool.SetConnMaxLifetime(0)
-	s.pool = pool
 
 	if err := pool.PingContext(ctx); err != nil {
 		pool.Close()
-		s.pool = nil
 		return fmt.Errorf("mssql: connect: %w", err)
 	}
-	if err := s.queryRow(ctx, spidQuery, &s.spid); err != nil {
+
+	// pool is set before pinning: connLocked reads it, and pinning here is
+	// what performs the first spid read. On failure connLocked has already
+	// closed whatever connection it grabbed from the pool without assigning
+	// it to s.db, so there is nothing left pinned to leak; only the pool
+	// itself needs closing.
+	s.pool = pool
+	s.mu.Lock()
+	_, err = s.connLocked(ctx)
+	s.mu.Unlock()
+	if err != nil {
 		pool.Close()
 		s.pool = nil
 		return fmt.Errorf("mssql: reading own spid: %w", err)
@@ -110,16 +119,34 @@ func (s *Source) Close() error {
 }
 
 // connLocked returns the pinned connection, re-pinning a fresh one from the
-// pool if the previous one was declared dead. Callers must hold s.mu.
+// pool if the previous one was declared dead, and re-reading @@SPID onto it:
+// a re-pinned connection is a different session, and s.spid naming the wrong
+// one would make the request sampler exclude the wrong session instead of
+// the tool's own. Callers must hold s.mu.
+//
+// Returns sql.ErrConnDone, the same failure a dead pinned connection reports,
+// if Close has already torn the pool down; nothing here may dereference a nil
+// pool.
 func (s *Source) connLocked(ctx context.Context) (*sql.Conn, error) {
 	if s.db != nil {
 		return s.db, nil
+	}
+	if s.pool == nil {
+		return nil, sql.ErrConnDone
 	}
 	conn, err := s.pool.Conn(ctx)
 	if err != nil {
 		return nil, err
 	}
+	var spid int64
+	if err := conn.QueryRowContext(ctx, spidQuery).Scan(&spid); err != nil {
+		// Not yet pinned to s.db, so it would otherwise never be closed: the
+		// pool cannot reclaim a connection it considers still in use.
+		conn.Close()
+		return nil, err
+	}
 	s.db = conn
+	s.spid = spid
 	return conn, nil
 }
 
@@ -128,13 +155,19 @@ func (s *Source) connLocked(ctx context.Context) (*sql.Conn, error) {
 // just the call, since a *sql.Conn can have another batch put on the wire
 // while a previous result set is still streaming.
 //
-// It also repairs the pinned connection: once the driver declares it dead
-// with driver.ErrBadConn, database/sql closes the *sql.Conn for good and
-// every later call on it fails with sql.ErrConnDone ("connection is already
-// closed"). Source notices that and clears the pinned connection so the next
-// call re-pins a fresh one from the pool. It does not retry the query that
-// just failed, and it does not decide when the caller should try again -
-// that stays the collector's job.
+// It also repairs the pinned connection, on the call that discovers the
+// break rather than waiting for a later one. A connection failing while the
+// driver is still sending the query surfaces directly as driver.ErrBadConn;
+// database/sql then closes the *sql.Conn, and sql.ErrConnDone is what every
+// later call on it gets. But a connection dying while a result set is being
+// read back comes through neither: go-mssqldb marks it bad internally and
+// hands back the raw read error (a *net.OpError, verified against this
+// container by killing the session mid-query), and the sentinel comes only
+// on the following call. Checking connDeadLocked, which reads the driver's
+// own connectionGood bookkeeping through Conn.Raw with no network I/O,
+// catches that case on this same call instead of the next one. Source does
+// not retry the query that just failed, and it does not decide when the
+// caller should try again - that stays the collector's job.
 func (s *Source) queryRow(ctx context.Context, query string, dest ...any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,20 +177,58 @@ func (s *Source) queryRow(ctx context.Context, query string, dest ...any) error 
 		return err
 	}
 	err = conn.QueryRowContext(ctx, query).Scan(dest...)
-	if errors.Is(err, sql.ErrConnDone) {
+	if err != nil && (errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) || connDeadLocked(conn)) {
+		// Close it, not just drop the reference: database/sql's pool still
+		// counts this *sql.Conn as open and in use until Close says
+		// otherwise, and with MaxOpenConns(1) the next pool.Conn(ctx) inside
+		// connLocked would block forever waiting for a slot that only Close
+		// frees. The underlying transport close is local, not a network
+		// round trip to a server that may already be gone, so this does not
+		// block on the dead connection either.
+		conn.Close()
 		s.db = nil
 	}
 	return err
 }
 
-// isServerError reports whether err is something SQL Server itself raised
-// (permission denied, an object absent on this version) rather than a
-// transport or driver failure. The two must not be confused: the first means
-// a capability is absent, the second means the connection broke and probing
-// further capabilities on it would be meaningless. Spec section 3.1.
-func isServerError(err error) bool {
-	var srvErr mssql.Error
-	return errors.As(err, &srvErr)
+// connDeadLocked reports whether the driver has already marked conn dead,
+// without any network round trip: go-mssqldb's *Conn implements
+// driver.Validator, and IsValid just returns its own connectionGood flag.
+// Safe to call right after a query on the same connection returns, since Raw
+// only hands out the underlying driver connection for the duration of the
+// callback and nothing else is using it concurrently under s.mu.
+func connDeadLocked(conn *sql.Conn) bool {
+	dead := false
+	_ = conn.Raw(func(driverConn any) error {
+		if v, ok := driverConn.(driver.Validator); ok && !v.IsValid() {
+			dead = true
+		}
+		return nil
+	})
+	return dead
+}
+
+// isCapabilityAbsent reports whether err is the server itself answering "no"
+// - permission denied, or the object does not exist on this version - rather
+// than the connection having failed. The order of the checks matters:
+// mssql.ServerError, which the driver returns when the server hits a fatal
+// error that aborts the process and severs the connection, wraps an
+// mssql.Error, so testing for mssql.Error first would misclassify the abort
+// that killed the connection as an ordinary "capability absent" answer, and
+// that misclassification is exactly what let a broken connection during the
+// last probe evaluated leave the whole capability set silently
+// under-reported with a nil error. driver.ErrBadConn and sql.ErrConnDone are
+// the other two shapes a broken connection takes here. Spec section 3.1.
+func isCapabilityAbsent(err error) bool {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
+		return false
+	}
+	var srvErr mssql.ServerError
+	if errors.As(err, &srvErr) {
+		return false
+	}
+	var capErr mssql.Error
+	return errors.As(err, &capErr)
 }
 
 const identifyQuery = `
@@ -194,7 +265,14 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	if err != nil {
 		return info, 0, fmt.Errorf("mssql: probing capabilities: %w", err)
 	}
+
+	// Nothing outside reads s.info/s.caps yet, but task 8 and 9 sampling
+	// goroutines will, while the collector may be re-identifying, so the
+	// write goes under the same lock every query uses.
+	s.mu.Lock()
 	s.info, s.caps = info, caps
+	s.mu.Unlock()
+
 	return info, caps, nil
 }
 
@@ -235,7 +313,7 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 		switch {
 		case err == nil:
 			return true, nil
-		case isServerError(err):
+		case isCapabilityAbsent(err):
 			return false, nil
 		default:
 			return false, err
@@ -256,7 +334,7 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 		switch {
 		case err == nil && granted == 1:
 			caps = caps.With(model.CapInstanceWideView)
-		case err != nil && !isServerError(err):
+		case err != nil && !isCapabilityAbsent(err):
 			return 0, err
 		}
 	}
