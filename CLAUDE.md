@@ -34,6 +34,18 @@ rules; read it before writing code. In short:
 - Secrets come from the environment via `.env`, never from the config file and
   never in code.
 
+## Testing against a real engine
+
+SQL Server runs locally in Podman, so tests hit a real engine rather than a
+mock. This machine already has `mcr.microsoft.com/mssql/server` images for
+2022-latest and 2025-latest, and stopped containers named `sql2022` and
+`sql2025`. Pull 2019 (the minimum target) and 2016 or 2017 (the degraded path)
+when those need exercising.
+
+Two things cannot be tested locally and stay open until pointed at the real
+thing: Azure SQL Database, which cannot be containerised, and Kerberos against a
+real domain.
+
 ## Before committing
 
 `gofmt` clean, `go vet ./...` clean, and the bench still builds.

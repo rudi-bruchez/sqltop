@@ -92,7 +92,9 @@ being a framework. Sorting, column resizing and filters are wanted and are
 specified. Virtual columns, plugin systems, a theming engine and a generic
 formatter API are not; each would trade away the reason the thing was chosen.
 If it ever needs those, the honest move is to revisit the measurement, not to
-grow a library by accident.
+grow a library by accident. Operative rule: any grid feature beyond sorting,
+filtering and column resizing must be justified by a measurement showing it
+keeps the refresh budget of section 10.
 
 ## 3. Target and requirements
 
@@ -100,6 +102,7 @@ grow a library by accident.
 |---|---|---|
 | Engine | SQL Server 2019 and later, on-premises; Azure SQL Database; Azure SQL Managed Instance | PostgreSQL, MySQL |
 | Degraded | SQL Server 2016 SP1 to 2017: everything works except live plan progress, which needs trace flag 7412 the tool will not set | |
+| Floor | SQL Server 2012 to 2016 RTM: connects, grid and dashboard work, no plan progress at all. Below 2012, the tool refuses to connect and says why rather than failing query by query | |
 | Auth | SQL authentication, Microsoft Entra, and Windows / Kerberos including from Linux | |
 | Permission | See the table below | |
 
@@ -116,6 +119,11 @@ rather than turning anything on.
 | SQL Server 2022 and later | `VIEW SERVER PERFORMANCE STATE` | |
 | Azure SQL Managed Instance | `VIEW SERVER STATE` | Behaves like on-premises |
 | Azure SQL Database | `VIEW DATABASE STATE` for database-scoped views; server-scoped views need membership of `##MS_ServerStateReader##`, granted from `master` | Without it, a session sees only itself |
+
+These are minimums, not exact matches. `VIEW SERVER STATE` includes
+`VIEW SERVER PERFORMANCE STATE`, so a login that has the former still works on
+2022 and later. The preflight checks what the login can actually read and
+reports the gap; it does not infer rights from the version alone.
 
 ### 3.2 Azure SQL Database is scoped to one database
 
@@ -205,6 +213,10 @@ provide, and the dashboard renders "n/a" rather than a plausible zero. Azure SQL
 Database and SQL Server 2017 are the first two consumers of this mechanism, well
 before PostgreSQL is.
 
+Granularity is per figure, not per group. Azure SQL Database will support some
+dashboard tiles and not others within the same family, so one unavailable tile
+must be able to disappear without taking its neighbours with it.
+
 A source is a Go package implementing that interface. Adding MySQL means adding
 a package and registering it; it means touching nothing in the core, the state
 window, or the UI.
@@ -230,6 +242,32 @@ contradicts section 2. On switching away, the retention window of the previous
 instance is kept in memory and marked stale, so coming back shows the history up
 to the moment of the switch, clearly labelled as frozen rather than live.
 
+Frozen windows are evicted, or memory grows linearly with how often someone
+switches. At most three are kept, least recently used first out, and any frozen
+window older than its own retention period is dropped since every sample in it
+would have expired anyway.
+
+### 4.3 The local HTTP server
+
+It binds `127.0.0.1` only. Never `0.0.0.0`, and there is no flag to make it do
+so. The reason is not tidiness: this interface can kill sessions on a production
+server, and a bind on all interfaces would hand that to anyone on the network.
+
+The port defaults to 8420 and is configurable. On startup the tool prints, and
+opens, a URL carrying a token generated for that run; requests without it are
+refused. That keeps other local users of a shared machine out. No CORS headers
+are emitted, since nothing legitimate is cross-origin here.
+
+### 4.4 Losing the connection
+
+A dropped connection is normal, not exceptional: failovers, restarts, laptops
+that sleep. The collector retries with exponential backoff, from one second to a
+thirty second ceiling, indefinitely, and the status bar shows the state and the
+next attempt. The retention window is kept and marked stale, exactly as on an
+instance switch, so the last minutes before the drop remain readable. On
+reconnection the preflight runs again, because the server may have come back as
+a different version or with different rights after a failover.
+
 The wire protocol carries a flat row list. Two payload rules follow from the
 bench measurements:
 
@@ -246,7 +284,7 @@ bench measurements:
 +------------------------------------------------------------------+
 | server dashboard          collapsible, one line when collapsed   |
 +------------------------------------------------------------------+
-| view tabs   requests | blocking | waits | repetitive | throughput |
+| tabs  requests | blocking | waits | repetitive | throughput | programs |
 +------------------------------------------------------------------+
 |                                                                  |
 |  grid                                                            |
@@ -281,7 +319,7 @@ first tick after connection shows placeholders, not zeros.
 | Figure | Source | Handling |
 |---|---|---|
 | Instance, host, edition, version, uptime | `SERVERPROPERTY`, `sys.dm_os_sys_info`, `sys.dm_os_host_info` | Once at connection |
-| SQL Server CPU %, system CPU % | `sys.dm_os_ring_buffers`, `RING_BUFFER_SCHEDULER_MONITOR` | One sample per minute, 256 kept. Not available on Azure SQL DB |
+| SQL Server CPU %, system CPU % | `sys.dm_os_ring_buffers`, `RING_BUFFER_SCHEDULER_MONITOR` | One sample per minute, 256 kept. Both figures are what the engine holds, not settings. Not available on Azure SQL DB |
 | Scheduler load | `sys.dm_os_schedulers` | Runnable tasks and load factor per scheduler. This replaces the per-CPU utilisation asked for in the original sketch, which SQL Server does not expose |
 | Total and target server memory | `sys.dm_os_sys_info`, `committed_kb` / `committed_target_kb` | Raw values |
 | Buffer pool, plan cache, query memory | `sys.dm_os_memory_clerks`, `sys.dm_os_memory_cache_counters` | Grouped by clerk type |
@@ -397,15 +435,40 @@ Shape:
     { "name": "PROD-SQL01", "dsn": "sqlserver://prod-sql01?authenticator=krb5" },
     { "name": "Azure sales", "dsn": "sqlserver://x.database.windows.net?database=sales" }
   ],
-  "tiers": { "requests": "1s", "counters": "1s", "space": "5s", "cpuHistory": "60s" },
+  "tiers": {
+    "requests": "1s", "counters": "1s", "space": "5s",
+    "cpuHistory": "60s", "livePlan": "2s"
+  },
   "retention": "15m",
-  "budget": { "collectionMs": 50 },
-  "layouts": { "default": { } }
+  "server": { "port": 8420 },
+  "budget": { "serverCpuMsPerSecond": 50 },
+  "layouts": {
+    "default": {
+      "dashboardCollapsed": false,
+      "views": {
+        "requests": {
+          "columns": [
+            { "field": "spid", "width": 60 },
+            { "field": "database", "width": 100 },
+            { "field": "command", "width": 100 },
+            { "field": "cpu_ms", "width": 90 }
+          ],
+          "sort": [{ "field": "cpu_ms", "dir": "desc" }],
+          "filters": [{ "field": "database", "op": "in", "value": ["CRM"] }]
+        }
+      }
+    }
+  }
 }
 ```
 
-Every refresh tier of section 10 is configurable here, including the collection
-budget past which the tool throttles itself. Connection secrets are not stored
+A layout is exactly that shape: per view, an ordered column list with widths,
+a sort, and a filter list. Column order is the array order; a column absent from
+the array is hidden. Anything the file does not mention falls back to the
+built-in default, so a hand-written partial layout is valid.
+
+Every refresh tier of section 10 is configurable here, including the live plan
+refresh period, and the collection budget past which the tool throttles itself. Connection secrets are not stored
 in this file: a DSN may reference `${SQLTOP_CONN}` and the value comes from the
 environment, loaded from `.env` at startup.
 
@@ -421,8 +484,8 @@ Live progress works like this. `sys.dm_exec_query_statistics_xml(session_id)`
 returns the showplan of an in-flight request carrying the actual row counts
 reached so far. Lightweight profiling v3 feeds it and is enabled by default from
 SQL Server 2019 and on Azure SQL Database, so nothing has to be turned on. The
-tool polls it for the selected session only, every two to three seconds, and
-re-renders. Actual against estimated rows per operator gives a genuine sense of
+tool polls it for the selected session only, on the `livePlan` period of the
+configuration file, two seconds by default, and re-renders. Actual against estimated rows per operator gives a genuine sense of
 where the query is and whether the estimates were wrong.
 
 Three limits to display honestly rather than hide:
@@ -433,8 +496,35 @@ Three limits to display honestly rather than hide:
 - On SQL Server 2016 SP1 to 2017 the profiling infrastructure is not on by
   default. The tool reports that rather than enabling anything server-wide.
 
-Plan rendering uses an existing MIT-licensed showplan viewer rather than a
-hand-written one.
+Plan rendering uses `html-query-plan` (Justin Pealing, MIT), vendored into the
+embedded assets like Tabulator was for the bench. It is a declared dependency
+under the rule of section 2.1, and the justification is the same one that
+decided the renderer: rendering showplan XML as an SSMS-like graph is the single
+largest piece of work in this tool, it is solved, and writing it again would buy
+nothing. It is the only front-end dependency; the grid stays hand-rolled.
+
+The three limits above are shown inside the plan panel itself, as a plain line
+of text where the plan would be, naming which limit was hit. Not an icon, not a
+banner elsewhere: the explanation belongs where the missing thing was expected.
+
+### 9.1 Killing a session
+
+This is the only destructive action in the tool, it is irreversible, and it can
+roll back hours of work on a production server. It is therefore gated three
+ways.
+
+The `KillSession` capability must be present, and the login must actually hold
+the right; the preflight settles that once rather than discovering it on the
+click.
+
+Confirmation restates what is about to die: session id, login, host, program,
+database, elapsed time, and the first line of the statement. A confirmation that
+says only "are you sure?" is decoration, because the risk is killing the wrong
+row after the grid refreshed under the cursor.
+
+Every kill, attempted or successful, is appended to a local log file with the
+timestamp, the instance, and that same identity block. A DBA who kills the wrong
+session needs to be able to say exactly what they did.
 
 The panel never runs in the polling loop. Plan retrieval happens only for a
 selected session, and stops when the selection is cleared.
@@ -446,10 +536,30 @@ The user requirement was "it has to be very fast". Made concrete:
 Rendering budget. Under 16 ms per refresh at 800 rows, so a tick fits inside one
 frame. Measured at 4.8 ms in the bench, so there is headroom.
 
-Collection budget. Under 50 ms of server time per second, all tiers combined,
-measured client-side as the round-trip of the collection queries. Past that, the
-tool slows its own cadence and says so in the status bar. It never silently
-keeps hammering.
+Collection budget. Under 50 ms of server CPU time per second, all tiers
+combined.
+
+Measured on the server, not by stopwatch. An earlier draft of this spec said
+"measured client-side as the round-trip of the collection queries", which mixed
+two different quantities: a round trip includes network latency, so monitoring a
+distant server across a WAN would throttle the tool while the server was
+perfectly fine, and a saturated local server would slip past unnoticed.
+
+The tool reads its own cost instead. `sys.dm_exec_sessions` carries `cpu_time`
+and `logical_reads` for every session, including the tool's own, found through
+`@@SPID`. Differentiating those between two ticks gives exactly what the tool
+has cost the instance, in server CPU milliseconds, with no network in the
+figure. That number is displayed: an instrument that claims to bound its own
+cost should show it.
+
+Throttling is ordered, not proportional. When the budget is exceeded over a
+sliding ten second window, tiers degrade from the least valuable upward: first
+tier C doubles its period, then tier B, and tier A last, since the request grid
+is the tool. On-demand work is never throttled, because it only happens when a
+human asked for it. Periods recover one step at a time once consumption has been
+under budget for thirty seconds. Every change is announced in the status bar,
+naming which tier slowed and why. The tool does not silently keep hammering, and
+it does not silently go quiet either.
 
 Refresh tiers. Not everything deserves one hertz. Every period below is a
 default and is configurable in the JSON file, section 8.3.
@@ -504,3 +614,24 @@ What remains open is empirical rather than a matter of choice: exactly which
 dashboard figures survive on Azure SQL Database has to be confirmed against a
 live instance. The capability mechanism of section 4.1 is what absorbs the
 answer without disturbing the rest.
+
+### 13.1 How the empirical questions get answered
+
+Local SQL Server instances run in Podman, so most of it needs no cloud account
+and no shared server. Development images are already present on the workstation
+for 2022 and 2025; 2019 is the minimum target and should be pulled, and 2016 or
+2017 to exercise the degraded path.
+
+Covered locally: every dashboard source and counter type, the permission
+preflight against a deliberately under-privileged login, live plan progress and
+its 128-level limit, blocking chains, and the observation budget measured
+through the tool's own `sys.dm_exec_sessions` figures.
+
+Not covered locally, and needing a real instance: Azure SQL Database, which
+cannot be containerised, and Kerberos authentication against a real domain.
+Those two stay open until someone points the tool at the real thing.
+
+One measurement gap is already known. The rendering bench measured a passive
+grid. The 16 ms budget has not been verified with sorting and filtering active,
+which change the per-refresh work. The bench exists and should be re-run once
+the grid has those functions rather than assuming the margin holds.
