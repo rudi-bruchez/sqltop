@@ -32,25 +32,42 @@ func Flatten(rows []model.RequestSample) []model.RequestSample {
 		children[parent] = append(children[parent], r)
 	}
 
-	bySPID := func(s []model.RequestSample) {
-		sort.Slice(s, func(i, j int) bool { return s[i].Ref.SessionID < s[j].Ref.SessionID })
+	byRef := func(s []model.RequestSample) {
+		sort.Slice(s, func(i, j int) bool {
+			if s[i].Ref.SessionID != s[j].Ref.SessionID {
+				return s[i].Ref.SessionID < s[j].Ref.SessionID
+			}
+			return s[i].Ref.RequestID < s[j].Ref.RequestID
+		})
 	}
-	bySPID(roots)
+	byRef(roots)
 	for k := range children {
-		bySPID(children[k])
+		byRef(children[k])
 	}
 
 	out := make([]model.RequestSample, 0, len(rows))
-	seen := make(map[int64]bool, len(rows))
+	// Identity is the full RequestRef: one session can hold several concurrent
+	// requests, so keying this by session id alone would drop all but one of
+	// them. Parenthood stays keyed by session id, because blocking_session_id
+	// names a session and not a request; a blocker's children hang under the
+	// first row emitted for that session, which emitted tracks separately so
+	// they are attached once rather than under every sibling.
+	seen := make(map[model.RequestRef]bool, len(rows))
+	emitted := make(map[int64]bool, len(rows))
 
 	var walk func(r model.RequestSample, depth int)
 	walk = func(r model.RequestSample, depth int) {
-		if seen[r.Ref.SessionID] {
-			return // cycle, or a row reachable twice: emit it once
+		if seen[r.Ref] {
+			return
 		}
-		seen[r.Ref.SessionID] = true
+		seen[r.Ref] = true
 		r.Depth = depth
 		out = append(out, r)
+
+		if emitted[r.Ref.SessionID] {
+			return
+		}
+		emitted[r.Ref.SessionID] = true
 		for _, c := range children[r.Ref.SessionID] {
 			walk(c, depth+1)
 		}
@@ -60,16 +77,16 @@ func Flatten(rows []model.RequestSample) []model.RequestSample {
 		walk(r, 0)
 	}
 
-	// A pure cycle has no root, so nothing above reached it. Emit whatever
-	// is left at depth zero rather than losing it.
+	// A pure cycle has no root, so nothing above reached it. Emit whatever is
+	// left at depth zero rather than losing it.
 	if len(out) < len(rows) {
 		leftovers := make([]model.RequestSample, 0, len(rows)-len(out))
 		for _, r := range rows {
-			if !seen[r.Ref.SessionID] {
+			if !seen[r.Ref] {
 				leftovers = append(leftovers, r)
 			}
 		}
-		bySPID(leftovers)
+		byRef(leftovers)
 		for _, r := range leftovers {
 			walk(r, 0)
 		}
