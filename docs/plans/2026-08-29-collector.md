@@ -809,14 +809,10 @@ func TestCapabilitiesSet(t *testing.T) {
 	}
 }
 
-func TestFigureDistinguishesUnsupportedFromUnsampled(t *testing.T) {
-	unsupported := Figure{Available: false}
-	unsampled := Figure{Available: true, Value: 0}
-
-	if unsupported.Available == unsampled.Available {
-		t.Fatal("a figure the source cannot provide must be distinguishable from one that is genuinely zero")
-	}
-}
+// Figure gets no test of its own here: it is a plain struct with no behaviour,
+// and Go does not test that a literal holds what was put into it. The design
+// point it carries is asserted in task 9, against a real server, by
+// TestUnavailableFigureIsMarkedNotOmitted.
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -979,7 +975,7 @@ type Cost struct {
 - [ ] **Step 4: Run the model tests to verify they pass**
 
 Run: `go test ./internal/model/ -v`
-Expected: PASS, two tests.
+Expected: PASS, one test.
 
 - [ ] **Step 5: Commit**
 
