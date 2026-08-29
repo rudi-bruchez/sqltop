@@ -1,0 +1,99 @@
+:root {
+  color-scheme: dark;
+  --bg: #14161a;
+  --panel: #1c2027;
+  --line: #2c323c;
+  --fg: #d8dee9;
+  --dim: #8a93a3;
+  --accent: #6fb3d2;
+  --warn: #d08770;
+  --ok: #8fbf7f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
+
+.conn { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.dot.live { background: var(--ok); }
+
+.build { color: var(--dim); font-size: 11px; }
+
+.message { margin: 6px 14px; color: var(--warn); min-height: 1.4em; }
+
+/* Visually hidden but still read by a screen reader, for the table caption. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.gridScroll {
+  margin: 0 14px 14px;
+  height: 78vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+#grid { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 12px; }
+#grid th {
+  position: sticky;
+  top: 0;
+  background: #232830;
+  color: var(--dim);
+  text-align: left;
+  font-weight: 600;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  z-index: 1;
+}
+/* Fixed height: the virtualisation in app.js needs it to compute the window. */
+#grid td { padding: 0 8px; height: 22px; border-bottom: 1px solid #22262d; white-space: nowrap; overflow: hidden; }
+#grid tbody tr { height: 22px; }
+#grid tbody tr:hover { background: #232830; }
+#grid tbody tr.sel { background: #2d3a44; }
+
+#statusBar {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 14px;
+  color: var(--dim);
+  border-top: 1px solid var(--line);
+}
+
+/* Formatters used by the grid cells. */
+.badge {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 2px;
+  font-size: 11px;
+  background: #2b323c;
+  color: var(--dim);
+}
+.badge.lck { background: #4a2f2b; color: #e8a08a; }
+.badge.io  { background: #2f3d4a; color: #8ab6d6; }
+.badge.cx  { background: #423a2a; color: #d6bb8a; }
+
+.sqlcell { color: #9aa7b8; overflow: hidden; text-overflow: ellipsis; }
+.blocked { color: var(--warn); }
+.num { font-variant-numeric: tabular-nums; text-align: right; display: block; }

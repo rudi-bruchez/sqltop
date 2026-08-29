@@ -183,21 +183,6 @@ func (s *Server) status(rw http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// stream is the route task 14 turns into the SSE feed. Wiring it here, even
-// as a stub, is what lets this task's tests exercise the full route table
-// and its authentication, rather than a subset of it that changes shape
-// again once the stream exists.
-//
-// It must not be implemented as a shared Encoder handed out to every
-// connection: an Encoder tracks which references a client has already been
-// sent (protocol.go), and a client that joins after another one would then
-// find its own reference table already marked "sent" for sessions it never
-// received a Ref for, showing blank SQL cells. Whoever wires this in task 14
-// must construct a fresh *Encoder per accepted connection.
-func (s *Server) stream(rw http.ResponseWriter, _ *http.Request) {
-	http.Error(rw, "not implemented", http.StatusNotImplemented)
-}
-
 // authenticate accepts the token from the query string, where the opened URL
 // puts it, or from a header, which the page uses afterwards. It is compared
 // with subtle.ConstantTimeCompare rather than Go's built-in != so the

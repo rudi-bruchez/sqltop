@@ -2,15 +2,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 
 	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
+	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/dotenv"
+	"github.com/rudi-bruchez/sqltop/internal/source/mssql"
+	"github.com/rudi-bruchez/sqltop/internal/web"
+	"github.com/rudi-bruchez/sqltop/internal/window"
 )
 
 func main() {
@@ -52,5 +58,33 @@ func main() {
 		return
 	}
 
-	log.Fatal("not implemented yet: run with -show-config")
+	dsn := os.Getenv("SQLTOP_CONN")
+	if len(cfg.Instances) > 0 && cfg.Instances[0].DSN != "" {
+		dsn = os.ExpandEnv(cfg.Instances[0].DSN)
+	}
+	if dsn == "" {
+		log.Fatal("no instance to connect to: set SQLTOP_CONN in .env, or add one to sqltop.json")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	src := mssql.New()
+	if err := src.Open(ctx, dsn); err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+
+	win := window.New(cfg.Retention.Std(), cfg.Budget.MaxSamples)
+	col := collector.New(src, win, collector.NewBudget(cfg.Budget.ServerCPUMsPerSecond, cfg.Tiers))
+	go col.Run(ctx)
+
+	srv, err := web.NewServer(col, win, cfg.Server, cfg.Tiers.Requests.Std())
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("sqltop on %s", srv.URL())
+	if err := srv.Serve(ctx); err != nil {
+		log.Fatal(err)
+	}
 }

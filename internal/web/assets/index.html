@@ -1,3 +1,38 @@
-<!doctype html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sqltop</title>
-<p>placeholder, replaced in task 14</p>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>sqltop</h1>
+  <div class="conn">
+    <span id="dot" class="dot" role="status" aria-label="disconnected"></span>
+    <span id="instance">connecting...</span>
+    <span id="version"></span>
+  </div>
+  <div id="build" class="build"></div>
+</header>
+
+<p id="message" class="message" role="status" aria-live="polite"></p>
+
+<div class="gridScroll">
+  <table id="grid" aria-describedby="rowCount">
+    <caption class="visually-hidden">Active requests on the connected instance</caption>
+    <thead><tr id="gridHead"><th scope="col">spid</th></tr></thead>
+    <tbody id="gridBody"></tbody>
+  </table>
+</div>
+
+<footer id="statusBar">
+  <span id="rowCount">0 requests</span>
+  <span id="seq"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
