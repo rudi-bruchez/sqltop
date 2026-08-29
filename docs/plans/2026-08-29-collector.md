@@ -2036,9 +2036,14 @@ Create `scripts/testdb.sh` and `chmod +x` it:
 #!/usr/bin/env bash
 # Start or wake the SQL Server container used by the integration tests, then
 # print the export line. Usage: eval "$(scripts/testdb.sh)"
+#
+# The container is the tool's own, named sqltop-test, created on first use with
+# the password below. It deliberately does not reuse whatever SQL Server
+# containers happen to exist on the machine: the tests must provision what they
+# need rather than depend on someone's local state.
 set -euo pipefail
 
-NAME="${SQLTOP_TEST_CONTAINER:-sql2022}"
+NAME="${SQLTOP_TEST_CONTAINER:-sqltop-test}"
 IMAGE="${SQLTOP_TEST_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
 PORT="${SQLTOP_TEST_PORT:-11433}"
 PASSWORD="${SQLTOP_TEST_PASSWORD:-Sqltop_dev_2026!}"
@@ -4586,7 +4591,7 @@ SQLTOP_CONN="$SQLTOP_TEST_DSN" go run ./cmd/sqltop
 ```
 Open the printed URL. In another terminal, generate activity:
 ```bash
-podman exec sql2022 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
+podman exec sqltop-test /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
   -P "${SQLTOP_TEST_PASSWORD:-Sqltop_dev_2026!}" -C \
   -Q "WAITFOR DELAY '00:00:20'"
 ```
