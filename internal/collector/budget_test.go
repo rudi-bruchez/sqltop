@@ -134,11 +134,16 @@ func TestRecoversOneStepAtATime(t *testing.T) {
 	// overage readings from the trailing ten seconds, and then the
 	// recovery clock itself credits from the oldest reading still in that
 	// window rather than from the moment the average crossed the line.
-	// Fifty quiet ticks comfortably clears both the window's turnover and a
-	// full recoveryPeriod counted from that credited start; a boundary test
-	// on that arithmetic would be brittle across constant changes and is
-	// deliberately not attempted here.
-	feed(b, &total, now.Add(30*time.Second), 50, 5)
+	//
+	// Under these constants the first step (level 2 to 1) lands on quiet
+	// tick 24 and the second (level 1 to 0) on quiet tick 54, thirty
+	// seconds later, matching recoveryPeriod once the first step's own
+	// window-turnover delay is behind it. Forty quiet ticks is 16 clear of
+	// the first step and 14 clear of the second: enough margin on both
+	// sides that this is a genuine two-sided assertion (at least one step,
+	// at most one), not a boundary test, which the arithmetic above is
+	// deliberately too specific to constant values to want pinned exactly.
+	feed(b, &total, now.Add(30*time.Second), 40, 5)
 	if _, level, _ := b.State(); level != 1 {
 		t.Fatalf("level = %d, want 1: recovery is one step per thirty quiet seconds, not a jump back", level)
 	}
@@ -149,14 +154,27 @@ func TestCounterResetDoesNotThrottle(t *testing.T) {
 	var total int64
 	now := time.Now()
 	feed(b, &total, now, 15, 80) // drive it over budget first, so the reset has something to spare us from
-	_, levelBefore, _ := b.State()
+	usedBefore, levelBefore, _ := b.State()
 	if levelBefore == 0 {
 		t.Fatal("test setup: the feed above should already have escalated")
 	}
+	windowLenBefore := len(b.window)
 
 	// The session reconnected: cpu_time restarts far below where it was.
 	b.Observe(model.Cost{At: now.Add(16 * time.Second), CPUMs: 5})
 
+	// The reset must be skipped outright, not folded in as a reading of
+	// zero cost: at this instant the window still averages well over the
+	// limit either way, so level and quietFrom alone cannot tell the two
+	// apart. The window itself can: a folded-in zero-cost reading is still
+	// one more interval appended (and would pull the average down, however
+	// slightly, the moment it entered the window).
+	if len(b.window) != windowLenBefore {
+		t.Fatalf("window length = %d after a reset, want unchanged %d: the reset must not be folded in as a zero-cost interval", len(b.window), windowLenBefore)
+	}
+	if used, _, _ := b.State(); used != usedBefore {
+		t.Fatalf("used = %v after a reset, want unchanged %v: a folded-in zero-cost reading would have moved it", used, usedBefore)
+	}
 	if _, level, _ := b.State(); level != levelBefore {
 		t.Fatalf("level = %d after a reset, want unchanged %d: a reconnection must not be read as a spike or as free capacity", level, levelBefore)
 	}
@@ -220,4 +238,113 @@ func TestEscalationCooldownSurvivesARecoveryStep(t *testing.T) {
 	if _, level, _ := b.State(); level == 0 {
 		t.Fatal("level = 0, want an escalation once the cooldown from the recovery step has actually passed")
 	}
+}
+
+func TestStateReportsWindowAverageNotLastReading(t *testing.T) {
+	b := NewBudget(1000, baseTiers()) // limit set high enough that nothing here throttles; this test is only about State()'s number
+	now := time.Now()
+	var total int64
+
+	// The first Observe only seeds; the window then holds four readings at
+	// 90, 10, 90, 10 ms/s. The last reading alone (10) is nowhere near the
+	// window's average (50): if State() ever regresses to reporting only
+	// the most recent interval, this is the assertion that catches it.
+	deltas := []int64{10, 90, 10, 90, 10}
+	at := now
+	for _, d := range deltas {
+		total += d
+		at = at.Add(time.Second)
+		b.Observe(model.Cost{At: at, CPUMs: total})
+	}
+
+	want := (90.0 + 10.0 + 90.0 + 10.0) / 4.0
+	if used, _, _ := b.State(); used != want {
+		t.Fatalf("used = %v, want the window average %v, not just the last reading (%v ms/s)", used, want, deltas[len(deltas)-1])
+	}
+}
+
+func TestWindowAverageIsTimeWeighted(t *testing.T) {
+	b := NewBudget(1000, baseTiers())
+	now := time.Now()
+
+	// Two readings of unequal duration: one second at 100 ms/s, then four
+	// seconds at 10 ms/s. A plain mean of the two per-reading rates gives
+	// 55; the correct, time-weighted answer gives the true rate over the
+	// five seconds actually observed, 28. Every other test in this file
+	// samples at a uniform one second, where the two computations agree,
+	// which is exactly why this case exists.
+	b.Observe(model.Cost{At: now, CPUMs: 0})
+	b.Observe(model.Cost{At: now.Add(1 * time.Second), CPUMs: 100})
+	b.Observe(model.Cost{At: now.Add(5 * time.Second), CPUMs: 140})
+
+	want := 140.0 / 5.0
+	plainMean := (100.0 + 10.0) / 2.0
+	if used, _, _ := b.State(); used != want {
+		t.Fatalf("used = %v, want the time-weighted average %v (a plain mean of the two readings would give %v)", used, want, plainMean)
+	}
+}
+
+func TestSubSecondCadenceEscalatesOnTrueRate(t *testing.T) {
+	b := NewBudget(50, baseTiers())
+	now := time.Now()
+	var total int64
+
+	// Sample five times a second: each 200ms interval costs 16ms, which
+	// read as "ms per reading" looks nowhere near the 50 ms/s limit, but
+	// the true rate, 16ms every 200ms, is 80 ms/s. A design that weights by
+	// reading count instead of elapsed time would under-react here.
+	at := now
+	b.Observe(model.Cost{At: at, CPUMs: 0})
+	for i := 0; i < 60; i++ {
+		at = at.Add(200 * time.Millisecond)
+		total += 16
+		b.Observe(model.Cost{At: at, CPUMs: total})
+	}
+
+	if _, level, _ := b.State(); level == 0 {
+		t.Fatal("level = 0, want throttled: sub-second sampling at a true rate of 80 ms/s must not be diluted by reading count")
+	}
+}
+
+func TestGapLongerThanWindowDropsStaleReadings(t *testing.T) {
+	b := NewBudget(1000, baseTiers())
+	now := time.Now()
+	var total int64
+
+	// Prime the window with heavy readings, then go silent for longer than
+	// budgetWindow before the next Observe. The single interval spanning
+	// that silence is counted whole, not prorated (a deliberate choice: see
+	// the package doc), so once it lands, every one of the earlier heavy
+	// readings must have aged out, leaving only this one interval in the
+	// window and used equal to its own rate.
+	feed(b, &total, now, 5, 500)
+	gapEnd := now.Add(5 * time.Second).Add(2 * budgetWindow)
+	total += 60
+	b.Observe(model.Cost{At: gapEnd, CPUMs: total})
+
+	if got := len(b.window); got != 1 {
+		t.Fatalf("window length = %d, want 1: a gap longer than the window must age out every reading from before it", got)
+	}
+	want := 60.0 / (2 * budgetWindow).Seconds()
+	if used, _, _ := b.State(); used != want {
+		t.Fatalf("used = %v, want %v: only the interval spanning the present should remain", used, want)
+	}
+}
+
+func TestBaseForPanicsOnUnknownTier(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("baseFor did not panic on a tier outside model.Tier's four values")
+		}
+	}()
+	baseFor(baseTiers(), model.Tier(99))
+}
+
+func TestDegradedFromPanicsOnUnknownTier(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("degradedFrom did not panic on a tier outside model.Tier's four values")
+		}
+	}()
+	degradedFrom(model.Tier(99))
 }

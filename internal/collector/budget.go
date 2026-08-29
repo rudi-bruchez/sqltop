@@ -37,6 +37,17 @@ const (
 	// the longest base period this throttles, five seconds, doubled to ten;
 	// a window turning over after that is twenty seconds, with no margin
 	// borrowed from any other constant.
+	//
+	// Debt: the ten seconds above is the default Space period (5s) doubled,
+	// baked in as a package constant. config.Tiers.Space is configurable
+	// per spec section 8.3; an operator who sets it to, say, 30s doubles it
+	// to 60s, and this fixed 20s cooldown no longer outlasts the visibility
+	// delay it was derived to cover. The way out is to stop deriving this
+	// from an assumption about config and instead compute it per Budget, in
+	// NewBudget, from the actual base.Space.Std() supplied there, making it
+	// a field rather than a package const. Left as a constant for now
+	// because no test or deployment has yet exercised a non-default Space
+	// period against this code; when one does, this is the line to change.
 	escalateCooldown = budgetWindow + 10*time.Second
 
 	maxLevel = 3
