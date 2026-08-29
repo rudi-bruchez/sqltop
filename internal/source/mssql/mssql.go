@@ -85,19 +85,24 @@ func (s *Source) Open(ctx context.Context, dsn string) error {
 		return fmt.Errorf("mssql: connect: %w", err)
 	}
 
-	// pool is set before pinning: connLocked reads it, and pinning here is
-	// what performs the first spid read. On failure connLocked has already
-	// closed whatever connection it grabbed from the pool without assigning
-	// it to s.db, so there is nothing left pinned to leak; only the pool
-	// itself needs closing.
-	s.pool = pool
+	// pool is set before pinning because connLocked reads it, and pinning
+	// here is what performs the first spid read. Both writes happen under
+	// the same mutex that guards every other read of the field, even though
+	// Open runs before anything else can call in: a field written outside
+	// the lock two lines from a Lock() reads as an oversight rather than as
+	// a fact about Open. On failure connLocked has already closed whatever
+	// connection it grabbed from the pool without assigning it to s.db, so
+	// there is nothing left pinned to leak; only the pool needs closing.
 	s.mu.Lock()
+	s.pool = pool
 	_, err = s.connLocked(ctx)
+	if err != nil {
+		s.pool = nil
+	}
 	s.mu.Unlock()
 	if err != nil {
 		pool.Close()
-		s.pool = nil
-		return fmt.Errorf("mssql: reading own spid: %w", err)
+		return fmt.Errorf("mssql: pinning a connection: %w", err)
 	}
 	return nil
 }
