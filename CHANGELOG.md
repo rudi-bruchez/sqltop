@@ -21,3 +21,11 @@ Settled before any of it was written:
 - The observation budget, measured as server CPU from the tool's own session
   rather than as a round trip, so a distant server does not throttle a healthy
   one.
+
+Added while building it: a demonstration database restored into the podman
+container by `scripts/restoredb.sh`, and `sqlstress/`, a load generator that
+runs `.sql` files against it for a set duration on a set number of threads.
+The container had held only the system databases, which is enough to ask the
+DMVs about a sleeping session and not enough for anything else: a query that
+reads nothing produces no logical reads, no tempdb, no memory grant, and two
+sessions cannot block each other without a row to lock.
