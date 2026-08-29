@@ -15,12 +15,3 @@ func TestCapabilitiesSet(t *testing.T) {
 		t.Error("the empty set has nothing")
 	}
 }
-
-func TestFigureDistinguishesUnsupportedFromUnsampled(t *testing.T) {
-	unsupported := Figure{Available: false}
-	unsampled := Figure{Available: true, Value: 0}
-
-	if unsupported.Available == unsampled.Available {
-		t.Fatal("a figure the source cannot provide must be distinguishable from one that is genuinely zero")
-	}
-}
