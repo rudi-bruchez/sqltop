@@ -409,35 +409,119 @@ specifically and are already prototyped in the bench.
 Filtering is per column, and combinable. Filtering by database and by command
 type is the pair that gets used most, hence their explicit mention.
 
+Sorting and filtering happen in the browser, on data already in the retention
+window. Section 10.1 records the measurement behind that: nine modes, every
+client-side candidate against a server-side twin, and the pairs do not
+separate. Doing the work in Go would also cost the three properties that
+matter here, namely a filter per viewer rather than per server, a filter that
+applies to the history rather than deciding what was ever collected, and rows
+that leave the grid because they ended rather than because they stopped
+matching, which the wire protocol cannot otherwise tell apart.
+
+#### Operators
+
+Five, and no more until something concrete needs a sixth.
+
+| Operator | Applies to | Note |
+|---|---|---|
+| `contains` | text | The default for a typed filter |
+| `=` | text and numbers | |
+| `>` , `<` | numbers | What makes "everything above a second of CPU" expressible |
+| `in` | text | A list, for picking several databases or commands at once |
+
+Text comparison is case-insensitive. A DBA hunting a runaway query is not
+also spelling a database name in the right case.
+
+Filters on different columns combine with AND. Several values on one column
+through `in` combine with OR, which is what `in` means. There is no interface
+for expressing anything else, deliberately: a filter language is a project of
+its own and this is a grid.
+
+#### Sorting and filtering against the blocking tree
+
+The blocking view of section 7 orders a blocker immediately above those it
+blocks, which is an ordering a column sort would destroy and a filter would
+tear holes in. Both are defined rather than forbidden.
+
+Sorting reorders the chain heads and keeps each chain welded underneath its
+own. The worst chain comes to the top and the structure survives, which is
+the only version of sorting that is worth anything in this view.
+
+Filtering pulls a matching row's blockers in with it, shown greyed and marked
+as context even though they do not match. A blocking chain means nothing
+without its head: the blocker is what the operator is looking for, and it is
+routinely in a database they did not filter for.
+
+#### The scroll position when a filter shrinks the list
+
+Changing a filter re-anchors the view on the selected row, if it survives the
+filter, and goes to the top otherwise. Keeping the selection in view is the
+central gesture of the tool.
+
+This is a real problem and not a hypothetical one. Filtering 800 rows down to
+110 while scrolled toward the bottom cost five scroll positions out of 122
+ticks on the bench, against none in the eight other modes, because the
+content became shorter than the offset and the browser clamped it, again on
+every tick as the row count moved.
+
 ### 8.2 Column selection and saved layouts
 
 Columns can be shown, hidden, reordered and resized. That state is a named
 layout and it persists.
 
 A layout holds the column set, order and widths per view, the sort, the saved
-filters, and the collapsed or expanded state of the dashboard. Layouts are named
-and switchable. One layout is the default.
+filters, the dashboard's tile selection, and which of its groups are folded.
+Layouts are named and switchable. One layout is the default.
 
-Persistence is a JSON file, not browser local storage. Reasons: it survives a
-change of browser, it can be copied between machines, it can be committed to a
-team repository, and a DBA who has built a good layout can hand it to a
-colleague. The server owns the file and the UI reads and writes it through an
-endpoint.
+The dashboard is configurable the same way the grid is: a layout may name the
+groups it wants and, inside a group, the figures it wants, and a group or
+figure the file does not mention keeps the built-in default. Hiding a tile is
+a display decision and never a collection decision. The collector goes on
+sampling every figure, for three reasons: a figure that stopped being
+collected has no history, so re-enabling its tile would show an empty
+sparkline rather than the slope that made you look; two browsers on one
+collector would need either a union or a query each; and "you hid it" would
+need a third visual state next to "the server cannot answer it", when the
+whole point of the Available flag is that there are two.
+
+Suppressing collection is a separate setting with a separate name. See the
+collection scope in section 8.3, which turns a whole tier off for everybody
+and is worth something precisely because it removes a query rather than a
+tile.
+
+Persistence is the configuration file, not browser local storage. Reasons: it
+survives a change of browser, it can be copied between machines, it can be
+committed to a team repository, and a DBA who has built a good layout can hand
+it to a colleague. The server owns the file and the UI reads and writes it
+through an endpoint.
 
 ### 8.3 The configuration file
 
-One file holds everything the user can tune: instance list, refresh tiers,
-retention window, layouts.
+One file, `sqltop.yaml`, holds everything the user can tune: instance list,
+refresh tiers, retention window, collection scope, layouts.
+
+YAML rather than JSON, which is a dependency in a project whose rule is
+standard library first, so the reason is written down here as well as in the
+commit that introduces it. This file is meant to be opened and edited by hand
+and handed between colleagues, and JSON is a poor format for that: quoted
+keys, no trailing commas, and a syntax error message that points at a
+character rather than at a field. The parser accepts JSON as well, since JSON
+is a subset of YAML, so an existing `sqltop.json` works unchanged once
+renamed.
+
+The tool rewrites this file when the interface saves a layout. Comments do
+not survive that rewrite, so the file does not carry any and nothing in it
+depends on carrying any.
 
 Both a portable install and a per-user install must work, so the file is looked
 up in this order and the first hit wins:
 
 1. The path given by `--config`, if present. An explicit path that does not
    exist is an error, not a silent fallback.
-2. `sqltop.json` beside the binary. Portable mode: a binary and its config on a
+2. `sqltop.yaml` beside the binary. Portable mode: a binary and its config on a
    USB stick or a jump box. It wins over the user directory, because someone who
    put a file next to the binary meant it.
-3. `sqltop.json` in the user configuration directory, from `os.UserConfigDir`.
+3. `sqltop.yaml` in the user configuration directory, from `os.UserConfigDir`.
    `~/.config/sqltop/` on Linux, `%AppData%` on Windows, `Library/Application
    Support` on macOS.
 4. No file at all: built-in defaults, nothing written until the user saves.
@@ -449,43 +533,80 @@ never a doubt about which one is being edited.
 
 Shape:
 
-```json
-{
-  "instances": [
-    { "name": "PROD-SQL01", "dsn": "sqlserver://prod-sql01?authenticator=krb5" },
-    { "name": "Azure sales", "dsn": "sqlserver://x.database.windows.net?database=sales" }
-  ],
-  "tiers": {
-    "requests": "1s", "counters": "1s", "space": "5s",
-    "cpuHistory": "60s", "livePlan": "2s"
-  },
-  "retention": "15m",
-  "server": { "port": 8420 },
-  "budget": { "serverCpuMsPerSecond": 50 },
-  "layouts": {
-    "default": {
-      "dashboardCollapsed": false,
-      "views": {
-        "requests": {
-          "columns": [
-            { "field": "spid", "width": 60 },
-            { "field": "database", "width": 100 },
-            { "field": "command", "width": 100 },
-            { "field": "cpu_ms", "width": 90 }
-          ],
-          "sort": [{ "field": "cpu_ms", "dir": "desc" }],
-          "filters": [{ "field": "database", "op": "in", "value": ["CRM"] }]
-        }
-      }
-    }
-  }
-}
+```yaml
+instances:
+  - name: PROD-SQL01
+    dsn: sqlserver://prod-sql01?authenticator=krb5
+  - name: Azure sales
+    dsn: sqlserver://x.database.windows.net?database=sales
+
+tiers:
+  requests: 1s
+  counters: 1s
+  space: 5s
+  cpuHistory: 60s
+  livePlan: 2s
+
+retention: 15m
+server:
+  port: 8420
+budget:
+  serverCpuMsPerSecond: 50
+
+collect:
+  skipTiers: []
+
+layouts:
+  default:
+    dashboard:
+      groups:
+        - id: cpu
+          folded: false
+          figures: [sql_cpu_percent, runnable_tasks, scheduler_load_factor]
+        - id: memory
+          folded: true
+    views:
+      requests:
+        columns:
+          - field: spid
+            width: 60
+          - field: database
+            width: 100
+          - field: command
+            width: 100
+          - field: cpu_ms
+            width: 90
+        sort:
+          - field: cpu_ms
+            dir: desc
+        filters:
+          - field: database
+            op: in
+            value: [CRM]
+      blocking:
+        columns:
+          - field: spid
+            width: 60
+          - field: blocking_depth
+            width: 50
+          - field: sql_text
+            width: 520
 ```
 
+`collect.skipTiers` is the collection scope of section 8.2. A tier named there
+is never sampled, for every viewer, which removes its query rather than its
+tiles. Absent or empty means collect everything.
+
 A layout is exactly that shape: per view, an ordered column list with widths,
-a sort, and a filter list. Column order is the array order; a column absent from
-the array is hidden. Anything the file does not mention falls back to the
-built-in default, so a hand-written partial layout is valid.
+a sort, and a filter list, plus the dashboard's groups and figures. Column
+order is the list order; a column absent from the list is hidden. Anything the
+file does not mention falls back to the built-in default, so a hand-written
+partial layout is valid, and the `blocking` view above inherits its sort and
+filters while naming only three columns.
+
+Every view of section 7 is configured independently under `views`, because a
+blocking chain and a repetitive-query aggregation do not want the same columns
+in the same order.
 
 Every refresh tier of section 10 is configurable here, including the live plan
 refresh period, and the collection budget past which the tool throttles itself. Connection secrets are not stored
