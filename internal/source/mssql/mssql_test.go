@@ -418,10 +418,20 @@ func TestSampleRequestsSeesALongQuery(t *testing.T) {
 	}
 }
 
+// TestIsolationSurvivesASessionReset is what its name claims to guard, which
+// a review found it did not: SessionInitSQL is what makes the isolation
+// level survive a genuine reconnection, and a regression that moved the
+// session setup to a one-off statement issued right after Open first
+// connects - instead of leaving it on the connector, where the driver reruns
+// it on every physical connection it opens - would still pass the five
+// SampleRequests calls this test used to stop at, because none of them ever
+// leaves the one physical connection Open pinned. Forcing the reset needs an
+// actual break: this kills the session out from under the Source, the same
+// way TestQueryAfterSessionKilledRepairsThePinnedConnection does, and only
+// then reads the isolation level back - on the fresh physical connection
+// connLocked re-pins afterwards, which is the connection this test is
+// actually supposed to be checking.
 func TestIsolationSurvivesASessionReset(t *testing.T) {
-	// SessionInitSQL is what makes this true. A one-off SET after connecting
-	// would be lost the moment database/sql resets or re-establishes the
-	// connection, and the tool would start locking without anyone noticing.
 	s := open(t)
 	ctx := context.Background()
 
@@ -430,14 +440,47 @@ func TestIsolationSurvivesASessionReset(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	killer, err := sql.Open("sqlserver", os.Getenv("SQLTOP_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer killer.Close()
+	if _, err := killer.ExecContext(ctx, fmt.Sprintf("KILL %d", s.spid)); err != nil {
+		t.Fatalf("KILL %d: %v", s.spid, err)
+	}
+
+	// KILL is asynchronous: poll until a query on the pinned connection
+	// actually observes the break and repairLocked drops it, exactly as in
+	// TestQueryAfterSessionKilledRepairsThePinnedConnection.
+	const probe = "SELECT 1 OPTION (RECOMPILE, MAXDOP 1)"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := s.queryRow(ctx, probe, &n); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session was killed but the pinned connection kept answering queries for ten seconds")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// This is the query that actually re-pins a fresh physical connection,
+	// which is when SessionInitSQL runs again - the moment the rest of this
+	// test exists to check.
+	if _, err := s.SampleRequests(ctx); err != nil {
+		t.Fatal(err)
+	}
+
 	var level int
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.queryRow(ctx,
 		`SELECT transaction_isolation_level FROM sys.dm_exec_sessions
-		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level); err != nil {
+		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`, &level); err != nil {
 		t.Fatal(err)
 	}
 	if level != 1 {
-		t.Fatalf("isolation level = %d after several queries, want 1", level)
+		t.Fatalf("isolation level = %d after a genuine reconnection, want 1: SessionInitSQL must survive a fresh physical connection, not just the one Open pinned", level)
 	}
 }
 
