@@ -90,11 +90,33 @@ type Ref struct {
 // so a JavaScript consumer can test capability membership without knowing
 // Go's bit layout for model.Capabilities.
 type StatusPayload struct {
-	Sqltop    string   `json:"sqltop"`
-	Connected bool     `json:"connected"`
-	Message   string   `json:"message,omitempty"`
-	Instance  string   `json:"instance"`
-	Version   string   `json:"version"`
+	Sqltop    string `json:"sqltop"`
+	Connected bool   `json:"connected"`
+	Message   string `json:"message,omitempty"`
+	Instance  string `json:"instance"`
+	Version   string `json:"version"`
+	// Host, Edition and StartedAt complete the first row of spec section
+	// 6's dashboard table, "instance, host, edition, version, uptime,
+	// once at connection". They are per-connection invariants and by the
+	// logic of Ref above they ought to travel once rather than on every
+	// tick. They do not, because the mechanism that would deliver them
+	// once is the reference table, which is keyed per session of the
+	// monitored server and has nothing to do with the client's own
+	// connection, so this would need a second delivery mechanism built
+	// for three strings. Measured at 74 bytes of a 22 kB snapshot, 0.3 %.
+	// The reference table exists because SQL text and program name were
+	// 31 % of the payload; this is three orders of magnitude away from
+	// that and buying it a mechanism would be the abstraction rule's
+	// exact failure case.
+	Host    string `json:"host,omitempty"`
+	Edition string `json:"edition,omitempty"`
+	// StartedAt is the instance's start time in Unix milliseconds, zero
+	// when unknown. Sent as an instant rather than as an uptime duration
+	// so the page can count the uptime up between ticks instead of
+	// freezing it at whatever the last snapshot said, and so a throttled
+	// tier that slows the stream to eight seconds does not make the
+	// uptime visibly stutter.
+	StartedAt int64    `json:"startedAt,omitempty"`
 	Caps      []string `json:"caps,omitempty"`
 	// CostMsPerSecond is collector.Status.CostMsPerSecond: the tool's own
 	// server CPU cost, averaged over the observation budget's sliding
@@ -104,6 +126,18 @@ type StatusPayload struct {
 	// inside the throttle message, which only renders once the tool is
 	// already throttled.
 	CostMsPerSecond float64 `json:"costMsPerSecond"`
+}
+
+// startedAtMillis converts the instance start time for the wire, mapping
+// the zero time to zero rather than to the year 1 in milliseconds. The
+// client shows an uptime only for a nonzero value: a server whose start
+// time was not read is one whose uptime is unknown, and "up 2025 years" is
+// the plausible-looking lie the whole Available convention exists to stop.
+func startedAtMillis(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 // capName is checked against every bit in model.Capabilities in this fixed
@@ -140,12 +174,15 @@ type SnapshotPayload struct {
 	TS   int64          `json:"ts"`
 	Rows []Row          `json:"rows"`
 	Refs map[string]Ref `json:"refs,omitempty"`
-	// Figures is also ahead of its consumer: no dashboard ships with task
-	// 14's request grid (that is UI-plan work, spec section 6), so the
-	// client never reads this today. About 1.2 kB of a typical 22 kB
-	// snapshot. Kept on the wire now for the same reason as Row.Percent
-	// above: the collector already produces it, and the alternative is
-	// adding it back later as its own wire-format change.
+	// Figures carries the dashboard of spec section 6. It was on the wire
+	// for a release before anything read it, which is why it is a map of
+	// model.Figure rather than a struct: the collector merges four tiers
+	// into one keyed set at different periods, and a fixed struct would
+	// have to invent a zero for every tier that has not reported yet,
+	// which is the one thing model.Figure.Available exists to prevent. A
+	// key absent from this map and a key present with Available false are
+	// deliberately different things, and the page treats them the same
+	// way: no number.
 	Figures map[string]model.Figure `json:"figures,omitempty"`
 	Status  StatusPayload           `json:"status"`
 }
@@ -273,6 +310,9 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 			Message:         st.Message,
 			Instance:        st.Info.Instance,
 			Version:         st.Info.ProductVersion,
+			Host:            st.Info.Host,
+			Edition:         st.Info.Edition,
+			StartedAt:       startedAtMillis(st.Info.StartedAt),
 			Caps:            capNames(st.Caps),
 			CostMsPerSecond: st.CostMsPerSecond,
 		},

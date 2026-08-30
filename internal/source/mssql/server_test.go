@@ -3,6 +3,7 @@ package mssql
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
@@ -26,15 +27,25 @@ func TestGatedReadsDoNotTouchAServerTheyMayNotRead(t *testing.T) {
 	}
 
 	figures := map[string]model.Figure{}
-	if err := s.readSpace(ctx, figures); err != nil {
+	if err := s.readSpace(ctx, time.Now(), figures); err != nil {
 		t.Errorf("readSpace returned %v; an absent capability is not an error", err)
+	}
+
+	if err := s.readOSViews(ctx, figures); err != nil {
+		t.Errorf("readOSViews returned %v; an absent capability is not an error", err)
 	}
 	for name, f := range figures {
 		if f.Available {
 			t.Errorf("%s came back available with no capability to read it; an unreadable figure has to say so rather than show a zero", name)
 		}
 	}
-	for _, name := range []string{"tempdb_used_mb", "tempdb_free_mb"} {
+	for _, name := range []string{
+		"tempdb_used_mb", "tempdb_free_mb", "tempdb_user_objects_mb",
+		"tempdb_internal_objects_mb", "tempdb_version_store_mb",
+		"version_store_mb", "version_store_growth_mb_s",
+		"runnable_tasks", "scheduler_load_factor", "schedulers_online",
+		"current_tasks", "buffer_pool_mb", "plan_cache_mb", "query_memory_mb",
+	} {
 		if _, ok := figures[name]; !ok {
 			t.Errorf("%s is missing; the dashboard needs the tile marked unavailable, not absent", name)
 		}

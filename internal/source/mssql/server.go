@@ -66,9 +66,29 @@ func (s *Source) SampleServer(ctx context.Context, tier model.Tier) (model.Serve
 		info, _ := s.snapshot()
 		applyLongestTransactionGate(out.Figures, info.HasReadCommittedSnapshot)
 
+		// Scheduler load and the memory clerks ride the counters tier
+		// rather than the five second space tier: runnable tasks is a
+		// pressure signal that has to move at the same cadence as the grid
+		// to be worth anything, since a queue that forms and clears inside
+		// five seconds is exactly the one an operator is trying to catch.
+		// It is a second round trip on this tier, not a free addition:
+		// measured at 1.70 ms of server CPU per call against the container,
+		// averaged over 40 runs after warming the plan, next to 4.17 ms for
+		// the counters query it rides beside. At a one second period that is
+		// 1.7 ms/s of the 50 ms/s budget, 3.4 %. Worth re-measuring on an
+		// instance with a large memory-clerk population, which is the half
+		// of this query that grows with the server rather than staying
+		// fixed: sys.dm_os_schedulers has one row per scheduler, but
+		// sys.dm_os_memory_clerks can run to thousands on a big box. If it
+		// ever stops being cheap, this moves to the five second space tier
+		// and runnable tasks loses resolution.
+		if err := s.readOSViews(ctx, out.Figures); err != nil {
+			return out, err
+		}
+
 	case model.TierSpace:
 		out.Figures = map[string]model.Figure{}
-		if err := s.readSpace(ctx, out.Figures); err != nil {
+		if err := s.readSpace(ctx, out.At, out.Figures); err != nil {
 			return out, err
 		}
 
@@ -162,11 +182,11 @@ func (s *Source) readCounters(ctx context.Context) (map[string]int64, error) {
 // counters need, CapInstanceWideView.
 const spaceQuery = `
 SELECT
-    (SELECT SUM(user_object_reserved_page_count + internal_object_reserved_page_count
-              + version_store_reserved_page_count) * 8.0 / 1024.0
-       FROM tempdb.sys.dm_db_file_space_usage),
-    (SELECT SUM(unallocated_extent_page_count) * 8.0 / 1024.0
-       FROM tempdb.sys.dm_db_file_space_usage)
+    SUM(user_object_reserved_page_count) * 8.0 / 1024.0,
+    SUM(internal_object_reserved_page_count) * 8.0 / 1024.0,
+    SUM(version_store_reserved_page_count) * 8.0 / 1024.0,
+    SUM(unallocated_extent_page_count) * 8.0 / 1024.0
+FROM tempdb.sys.dm_db_file_space_usage
 OPTION (RECOMPILE, MAXDOP 1)`
 
 // versionStoreQuery is its own view and its own capability, not part of
@@ -181,17 +201,29 @@ const versionStoreQuery = `
 SELECT ISNULL(SUM(reserved_space_kb), 0) FROM sys.dm_tran_version_store_space_usage
 OPTION (RECOMPILE, MAXDOP 1)`
 
-func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) error {
+func (s *Source) readSpace(ctx context.Context, at time.Time, into map[string]model.Figure) error {
 	_, caps := s.snapshot()
 
-	into["tempdb_used_mb"] = model.Figure{Unit: "MB", Available: false}
-	into["tempdb_free_mb"] = model.Figure{Unit: "MB", Available: false}
+	// Spec section 6 asks for tempdb broken into free, user objects,
+	// internal objects and version store, which is why the four page counts
+	// are read separately and tempdb_used_mb is now their sum computed here
+	// rather than a fifth SUM the server does over the same rows. Summing in
+	// Go makes the breakdown add up to the total by construction: two
+	// separate aggregates over a view that moves between them can disagree,
+	// and a dashboard whose parts do not sum to its whole is one an operator
+	// stops trusting.
+	for _, k := range []string{"tempdb_used_mb", "tempdb_free_mb", "tempdb_user_objects_mb", "tempdb_internal_objects_mb", "tempdb_version_store_mb"} {
+		into[k] = model.Figure{Unit: "MB", Available: false}
+	}
 	if caps.Has(model.CapInstanceWideView) {
-		var usedMB, freeMB float64
-		err := s.queryRow(ctx, spaceQuery, &usedMB, &freeMB)
+		var userMB, internalMB, versionMB, freeMB float64
+		err := s.queryRow(ctx, spaceQuery, &userMB, &internalMB, &versionMB, &freeMB)
 		switch {
 		case err == nil:
-			into["tempdb_used_mb"] = model.Figure{Value: usedMB, Unit: "MB", Available: true}
+			into["tempdb_user_objects_mb"] = model.Figure{Value: userMB, Unit: "MB", Available: true}
+			into["tempdb_internal_objects_mb"] = model.Figure{Value: internalMB, Unit: "MB", Available: true}
+			into["tempdb_version_store_mb"] = model.Figure{Value: versionMB, Unit: "MB", Available: true}
+			into["tempdb_used_mb"] = model.Figure{Value: userMB + internalMB + versionMB, Unit: "MB", Available: true}
 			into["tempdb_free_mb"] = model.Figure{Value: freeMB, Unit: "MB", Available: true}
 		case isCapabilityAbsent(err):
 			// Left unavailable above: the probe said yes and rights changed
@@ -207,19 +239,128 @@ func (s *Source) readSpace(ctx context.Context, into map[string]model.Figure) er
 	// sys.dm_tran_version_store_space_usage, which spec section 6 names and
 	// which are per-database rather than instance-wide. Two sources for one
 	// number is how dashboards start disagreeing with themselves.
+	//
+	// tempdb_version_store_mb above and version_store_mb here are two
+	// different measurements and are shown as two different figures, not
+	// reconciled into one: the first is the space the version store reserves
+	// inside tempdb's own files, the second is what the transaction version
+	// store reports it is using across databases. They move together and
+	// they will not match. Spec section 6 lists them on separate rows, from
+	// separate views, and that is what the dashboard shows.
 	into["version_store_mb"] = model.Figure{Unit: "MB", Available: false}
+	// Spec section 6 asks for the version store's growth rate as well as its
+	// size, and a rate is the figure that actually tells an operator whether
+	// a long-running snapshot reader is still making things worse or has
+	// finished. Unavailable on the first sample of a connection, like every
+	// other differentiated figure here: there is nothing to subtract from.
+	into["version_store_growth_mb_s"] = model.Figure{Unit: "MB/s", Available: false}
 	if caps.Has(model.CapVersionStoreUsage) {
 		var kb float64
 		err := s.queryRow(ctx, versionStoreQuery, &kb)
 		switch {
 		case err == nil:
-			into["version_store_mb"] = model.Figure{Value: kb / 1024.0, Unit: "MB", Available: true}
+			mb := kb / 1024.0
+			into["version_store_mb"] = model.Figure{Value: mb, Unit: "MB", Available: true}
+			if rate, ok := s.versionStore.rate(at, mb); ok {
+				into["version_store_growth_mb_s"] = model.Figure{Value: rate, Unit: "MB/s", Available: true}
+			}
 		case isCapabilityAbsent(err):
 			// Left unavailable above.
 		default:
 			return fmt.Errorf("mssql: version store: %w", err)
 		}
 	}
+	return nil
+}
+
+// osViewsQuery reads scheduler load and the memory clerks in one round trip.
+// Spec section 6 asks for runnable tasks and load factor per scheduler, and
+// for the buffer pool, plan cache and query memory grouped by clerk type.
+//
+// Debt: per scheduler is not what this returns. model.Figure is one scalar,
+// so a per-scheduler breakdown is a table, and a table is a view (spec
+// section 7) rather than a dashboard tile. What ships is the instance-level
+// aggregate that answers the question the dashboard is for, "is the CPU
+// saturated and are tasks queueing", and the per-scheduler detail waits for
+// the view that can display it. A dashboard tile per scheduler on a 128-core
+// box would be unreadable anyway.
+//
+// Both views are sys.dm_os_*, both need VIEW SERVER STATE, and both are
+// absent on Azure SQL Database, which has no OS-level view of its host. They
+// therefore succeed and fail under exactly the same conditions, which is why
+// they share one round trip and one gate, CapSchedulerLoad. probe grants
+// that by reading sys.dm_os_schedulers directly rather than inferring it, so
+// on Azure SQL Database the read simply comes back false and every figure
+// below stays unavailable. Giving sys.dm_os_memory_clerks a second
+// capability of its own would be a distinction with no case that can tell
+// the two apart.
+//
+// pages_kb, not the single_pages_kb/multi_pages_kb pair it replaced: that
+// rename landed in SQL Server 2012, which is this tool's floor (spec
+// section 3), so no version gate is needed.
+const osViewsQuery = `
+SELECT s.runnable, s.load_factor, s.online, s.current_tasks,
+       m.buffer_pool_kb, m.plan_cache_kb, m.query_memory_kb
+FROM (
+    SELECT ISNULL(SUM(runnable_tasks_count), 0) AS runnable,
+           ISNULL(AVG(CAST(load_factor AS float)), 0) AS load_factor,
+           COUNT(*) AS online,
+           ISNULL(SUM(current_tasks_count), 0) AS current_tasks
+    FROM sys.dm_os_schedulers
+    WHERE status = N'VISIBLE ONLINE'
+) AS s
+CROSS JOIN (
+    SELECT ISNULL(SUM(CASE WHEN type = N'MEMORYCLERK_SQLBUFFERPOOL' THEN pages_kb END), 0) AS buffer_pool_kb,
+           ISNULL(SUM(CASE WHEN type IN (N'CACHESTORE_SQLCP', N'CACHESTORE_OBJCP',
+                                         N'CACHESTORE_PHDR', N'CACHESTORE_XPROC') THEN pages_kb END), 0) AS plan_cache_kb,
+           ISNULL(SUM(CASE WHEN type = N'MEMORYCLERK_SQLQERESERVATIONS' THEN pages_kb END), 0) AS query_memory_kb
+    FROM sys.dm_os_memory_clerks
+) AS m
+OPTION (RECOMPILE, MAXDOP 1)`
+
+// readOSViews fills the scheduler and memory-clerk figures. Every key is
+// written unavailable first, so one failing view leaves its own tiles
+// greyed instead of removing them from the dashboard: spec section 4.1
+// again, a tile that disappears is a worse answer than a tile that says it
+// does not know.
+func (s *Source) readOSViews(ctx context.Context, into map[string]model.Figure) error {
+	for _, f := range []struct{ key, unit string }{
+		{"runnable_tasks", ""},
+		{"scheduler_load_factor", ""},
+		{"schedulers_online", ""},
+		{"current_tasks", ""},
+		{"buffer_pool_mb", "MB"},
+		{"plan_cache_mb", "MB"},
+		{"query_memory_mb", "MB"},
+	} {
+		into[f.key] = model.Figure{Unit: f.unit, Available: false}
+	}
+
+	_, caps := s.snapshot()
+	if !caps.Has(model.CapSchedulerLoad) {
+		return nil
+	}
+
+	var runnable, online, currentTasks, bufferKB, planKB, queryKB int64
+	var loadFactor float64
+	err := s.queryRow(ctx, osViewsQuery, &runnable, &loadFactor, &online, &currentTasks, &bufferKB, &planKB, &queryKB)
+	switch {
+	case err == nil:
+	case isCapabilityAbsent(err):
+		// Left unavailable above: the probe said yes and rights changed
+		// since, the same edge readCounters allows for.
+		return nil
+	default:
+		return fmt.Errorf("mssql: os views: %w", err)
+	}
+
+	into["runnable_tasks"] = model.Figure{Value: float64(runnable), Available: true}
+	into["scheduler_load_factor"] = model.Figure{Value: loadFactor, Available: true}
+	into["schedulers_online"] = model.Figure{Value: float64(online), Available: true}
+	into["current_tasks"] = model.Figure{Value: float64(currentTasks), Available: true}
+	into["buffer_pool_mb"] = model.Figure{Value: float64(bufferKB) / 1024.0, Unit: "MB", Available: true}
+	into["plan_cache_mb"] = model.Figure{Value: float64(planKB) / 1024.0, Unit: "MB", Available: true}
+	into["query_memory_mb"] = model.Figure{Value: float64(queryKB) / 1024.0, Unit: "MB", Available: true}
 	return nil
 }
 

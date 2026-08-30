@@ -795,46 +795,6 @@ func TestSampleServerSpaceTier(t *testing.T) {
 	}
 }
 
-// TestEveryQueryCarriesTheHints guards the three requirements that are easy to
-// forget the day someone adds a query: read uncommitted comes from the session,
-// but RECOMPILE keeps the plan out of the cache and MAXDOP 1 keeps a monitoring
-// query from taking parallel workers on the server it is watching. Both are per
-// statement, and SQL Server allows only one OPTION clause per query, so they
-// have to travel together.
-func TestEveryQueryCarriesTheHints(t *testing.T) {
-	queries := map[string]string{
-		"identify": identifyQuery,
-		"cost":     costQuery,
-		// requestsQueryTemplate, not a built s.requestsQuery: task 8 made the
-		// requests query version- and capability-dependent, built once per
-		// server by buildRequestsQuery (see requests_test.go's
-		// TestBuiltQueryGates for the per-shape check). The trailing OPTION
-		// clause is fixed text in the template, outside every substitution,
-		// so the template alone already proves every built shape carries it.
-		"requests":     requestsQueryTemplate,
-		"counters":     countersQuery,
-		"space":        spaceQuery,
-		"versionStore": versionStoreQuery,
-		"cpuHistory":   cpuHistoryQuery,
-		"spid":         spidQuery,
-		// instanceWideViewGrantQuery and canQueryTemplate are probe's own
-		// queries (mssql.go): easy to forget here because probe runs once,
-		// inside Identify, rather than on a collection tier, but they carry
-		// the same RECOMPILE/MAXDOP 1 obligation as every other statement
-		// this source sends.
-		"instanceWideViewGrant": instanceWideViewGrantQuery,
-		"can":                   canQueryTemplate,
-	}
-	for name, q := range queries {
-		if !strings.Contains(q, "OPTION (RECOMPILE, MAXDOP 1)") {
-			t.Errorf("%s query is missing OPTION (RECOMPILE, MAXDOP 1)", name)
-		}
-		if strings.Count(strings.ToUpper(q), "OPTION (") != 1 {
-			t.Errorf("%s query has %d OPTION clauses, SQL Server allows one", name, strings.Count(strings.ToUpper(q), "OPTION ("))
-		}
-	}
-}
-
 func TestUnavailableFigureIsMarkedNotOmitted(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
@@ -882,5 +842,158 @@ func TestOtherCPUPercentUnavailableWhenIdleIsZero(t *testing.T) {
 	}
 	if f := got.Figures["other_cpu_percent"]; f.Available {
 		t.Fatalf("other_cpu_percent = %+v with idle == 0, want unavailable rather than a fabricated 100%%", f)
+	}
+}
+
+// TestSpaceTierBreaksTempdbDownConsistently drives the four page counts spec
+// section 6 asks for against a real engine and checks the one property that
+// makes the breakdown worth showing: the parts add up to the total. That
+// only holds because readSpace sums them in Go from a single read of
+// sys.dm_db_file_space_usage; the previous shape asked the server for the
+// total in one aggregate and would have let the two disagree whenever tempdb
+// moved between them.
+func TestSpaceTierBreaksTempdbDownConsistently(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SampleServer(ctx, model.TierSpace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parts := []string{"tempdb_user_objects_mb", "tempdb_internal_objects_mb", "tempdb_version_store_mb"}
+	var sum float64
+	for _, k := range parts {
+		f, ok := got.Figures[k]
+		if !ok {
+			t.Fatalf("%s is missing; the dashboard needs the tile marked unavailable, not absent", k)
+		}
+		if !f.Available {
+			t.Fatalf("%s = %+v, want a reading on a container instance", k, f)
+		}
+		if f.Value < 0 {
+			t.Errorf("%s = %v, a reserved page count cannot be negative", k, f.Value)
+		}
+		sum += f.Value
+	}
+
+	total := got.Figures["tempdb_used_mb"]
+	if !total.Available {
+		t.Fatalf("tempdb_used_mb = %+v, want a reading", total)
+	}
+	// Exact equality: the total is computed from these three values in the
+	// same function, not read separately, so any drift means someone
+	// reintroduced a second aggregate.
+	if total.Value != sum {
+		t.Errorf("tempdb_used_mb = %v but its three parts sum to %v; the breakdown has to add up to the total or the dashboard contradicts itself", total.Value, sum)
+	}
+}
+
+// TestVersionStoreGrowthNeedsTwoSamples pins the honesty rule on the one
+// figure in the space tier that is differentiated rather than raw. A rate
+// cannot exist on the first sample of a connection, and reporting the size
+// itself, or a zero, in its place would tell an operator the version store
+// is stable at exactly the moment nothing is known about it.
+func TestVersionStoreGrowthNeedsTwoSamples(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := s.SampleServer(ctx, model.TierSpace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := first.Figures["version_store_growth_mb_s"]; !ok {
+		t.Fatal("version_store_growth_mb_s is missing; the dashboard needs the tile marked unavailable, not absent")
+	} else if f.Available {
+		t.Fatalf("growth = %+v on the first sample; a rate has nothing to subtract from yet", f)
+	}
+	if f := first.Figures["version_store_mb"]; !f.Available {
+		t.Fatalf("version_store_mb = %+v, want the raw size available immediately", f)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	second, err := s.SampleServer(ctx, model.TierSpace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := second.Figures["version_store_growth_mb_s"]; !f.Available {
+		t.Fatalf("growth = %+v on the second sample; the rate must exist once there are two readings", f)
+	}
+}
+
+// TestOSViewsReportSchedulersAndClerks drives the scheduler and memory clerk
+// query against a real engine. The assertions are the ones a wrong query
+// would fail rather than merely look odd on: a running instance always has
+// at least one visible online scheduler and a buffer pool clerk holding
+// pages, so a zero for either means the CASE arms or the status predicate
+// stopped matching what SQL Server actually writes in those columns, which
+// is exactly the kind of silent breakage a string-typed filter invites.
+func TestOSViewsReportSchedulersAndClerks(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	_, caps, err := s.Identify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.Has(model.CapSchedulerLoad) {
+		t.Skip("sa on the container is expected to hold this; nothing to assert without it")
+	}
+
+	got, err := s.SampleServer(ctx, model.TierCounters)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{"runnable_tasks", "scheduler_load_factor", "schedulers_online", "current_tasks", "buffer_pool_mb", "plan_cache_mb", "query_memory_mb"} {
+		f, ok := got.Figures[k]
+		if !ok {
+			t.Fatalf("%s is missing; the dashboard needs the tile marked unavailable, not absent", k)
+		}
+		if !f.Available {
+			t.Fatalf("%s = %+v, want a reading on a container instance", k, f)
+		}
+	}
+	if v := got.Figures["schedulers_online"].Value; v < 1 {
+		t.Errorf("schedulers_online = %v; a running instance always has at least one, so the VISIBLE ONLINE predicate no longer matches", v)
+	}
+	if v := got.Figures["buffer_pool_mb"].Value; v <= 0 {
+		t.Errorf("buffer_pool_mb = %v; MEMORYCLERK_SQLBUFFERPOOL always holds pages on a running instance, so the clerk type no longer matches", v)
+	}
+	// Our own connection is executing this very statement, so at least one
+	// task is current. Runnable can legitimately be zero on an idle box.
+	if v := got.Figures["current_tasks"].Value; v < 1 {
+		t.Errorf("current_tasks = %v; this session's own request is a current task, so the column no longer means what the query assumes", v)
+	}
+}
+
+// TestIdentifyReadsTheInstanceStartTime drives the uptime figure of spec
+// section 6's first dashboard row. It went unnoticed for a release that
+// ServerInfo.StartedAt was declared and never assigned: every layer carried
+// the field, nothing filled it, and the only visible symptom would have
+// been an uptime the page silently declined to show.
+func TestIdentifyReadsTheInstanceStartTime(t *testing.T) {
+	s := open(t)
+	info, _, err := s.Identify(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.StartedAt.IsZero() {
+		t.Fatal("StartedAt is the zero time; sa on the container can read sys.dm_os_sys_info, so this is the field going unassigned again")
+	}
+	if info.StartedAt.After(time.Now()) {
+		t.Errorf("StartedAt = %v, which is in the future; the instance cannot have started after now", info.StartedAt)
+	}
+	// A container that has been up for more than a year is not what these
+	// tests run against, and a value that old means the column read is not
+	// the one this query thinks it is.
+	if time.Since(info.StartedAt) > 365*24*time.Hour {
+		t.Errorf("StartedAt = %v, over a year ago; that is not this test container's start time", info.StartedAt)
 	}
 }

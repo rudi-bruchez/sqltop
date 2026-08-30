@@ -51,6 +51,12 @@ type Source struct {
 	info    model.ServerInfo
 	caps    model.Capabilities
 	counter *counterState
+	// versionStore differentiates the version store's size into the growth
+	// rate spec section 6 asks for. Owned by the space tier's goroutine,
+	// touched only under mu like everything else on this struct. A value
+	// rather than a pointer so a zero-value Source, which the gate tests
+	// build directly, has a usable one without New having run.
+	versionStore rateState
 
 	// requestsQuery is what SampleRequests actually sends, built once by
 	// Identify from the version and capabilities it just found: r.dop does
@@ -362,6 +368,12 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	// Identify itself over a fact only one dashboard tile depends on.
 	info.HasReadCommittedSnapshot = s.readCommittedSnapshotAnywhere(ctx)
 
+	// Uptime, the last item on the first row of spec section 6's dashboard
+	// table. Read on the same terms as the fact above: a failure leaves the
+	// zero time, which the wire maps to "unknown" and the page renders as
+	// no uptime at all rather than as a duration counted from the year 1.
+	info.StartedAt = s.startTime(ctx)
+
 	// Task 9's sampling goroutine reads s.info/s.caps, while the collector
 	// may be re-identifying, so the write goes under the same lock every
 	// query uses. requestsQuery is rebuilt here rather than kept as a fixed
@@ -399,6 +411,35 @@ func (s *Source) readCommittedSnapshotAnywhere(ctx context.Context) bool {
 		return false
 	}
 	return on == 1
+}
+
+// startTimeQuery reads when the instance last started. sys.dm_os_sys_info is
+// one of the few OS-level views Azure SQL Database does expose, and
+// sqlserver_start_time is present on it there as well as on-premises, so
+// this needs no Azure branch. It does need VIEW SERVER STATE, which is why
+// the caller tolerates a failure rather than propagating it.
+const startTimeQuery = `
+SELECT sqlserver_start_time FROM sys.dm_os_sys_info
+OPTION (RECOMPILE, MAXDOP 1)`
+
+// startTime returns the instance start time, or the zero time when it
+// cannot be read. Zero is a real answer here, not a silent failure: the
+// wire sends zero as "no start time", and the page shows no uptime rather
+// than a fabricated one. Deliberately not an error: a login that cannot
+// read sys.dm_os_sys_info can still monitor its own sessions, and losing
+// the whole connection over one dashboard field would be the wrong trade.
+//
+// The value comes back as the server's own local wall clock with no
+// offset, so it is interpreted in the same location the driver hands it
+// over in and never adjusted here. A server in another time zone from the
+// browser will show an uptime off by that difference, which is worth
+// knowing about and is not worth guessing a correction for.
+func (s *Source) startTime(ctx context.Context) time.Time {
+	var at time.Time
+	if err := s.queryRow(ctx, startTimeQuery, &at); err != nil {
+		return time.Time{}
+	}
+	return at
 }
 
 // majorVersion turns "15.0.4335.1" into 15. Zero when it cannot tell, which
