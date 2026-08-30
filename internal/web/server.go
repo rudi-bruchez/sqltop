@@ -316,10 +316,15 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 // 14's page exists to break by adding it later.
 //
 // Anything shaped like a loopback host is accepted: empty (no Host header
-// at all, which some non-browser clients send), 127.0.0.1 and localhost,
-// each with or without a port. Everything else is refused exactly like a
-// missing or wrong token, so this reveals nothing beyond "unauthorized"
-// either.
+// at all, which some non-browser clients send), 127.0.0.1, localhost and the
+// IPv6 loopback ::1, each with or without a port. The server itself binds
+// IPv4 only (spec section 4.3), so ::1 is not a second address anything can
+// actually reach it on; it is accepted because a user who types the
+// bracketed IPv6 loopback, or whose environment resolves localhost over
+// IPv6 first, would otherwise get an unexplained unauthorized for a host
+// that was never a hole to begin with. Everything else is refused exactly
+// like a missing or wrong token, so this reveals nothing beyond
+// "unauthorized" either.
 func hostAllowed(host string) bool {
 	if host == "" {
 		return true
@@ -327,8 +332,13 @@ func hostAllowed(host string) bool {
 	h := host
 	if hh, _, err := net.SplitHostPort(host); err == nil {
 		h = hh
+	} else if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		// A bracketed IPv6 literal with no port, e.g. "[::1]": SplitHostPort
+		// requires a port to parse it at all, so this is the one shape it
+		// does not already strip for us above.
+		h = host[1 : len(host)-1]
 	}
-	return h == "127.0.0.1" || h == "localhost"
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
 }
 
 // shutdownGrace is how long gracefulShutdown waits for active connections to

@@ -529,11 +529,15 @@ func TestHostHeaderOutsideLoopbackIsRefused(t *testing.T) {
 }
 
 // TestHostHeaderVariantsAreAccepted checks the allowlist is neither empty
-// nor accidentally narrower than spec: no Host header at all, 127.0.0.1 and
-// localhost, each with and without a port, must all still work.
+// nor accidentally narrower than spec: no Host header at all, 127.0.0.1,
+// localhost and the bracketed IPv6 loopback, each with and without a port,
+// must all still work. The server binds IPv4 only, so ::1 is not a second
+// address anything can reach it on, but a user who types it, or whose
+// environment resolves localhost over IPv6 first, must not get an
+// unexplained unauthorized for a host that was never a hole.
 func TestHostHeaderVariantsAreAccepted(t *testing.T) {
 	s := newTestServer(t)
-	for _, host := range []string{"", "127.0.0.1", "127.0.0.1:8420", "localhost", "localhost:8420"} {
+	for _, host := range []string{"", "127.0.0.1", "127.0.0.1:8420", "localhost", "localhost:8420", "[::1]", "[::1]:8420"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/status?t="+s.token, nil)
 		req.Host = host
 
