@@ -342,6 +342,7 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	// database has no instance-wide DMVs, a managed instance does.
 	info.IsAzureSQLDB = engineEdition == 5
 	info.IsAzureMI = engineEdition == 8
+	info.Deployment = s.deployment(ctx, engineEdition)
 
 	if !info.IsAzure() && info.MajorVersion > 0 && info.MajorVersion < 11 {
 		return info, 0, fmt.Errorf("%w (found %s)", ErrVersionTooOld, info.ProductVersion)
@@ -411,6 +412,59 @@ func (s *Source) readCommittedSnapshotAnywhere(ctx context.Context) bool {
 		return false
 	}
 	return on == 1
+}
+
+// managedMarkerQuery asks whether the databases the two managed services
+// install are present. DB_ID needs no permission of its own; it answers
+// NULL both for a database that does not exist and for one the login may
+// not see, which is why this can only ever be a positive detection.
+//
+// rdsadmin is Amazon RDS for SQL Server, cloudsqladmin is Google Cloud SQL.
+// Neither service reports itself through EngineEdition, which says Standard
+// or Enterprise exactly as a machine in a cupboard would, so a marker
+// database is the only thing there is to go on.
+const managedMarkerQuery = `
+SELECT CASE WHEN DB_ID('rdsadmin') IS NULL THEN 0 ELSE 1 END,
+       CASE WHEN DB_ID('cloudsqladmin') IS NULL THEN 0 ELSE 1 END
+OPTION (RECOMPILE, MAXDOP 1)`
+
+// deployment names where this engine runs, with the certainty each source
+// deserves. EngineEdition is the engine describing itself and is taken as
+// fact. The marker databases are taken as fact when present and as nothing
+// when absent. Everything left over is the default, and the default is
+// deliberately not called "on premises": nothing available here can tell a
+// server in a cupboard from a virtual machine in somebody's cloud running
+// an ordinary SQL Server, and claiming otherwise would be exactly the kind
+// of plausible, unfounded answer this tool refuses to give about a figure.
+//
+// A failure of the marker query leaves the default rather than an error.
+// This is a label, and losing a connection over a label would be absurd.
+func (s *Source) deployment(ctx context.Context, engineEdition int) model.Deployment {
+	switch engineEdition {
+	case 5:
+		return model.DeploymentAzureSQLDB
+	case 8:
+		return model.DeploymentAzureMI
+	case 6, 9:
+		// 6 is Synapse dedicated, 9 is Synapse serverless. Named rather
+		// than left in the default because Synapse is neither on premises
+		// nor a virtual machine and saying so would be wrong.
+		return model.DeploymentAzureSynapse
+	case 11:
+		return model.DeploymentAzureSQLEdge
+	}
+
+	var rds, gcp int
+	if err := s.queryRow(ctx, managedMarkerQuery, &rds, &gcp); err != nil {
+		return model.DeploymentOnPremisesOrVM
+	}
+	switch {
+	case rds == 1:
+		return model.DeploymentAmazonRDS
+	case gcp == 1:
+		return model.DeploymentGoogleCloudSQL
+	}
+	return model.DeploymentOnPremisesOrVM
 }
 
 // startTimeQuery reads when the instance last started. sys.dm_os_sys_info is

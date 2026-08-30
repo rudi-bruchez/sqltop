@@ -158,13 +158,16 @@ func TestEndToEndInABrowser(t *testing.T) {
 	// Spec section 6's first row: instance, host, edition, version, uptime.
 	// The version was there before and sat dimmed next to the instance
 	// name, which is where nobody looked for it.
-	for _, want := range []string{"host", "edition", "version", "uptime"} {
+	for _, want := range []string{"host", "edition", "version", "deployment", "uptime"} {
 		if got.Identity[want] == "" {
 			t.Errorf("the server information row shows no %s; it has %v", want, got.Identity)
 		}
 	}
 	if v := got.Identity["version"]; v != "" && !strings.Contains(v, ".") {
 		t.Errorf("version reads %q; the full product version is what identifies a build", v)
+	}
+	if d := got.Identity["deployment"]; d != string(model.DeploymentOnPremisesOrVM) {
+		t.Errorf("deployment reads %q, want %q", d, model.DeploymentOnPremisesOrVM)
 	}
 
 	// The cross inside a filter box: absent until there is something to
@@ -369,6 +372,7 @@ func browserTestServer(t *testing.T) (*Server, func()) {
 	src.Info = model.ServerInfo{
 		Instance: "e2e", Host: "e2e-host", Edition: "Developer Edition (64-bit)",
 		ProductVersion: "16.0.0.0", MajorVersion: 16, StartedAt: time.Now().Add(-3 * time.Hour),
+		Deployment: model.DeploymentOnPremisesOrVM,
 	}
 	// buffer_cache_hit_ratio alternates between a reading and nothing, so
 	// the driver can watch a tile lose its value rather than only ever see

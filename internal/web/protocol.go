@@ -297,6 +297,10 @@ type StatusPayload struct {
 	// exact failure case.
 	Host    string `json:"host,omitempty"`
 	Edition string `json:"edition,omitempty"`
+	// Deployment is where the engine runs: see model.Deployment for what
+	// each value is worth. Omitted when unknown rather than sent as an
+	// empty string the page would have to special-case.
+	Deployment string `json:"deployment,omitempty"`
 	// StartedAt is the instance's start time in Unix milliseconds, zero
 	// when unknown. Sent as an instant rather than as an uptime duration
 	// so the page can count the uptime up between ticks instead of
@@ -344,6 +348,7 @@ func newStatusPayload(st collector.Status) StatusPayload {
 		Version:         st.Info.ProductVersion,
 		Host:            st.Info.Host,
 		Edition:         st.Info.Edition,
+		Deployment:      string(st.Info.Deployment),
 		StartedAt:       startedAtMillis(st.Info.StartedAt),
 		Caps:            capNames(st.Caps),
 		CostMsPerSecond: st.CostMsPerSecond,

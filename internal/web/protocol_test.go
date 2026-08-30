@@ -776,3 +776,27 @@ func fieldByJSONTag(rt reflect.Type, rv reflect.Value, tag string) (reflect.Valu
 	}
 	return reflect.Value{}, false
 }
+
+// TestDeploymentReachesTheWire keeps the label travelling. It is one string
+// added to a struct that two endpoints build, which is exactly the shape of
+// thing that used to reach only one of them.
+func TestDeploymentReachesTheWire(t *testing.T) {
+	for _, d := range []model.Deployment{
+		model.DeploymentAzureSQLDB, model.DeploymentAzureMI, model.DeploymentAmazonRDS,
+		model.DeploymentGoogleCloudSQL, model.DeploymentOnPremisesOrVM,
+	} {
+		st := collector.Status{Info: model.ServerInfo{Deployment: d}}
+		if got := newStatusPayload(st).Deployment; got != string(d) {
+			t.Errorf("deployment %q became %q on the wire", d, got)
+		}
+	}
+	// Unknown is omitted rather than sent as an empty string the page would
+	// have to special-case into a hidden row.
+	b, err := json.Marshal(newStatusPayload(collector.Status{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "deployment") {
+		t.Errorf("payload = %s; an unknown deployment is omitted", b)
+	}
+}

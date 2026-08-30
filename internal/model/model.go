@@ -131,6 +131,26 @@ type ServerSample struct {
 	Figures map[string]Figure
 }
 
+// Deployment is where the engine runs, as far as the engine will admit.
+// Four of the values are certain, being read from EngineEdition, which the
+// engine reports about itself. Two are positive detections from a marker
+// database a managed service installs, so they are right when they fire and
+// silent when the login cannot see that database. The last is a default and
+// says so: nothing here can tell bare metal from a virtual machine in
+// somebody's cloud running an ordinary SQL Server.
+type Deployment string
+
+const (
+	DeploymentUnknown        Deployment = ""
+	DeploymentOnPremisesOrVM Deployment = "on-premises or VM"
+	DeploymentAzureSQLDB     Deployment = "Azure SQL Database"
+	DeploymentAzureMI        Deployment = "Azure SQL Managed Instance"
+	DeploymentAzureSynapse   Deployment = "Azure Synapse Analytics"
+	DeploymentAzureSQLEdge   Deployment = "Azure SQL Edge"
+	DeploymentAmazonRDS      Deployment = "Amazon RDS"
+	DeploymentGoogleCloudSQL Deployment = "Google Cloud SQL"
+)
+
 type ServerInfo struct {
 	Instance       string
 	Host           string
@@ -139,7 +159,11 @@ type ServerInfo struct {
 	MajorVersion   int
 	IsAzureSQLDB   bool
 	IsAzureMI      bool
-	StartedAt      time.Time
+	// Deployment is where this engine runs. IsAzureSQLDB and IsAzureMI stay
+	// as they are: they gate behaviour, this only labels it, and folding
+	// the two would make a display string load-bearing.
+	Deployment Deployment
+	StartedAt  time.Time
 	// HasReadCommittedSnapshot reports whether any database on the instance
 	// has read committed snapshot isolation on. Discovered once, alongside
 	// the rest of this struct, rather than on every tick: it exists to gate

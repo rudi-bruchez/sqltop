@@ -44,6 +44,23 @@ func open(t *testing.T) *Source {
 	return s
 }
 
+// adminConn is a plain database/sql handle to the same container, for the
+// few tests that have to change something on the server. The Source itself
+// must never be used for that: it is the read-only instrument under test.
+func adminConn(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := os.Getenv("SQLTOP_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SQLTOP_TEST_DSN is unset")
+	}
+	db, err := sql.Open("sqlserver", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
 func TestSessionIsReadUncommitted(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
@@ -1011,5 +1028,50 @@ func TestCountersQueryDoesNotTrimTheColumnsItFilters(t *testing.T) {
 	}
 	if !strings.Contains(countersQuery, "RTRIM(LTRIM(object_name))") {
 		t.Error("the SELECT list no longer trims what it returns; readCounters matches those values as Go strings and needs them unpadded")
+	}
+}
+
+// TestDeploymentDetection drives both halves of the deployment label against
+// a real engine: the default, which is what the test container is, and the
+// Amazon RDS branch, which can only be exercised by creating the marker
+// database that service installs.
+//
+// Creating a database in a test is a deliberate exception to the project's
+// read-only rule, which binds the tool and not its test suite, and it is the
+// only honest way to check a positive detection. The alternative is a unit
+// test of a switch statement, which would prove that Go can compare integers.
+// The database is dropped whether the test passes or fails.
+func TestDeploymentDetection(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	info, _, err := s.Identify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsAzure() {
+		t.Skip("this asserts the on-premises and RDS branches")
+	}
+	if info.Deployment != model.DeploymentOnPremisesOrVM {
+		t.Errorf("deployment = %q on a container with no marker database, want %q",
+			info.Deployment, model.DeploymentOnPremisesOrVM)
+	}
+
+	admin := adminConn(t)
+	if _, err := admin.ExecContext(ctx, "IF DB_ID('rdsadmin') IS NULL CREATE DATABASE rdsadmin"); err != nil {
+		t.Skipf("cannot create the marker database on this instance: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.ExecContext(context.Background(),
+			"IF DB_ID('rdsadmin') IS NOT NULL BEGIN ALTER DATABASE rdsadmin SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE rdsadmin; END")
+	})
+
+	again, _, err := s.Identify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Deployment != model.DeploymentAmazonRDS {
+		t.Errorf("deployment = %q with an rdsadmin database present, want %q; the marker is the only signal RDS gives, since its EngineEdition reads exactly like a machine in a cupboard",
+			again.Deployment, model.DeploymentAmazonRDS)
 	}
 }

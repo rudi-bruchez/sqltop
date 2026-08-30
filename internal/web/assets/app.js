@@ -591,6 +591,7 @@ function applyStatus(st, seq) {
   // Server 2014 or one of the Azure engines, and this side of the wire
   // cannot tell which.
   infoRow("siVersion", "infoVersion", st.version || "");
+  infoRow("siDeployment", "infoDeployment", st.deployment || "");
   infoRow("siHost", "infoHost", st.host || "");
   infoRow("siEdition", "infoEdition", st.edition || "");
   startedAt = st.startedAt || 0;

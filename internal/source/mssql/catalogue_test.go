@@ -51,6 +51,12 @@ func queryCatalogue() []catalogueEntry {
 			sql:  identifyQuery,
 		},
 		{
+			name: "managedMarkerQuery",
+			when: "at connection, inside Identify, and only when EngineEdition did not already answer",
+			why:  "Asks whether the marker databases Amazon RDS and Google Cloud SQL install are present. Neither service reports itself through EngineEdition, so this is the only signal there is; DB_ID answers NULL for a database that is absent and for one the login may not see, so it is a positive detection and never a denial.",
+			sql:  managedMarkerQuery,
+		},
+		{
 			name: "startTimeQuery",
 			when: "at connection, inside Identify",
 			why:  "The instance start time, which the dashboard counts up from as the uptime. A login that may not read this view keeps everything else and simply shows no uptime.",

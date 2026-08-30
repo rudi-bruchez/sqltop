@@ -47,6 +47,18 @@ SELECT
 OPTION (RECOMPILE, MAXDOP 1)
 ```
 
+## managedMarkerQuery
+
+Runs at connection, inside Identify, and only when EngineEdition did not already answer.
+
+Asks whether the marker databases Amazon RDS and Google Cloud SQL install are present. Neither service reports itself through EngineEdition, so this is the only signal there is; DB_ID answers NULL for a database that is absent and for one the login may not see, so it is a positive detection and never a denial.
+
+```sql
+SELECT CASE WHEN DB_ID('rdsadmin') IS NULL THEN 0 ELSE 1 END,
+       CASE WHEN DB_ID('cloudsqladmin') IS NULL THEN 0 ELSE 1 END
+OPTION (RECOMPILE, MAXDOP 1)
+```
+
 ## startTimeQuery
 
 Runs at connection, inside Identify.

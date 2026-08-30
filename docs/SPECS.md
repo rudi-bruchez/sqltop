@@ -317,7 +317,7 @@ first tick after connection shows placeholders, not zeros.
 
 | Figure | Source | Handling |
 |---|---|---|
-| Instance, host, edition, version, uptime | `SERVERPROPERTY`, `sys.dm_os_sys_info`, `sys.dm_os_host_info` | Once at connection |
+| Instance, host, edition, version, uptime, deployment | `SERVERPROPERTY`, `sys.dm_os_sys_info` | Once at connection. See below for what deployment can and cannot answer |
 | SQL Server CPU %, system CPU % | `sys.dm_os_ring_buffers`, `RING_BUFFER_SCHEDULER_MONITOR` | One sample per minute, 256 kept. Both figures are what the engine holds, not settings. Not available on Azure SQL DB |
 | Scheduler load | `sys.dm_os_schedulers` | Runnable tasks and load factor per scheduler. This replaces the per-CPU utilisation asked for in the original sketch, which SQL Server does not expose |
 | Total and target server memory | `sys.dm_os_sys_info`, `committed_kb` / `committed_target_kb` | Raw values |
@@ -332,6 +332,21 @@ first tick after connection shows placeholders, not zeros.
 | Batch requests/sec, compilations/sec, recompilations/sec | `SQL Statistics` | Rate, delta between samples |
 | Full scans/sec | `Access Methods\Full Scans/sec` | Rate, delta. This is the "table scans" figure from the original sketch. It is instance-wide, not per table |
 | Active request count | Our own samples | Counted from the grid data, free |
+
+On the deployment. `EngineEdition` is the engine describing itself and is
+taken as fact: 5 is Azure SQL Database, 8 is Azure SQL Managed Instance, 6
+and 9 are Synapse, 11 is Azure SQL Edge. Amazon RDS and Google Cloud SQL
+report an `EngineEdition` indistinguishable from a machine in a cupboard, so
+they are detected from the marker database each installs, `rdsadmin` and
+`cloudsqladmin`. That is a positive detection only: `DB_ID` answers NULL both
+for a database that is absent and for one the login may not see, so the
+absence of a marker is never evidence of anything.
+
+Everything left over reads "on-premises or VM", and the "or VM" is not
+hedging for its own sake. Nothing available to this tool distinguishes a
+server in a cupboard from a virtual machine in somebody's cloud running an
+ordinary SQL Server, and a label that said "on-premises" would be exactly
+the plausible unfounded answer the rest of this section exists to prevent.
 
 On the buffer cache hit ratio. It was asked for explicitly, so it is in. But
 Microsoft's own documentation states that the ratio covers the last few thousand
