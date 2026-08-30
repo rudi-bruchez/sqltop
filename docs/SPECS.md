@@ -458,10 +458,20 @@ commands instead of text.
 | `p` | Pauses and resumes the display |
 | `f` | Steps the refresh period through 1, 2, 5, 10 and 30 seconds |
 | `h` | Shows the list of commands |
+| `↑` `↓` | Move the selection one row up or down the grid |
 
 The list is generated from one table in the page, which the key handler also
 dispatches from, so a command cannot be bound without being listed or listed
 without being bound.
+
+On the arrows. The grid is virtualised, so the row the selection moves to is
+often not in the document: the selection is an index into the filtered view,
+the scroll follows it, and the renderer draws whatever that lands on. The
+scroll only moves when the row would otherwise be off screen, so holding a
+key walks the list rather than dragging the viewport a row at a time, and
+the heading rows count twice in that arithmetic, once because they sit in
+the flow above the body and once because they are sticky and cover what is
+under them. The ends stop rather than wrapping.
 
 On `s`. The grid is virtualised: the document holds about forty rows of
 however many the view has, so saving the document would save the scroll

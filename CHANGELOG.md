@@ -15,6 +15,12 @@ constant changes.
   every empty filter box and a server information row with no value was
   drawn empty rather than left out. Every test that asked the property
   agreed with the code and disagreed with the screen.
+- The up and down arrows move the selection a row at a time through the
+  grid, scrolling to follow it into rows the virtualised table has not drawn.
+- The browser test now measures geometry on every view rather than on the
+  one that was reported: headings and cells on one line, a row one line tall,
+  the narrow columns coming out narrow, and the window's surplus landing on
+  one column. It finds the reported defect on three views, not one.
 - The throughput view of section 7 moves from `t` to `v`.
 
 ## 0.3.0, 30 August 2026

@@ -243,10 +243,12 @@ out.anchorKeeps = await json(`(() => {
   el.value = db;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   const sel = document.querySelector("#gridBody tr.sel");
-  const visible = sel ? (() => {
-    const a = sel.getBoundingClientRect(), b = sc.getBoundingClientRect();
-    return a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
-  })() : false;
+  const box = sel ? sel.getBoundingClientRect() : null;
+  const pane = sc.getBoundingClientRect();
+  const head = document.querySelector("#gridHead").getBoundingClientRect();
+  // The header row is sticky, so the top of the visible area is its bottom
+  // edge, not the pane's.
+  const visible = box ? box.top >= head.bottom - 1 && box.bottom <= pane.bottom + 1 : false;
   return { filteredOn: db, rows: view.length, scrollBefore,
            scrollAfter: Math.round(sc.scrollTop), stillPresent: view.some((r) => rowKey(r) === selectedKey),
            marked: !!sel, visible };
@@ -307,6 +309,37 @@ out.cells = await json(`(() => {
 // made only while its tab is open, so this is also the check that the tab
 // actually asks for anything.
 const key = (k) => `globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true }))`;
+
+// geomOf measures a panel the way a person looks at it: are the cells of a
+// row on one line, is a row one line tall, does the narrow column come out
+// narrow, and did the window's surplus land on one column rather than being
+// shared out. Three defects have now shipped that every property-reading
+// assertion here was blind to, so this is applied to every view rather than
+// to the one that was reported.
+const geomOf = (sel) => `(() => {
+  const root = document.querySelector(${JSON.stringify(sel)});
+  const tables = [];
+  for (const t of root.querySelectorAll("table")) {
+    // The first heading row only: the grid's thead carries a second row of
+    // filter boxes, and counting both puts every column on two lines and
+    // makes the widest column tie with itself.
+    const headRow = t.querySelector("thead tr");
+    const heads = headRow ? [...headRow.children] : [];
+    const row = [...t.querySelectorAll("tbody tr")].find((r) => r.cells.length > 1);
+    const widths = heads.map((th) => Math.round(th.getBoundingClientRect().width));
+    const sorted = widths.slice().sort((a, b) => b - a);
+    tables.push({
+      cols: heads.length,
+      headLines: new Set(heads.map((th) => Math.round(th.getBoundingClientRect().top))).size,
+      rowLines: row ? new Set([...row.cells].map((td) => Math.round(td.getBoundingClientRect().top))).size : 0,
+      rowHeight: row ? Math.round(row.getBoundingClientRect().height) : 0,
+      widest: sorted[0] || 0,
+      second: sorted[1] || 0,
+      narrowest: sorted[sorted.length - 1] || 0,
+    });
+  }
+  return tables;
+})()`;
 out.views = { tabs: await json(`[...document.querySelectorAll("#tabs button")].map((b) => b.dataset.v)`) };
 // The status bar's items must not run into each other. They did, the day a
 // button on the right claimed the slack that space-between had been using to
@@ -325,6 +358,7 @@ out.views.barGap = await json(`(() => {
 out.views.hints = await json(`[...document.querySelectorAll(".cmdHints kbd")].map((k) => k.textContent)`);
 
 await ev(key("b"));
+out.views.geometry = { blocking: await json(geomOf(".gridScroll")) };
 out.views.blocking = await json(`(() => ({
   rows: view.length,
   total: data.length,
@@ -335,6 +369,7 @@ out.views.blocking = await json(`(() => ({
 
 await ev(key("u"));
 await sleep(700);
+out.views.geometry.sessions = await json(geomOf("#panel-sessions"));
 out.views.sessions = await json(`(() => {
   const p = document.getElementById("panel-sessions");
   return {
@@ -356,6 +391,7 @@ out.views.sessions = await json(`(() => {
 
 await ev(key("x"));
 await sleep(700);
+out.views.geometry.transactions = await json(geomOf("#panel-transactions"));
 out.views.transactions = await json(`(() => {
   const p = document.getElementById("panel-transactions");
   const tables = [...p.querySelectorAll("table")];
@@ -370,6 +406,7 @@ out.views.transactions = await json(`(() => {
 
 await ev(key("l"));
 await sleep(700);
+out.views.geometry.logs = await json(geomOf("#panel-logs"));
 out.views.logs = await json(`(() => {
   const p = document.getElementById("panel-logs");
   return { visible: !p.hidden, rows: p.querySelectorAll("tbody tr").length, text: p.textContent };
@@ -385,6 +422,54 @@ out.views.panelFollows = await json(`(() => {
 await ev(key("r"));
 await sleep(400);
 out.views.backToGrid = await ev(`!document.querySelector(".gridScroll").hidden && view.length === data.length`);
+out.views.geometry.requests = await json(geomOf(".gridScroll"));
+
+// The arrow keys walk the grid. The grid is virtualised, so a row three
+// hundred down is not in the document until the scroll follows the
+// selection there.
+out.arrows = await json(`(() => {
+  const sc = document.querySelector(".gridScroll");
+  sc.scrollTop = 0;
+  selectedKey = null;
+  layout();
+  const send = (k) => globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  const at = () => view.findIndex((r) => rowKey(r) === selectedKey);
+
+  send("ArrowDown");
+  const first = at();
+  for (let i = 0; i < 40; i++) send("ArrowDown");
+  const after40 = at();
+  const scrolled = Math.round(sc.scrollTop);
+  const sel = document.querySelector("#gridBody tr.sel");
+  const selBox = sel ? sel.getBoundingClientRect() : null;
+  const pane = sc.getBoundingClientRect();
+  // The heading row is sticky, so the top of what a person can see is its
+  // bottom edge and not the pane's.
+  const head = document.getElementById("gridHead").getBoundingClientRect();
+  const visible = selBox ? selBox.top >= head.bottom - 1 && selBox.bottom <= pane.bottom + 1 : false;
+  const where = selBox
+    ? { rowTop: Math.round(selBox.top), rowBottom: Math.round(selBox.bottom), headBottom: Math.round(head.bottom), paneBottom: Math.round(pane.bottom) }
+    : {};
+  send("ArrowUp");
+  send("ArrowUp");
+  const afterUp = at();
+
+  // The ends stop rather than wrapping.
+  for (let i = 0; i < view.length + 5; i++) send("ArrowDown");
+  const atEnd = at();
+  for (let i = 0; i < view.length + 5; i++) send("ArrowUp");
+  const atStart = at();
+
+  // A filter box swallows them, or the caret could not be moved.
+  const box = document.getElementById("f-database");
+  box.focus();
+  const before = at();
+  box.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  const movedWhileTyping = at() !== before;
+  box.blur();
+
+  return Object.assign({ first, after40, afterUp, atEnd, atStart, last: view.length - 1, scrolled, visible, movedWhileTyping }, where);
+})()`);
 
 // The single-keypress commands of spec section 7, pressed the way a person
 // presses them: a keydown on the window, not a call to the function behind

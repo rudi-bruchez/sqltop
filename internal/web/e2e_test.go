@@ -301,6 +301,68 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Error("r did not bring the unfiltered grid back")
 	}
 
+	// Geometry, on every view rather than on the one that was reported.
+	// Three defects have shipped that every property-reading assertion here
+	// was blind to: cells dropping out of their rows, a window's surplus
+	// shared out equally, and hidden not hiding. All three are visible in
+	// these four numbers and in none of the others this test collects.
+	for _, view := range []string{"requests", "blocking", "sessions", "transactions", "logs"} {
+		tables := got.Views.Geometry[view]
+		if len(tables) == 0 {
+			t.Errorf("the %s view drew no table to measure", view)
+			continue
+		}
+		for i, g := range tables {
+			where := fmt.Sprintf("%s view, table %d of %d", view, i+1, len(tables))
+			if g.Cols == 0 {
+				t.Errorf("%s: no columns", where)
+				continue
+			}
+			if g.HeadLines != 1 {
+				t.Errorf("%s: the headings sit on %d lines", where, g.HeadLines)
+			}
+			if g.RowLines != 1 {
+				t.Errorf("%s: a row's cells sit on %d lines and the row is %d px tall", where, g.RowLines, g.RowHeight)
+			}
+			if g.RowHeight == 0 || g.RowHeight > 30 {
+				t.Errorf("%s: a row is %d px tall; one line of this table is about 22", where, g.RowHeight)
+			}
+			if g.Narrowest > 90 {
+				t.Errorf("%s: its narrowest column is %d px, so nothing is coming out narrow", where, g.Narrowest)
+			}
+			if g.Widest < 2*g.Second {
+				t.Errorf("%s: widest column %d px against %d for the next; the window's surplus is being shared out rather than given to one column",
+					where, g.Widest, g.Second)
+			}
+		}
+	}
+
+	// The arrow keys walk the grid, and the scroll follows the selection
+	// into rows the virtualised table has not drawn yet.
+	a := got.Arrows
+	if a.First != 0 {
+		t.Errorf("the first ArrowDown selected row %d; with nothing selected it takes the top of the list", a.First)
+	}
+	if a.After40 != 40 {
+		t.Errorf("forty more presses reached row %d, want 40", a.After40)
+	}
+	if a.AfterUp != 38 {
+		t.Errorf("two ArrowUp from row 40 reached %d", a.AfterUp)
+	}
+	if a.Scrolled == 0 || !a.Visible {
+		t.Errorf("after walking past the visible window the grid is scrolled to %d and the selected row is visible=%v (row %d..%d, pane %d..%d)",
+			a.Scrolled, a.Visible, a.RowTop, a.RowBottom, a.HeadBottom, a.PaneBottom)
+	}
+	if a.AtEnd != a.Last {
+		t.Errorf("pressing past the bottom reached row %d of %d; it stops there, it does not wrap", a.AtEnd, a.Last)
+	}
+	if a.AtStart != 0 {
+		t.Errorf("pressing past the top reached row %d; it stops at the first", a.AtStart)
+	}
+	if a.MovedWhileTyping {
+		t.Error("an arrow key typed into a filter box moved the grid selection; the caret has to be able to move")
+	}
+
 	// The single-keypress commands of spec section 7.
 	if !got.Commands.Help.Open || got.Commands.Help.Entries == 0 {
 		t.Errorf("h left the help dialog open=%v with %d entries", got.Commands.Help.Open, got.Commands.Help.Entries)
@@ -601,8 +663,24 @@ type e2eResult struct {
 			Which  string   `json:"which"`
 			Fields []string `json:"fields"`
 		} `json:"panelFollows"`
-		BackToGrid bool `json:"backToGrid"`
+		BackToGrid bool                      `json:"backToGrid"`
+		Geometry   map[string][]e2eTableGeom `json:"geometry"`
 	} `json:"views"`
+	Arrows struct {
+		First            int  `json:"first"`
+		After40          int  `json:"after40"`
+		AfterUp          int  `json:"afterUp"`
+		AtEnd            int  `json:"atEnd"`
+		AtStart          int  `json:"atStart"`
+		Last             int  `json:"last"`
+		Scrolled         int  `json:"scrolled"`
+		Visible          bool `json:"visible"`
+		MovedWhileTyping bool `json:"movedWhileTyping"`
+		RowTop           int  `json:"rowTop"`
+		RowBottom        int  `json:"rowBottom"`
+		HeadBottom       int  `json:"headBottom"`
+		PaneBottom       int  `json:"paneBottom"`
+	} `json:"arrows"`
 	Commands struct {
 		Help struct {
 			Open    bool `json:"open"`
@@ -822,6 +900,17 @@ func checkSnapshotFile(t *testing.T, dir string, wantRows int) {
 	if n := strings.Count(body, "<tr>"); n != wantRows+1 {
 		t.Errorf("the snapshot holds %d rows and the view had %d; the virtualised grid keeps about forty in the DOM, which is what a document-level save would have caught", n-1, wantRows)
 	}
+}
+
+// e2eTableGeom is what the driver measures about one table on screen.
+type e2eTableGeom struct {
+	Cols      int `json:"cols"`
+	HeadLines int `json:"headLines"`
+	RowLines  int `json:"rowLines"`
+	RowHeight int `json:"rowHeight"`
+	Widest    int `json:"widest"`
+	Second    int `json:"second"`
+	Narrowest int `json:"narrowest"`
 }
 
 func equalStrings(a, b []string) bool {

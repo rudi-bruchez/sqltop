@@ -208,13 +208,20 @@ func TestEveryCommandIsBothListedAndBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Both patterns take a whole key name, not one letter: the arrows are
+	// bound as ArrowUp and ArrowDown, and a pattern that matched only single
+	// letters passed over them in silence, which is the one thing this test
+	// must not do.
 	listed := map[string]bool{}
-	for _, m := range regexp.MustCompile(`(?m)^\s{2}\["([a-z?])",`).FindAllStringSubmatch(between(string(src), "const COMMANDS = [", "\n];"), -1) {
+	for _, m := range regexp.MustCompile(`(?m)^\s{2}\["([A-Za-z?]+)",`).FindAllStringSubmatch(between(string(src), "const COMMANDS = [", "\n];"), -1) {
 		listed[m[1]] = true
 	}
 	bound := map[string]bool{}
-	for _, m := range regexp.MustCompile(`(?m)^\s{2}([a-z?]):`).FindAllStringSubmatch(between(string(src), "const KEYS = {", "\n};"), -1) {
+	for _, m := range regexp.MustCompile(`(?m)^\s{2}([A-Za-z?]+):`).FindAllStringSubmatch(between(string(src), "const KEYS = {", "\n};"), -1) {
 		bound[m[1]] = true
+	}
+	if len(listed) < 7 || len(bound) < 7 {
+		t.Fatalf("read %d listed and %d bound commands; there are seven", len(listed), len(bound))
 	}
 	if len(listed) == 0 || len(bound) == 0 {
 		t.Fatalf("read %d listed and %d bound commands out of app.js; the shape this is parsed from has changed", len(listed), len(bound))

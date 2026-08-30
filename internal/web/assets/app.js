@@ -574,7 +574,7 @@ function buildTabs(views) {
   $("tabs").innerHTML = views.filter((v) => v.k).map((v) =>
     `<button type="button" data-v="${esc(v.id)}" id="tab-${esc(v.id)}">${esc(v.t)}` +
     `<span class="tabKey">${esc(v.k)}</span></button>`).join("") +
-    `<span class="cmdHints">` + COMMANDS.map(([k, , short]) =>
+    `<span class="cmdHints">` + COMMANDS.filter(([, , short]) => short).map(([k, , short]) =>
       `<span><kbd>${esc(k)}</kbd>${esc(short)}</span>`).join("") + `</span>`;
   for (const b of $("tabs").querySelectorAll("button")) {
     b.addEventListener("click", () => setView(b.dataset.v));
@@ -589,17 +589,23 @@ function buildTabs(views) {
 // Key, what the help dialog says, and the one word the strip beside the
 // tabs shows. Three columns rather than two because a status strip has room
 // for a word and the dialog has room for a sentence.
+// Key, what the help says, the word the strip beside the tabs shows, and a
+// label for the help's key column when the key's name is not what you press.
+// An empty word keeps a command out of the strip, which has room for the
+// things you reach for and not for everything.
 const COMMANDS = [
   ["t", "show the selected row's statement under the grid", "text"],
   ["s", "save the current state to snapshots/ beside the binary", "save"],
   ["p", "pause and resume the display", "pause"],
   ["f", "cycle the refresh period", "rate"],
   ["h", "this list", "help"],
+  ["ArrowUp", "move the selection up the grid", "", "\u2191"],
+  ["ArrowDown", "move the selection down the grid", "", "\u2193"],
 ];
 
 function buildHelp() {
-  $("helpList").innerHTML = COMMANDS.map(([k, what]) =>
-    `<dt>${esc(k)}</dt><dd>${esc(what)}</dd>`).join("");
+  $("helpList").innerHTML = COMMANDS.map(([k, what, , label]) =>
+    `<dt>${esc(label || k)}</dt><dd>${esc(what)}</dd>`).join("");
   // The views come from the server, so the help cannot claim a tab that is
   // not there or miss one that is.
   $("helpViews").innerHTML = [...viewKeys].map(([k, id]) =>
@@ -1064,6 +1070,39 @@ function renderDetail() {
   if (sql) pre.appendChild(sqlNodes(sql));
 }
 
+// moveSelection walks the grid one row at a time. The grid is virtualised,
+// so the row it moves to may not be in the DOM: the selection is an index
+// into view, the scroll follows it, and layout draws whatever that lands on.
+// Nothing is selected to begin with, so the first press takes the end of the
+// list it came from.
+function moveSelection(delta) {
+  if (!isGrid(activeView) || view.length === 0) return;
+  let i = selectedKey === null ? -1 : view.findIndex((r) => rowKey(r) === selectedKey);
+  if (i < 0) i = delta > 0 ? 0 : view.length - 1;
+  else i = Math.max(0, Math.min(view.length - 1, i + delta));
+  selectedKey = rowKey(view[i]);
+
+  // Scrolled to only when it would otherwise be off screen, so holding a key
+  // down walks the list rather than dragging the viewport a row at a time.
+  //
+  // The heading rows count twice over. They sit in the flow above the body,
+  // so scrollTop is measured past them, and they are sticky, so they cover
+  // the top of what is under them. A row is therefore fully in view between
+  // scrollTop + headH and scrollTop + clientHeight, and forgetting the first
+  // half leaves the last row of a downward walk fourteen pixels below the
+  // pane, which is what the browser test measured.
+  const sc = document.querySelector(".gridScroll");
+  const head = document.querySelector("#grid thead");
+  const headH = head ? head.offsetHeight : 0;
+  const top = i * ROW_H;
+  if (top < sc.scrollTop) sc.scrollTop = top;
+  else if (headH + top + ROW_H > sc.scrollTop + sc.clientHeight) sc.scrollTop = headH + top + ROW_H - sc.clientHeight;
+
+  // layout marks the selected row itself, so there is nothing to toggle here.
+  layout();
+  renderDetail();
+}
+
 function toggleHelp() {
   const d = $("helpDialog");
   if (d.open) d.close();
@@ -1078,6 +1117,8 @@ const KEYS = {
   p: togglePause,
   f: cycleFrequency,
   h: toggleHelp,
+  ArrowUp: () => moveSelection(-1),
+  ArrowDown: () => moveSelection(1),
 };
 
 // setFilter is the single place a filter box changes. Typing, Escape and the
