@@ -238,8 +238,8 @@ The performance counters behind most of the dashboard. Built from the catalogue 
 ```sql
 SELECT RTRIM(LTRIM(object_name)), RTRIM(LTRIM(counter_name)), cntr_value
 FROM sys.dm_os_performance_counters
-WHERE RTRIM(LTRIM(counter_name)) IN (N'Page life expectancy',N'Buffer cache hit ratio',N'Buffer cache hit ratio base',N'Page reads/sec',N'Page writes/sec',N'Lazy writes/sec',N'Batch Requests/sec',N'SQL Compilations/sec',N'SQL Re-Compilations/sec',N'Full Scans/sec',N'Transactions',N'Longest Transaction Running Time',N'Target Server Memory (KB)',N'Total Server Memory (KB)',N'Memory Grants Pending',N'Memory Grants Outstanding')
-  AND (instance_name IS NULL OR RTRIM(LTRIM(instance_name)) IN (N'', N'_Total'))
+WHERE counter_name IN (N'Page life expectancy',N'Buffer cache hit ratio',N'Buffer cache hit ratio base',N'Page reads/sec',N'Page writes/sec',N'Lazy writes/sec',N'Batch Requests/sec',N'SQL Compilations/sec',N'SQL Re-Compilations/sec',N'Full Scans/sec',N'Transactions',N'Longest Transaction Running Time',N'Target Server Memory (KB)',N'Total Server Memory (KB)',N'Memory Grants Pending',N'Memory Grants Outstanding')
+  AND (instance_name IS NULL OR instance_name IN (N'', N'_Total'))
 OPTION (RECOMPILE, MAXDOP 1)
 ```
 

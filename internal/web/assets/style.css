@@ -91,13 +91,21 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
   gap: 14px 26px;
   padding: 4px 14px 12px;
 }
-.figGroup h2 {
+/* Each group folds on its own, so a dashboard can be trimmed to the two
+   groups that matter today rather than only all or nothing. */
+.figGroup > summary {
+  cursor: pointer;
   margin: 0 0 5px;
   font-size: 11px;
   font-weight: 600;
   color: var(--dim);
   letter-spacing: .05em;
+  user-select: none;
 }
+.figGroup > summary:hover { color: var(--fg); }
+/* A collapsed group keeps its title in the row rather than collapsing to
+   nothing, so the flex row does not reflow into a different shape. */
+.figGroup:not([open]) { align-self: flex-start; }
 .figTiles { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Fixed tile width: the values change every second, and a tile that

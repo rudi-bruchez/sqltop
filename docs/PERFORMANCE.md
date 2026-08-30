@@ -50,7 +50,34 @@ alternative was either a per-tick branch or a query that fails forever.
 ### The counters
 
 `sys.dm_os_performance_counters` returns roughly 1500 rows. The tool asks for
-the fourteen it needs, by name, in one round trip.
+the sixteen it needs, by name, in one round trip.
+
+The predicate compares the padded column directly rather than
+`RTRIM(LTRIM(counter_name))`. The trimming looked like defensive coding
+against a `CHAR`-padded column and was in fact a per-row cost over fifteen
+hundred rows, evaluated before the `IN` list was considered, buying nothing:
+SQL Server already ignores trailing spaces when comparing a character column
+with `=` or `IN`.
+
+| Predicate | Cost per call |
+|---|---|
+| `RTRIM(LTRIM(counter_name)) IN (...)` | 4.38 ms |
+| `counter_name IN (...)` | 2.23 ms |
+| bare `COUNT(*)`, no predicate at all | 1.00 ms |
+
+Both forms were checked to select the identical seventeen rows before the
+change was made, and a test now fails if the trimming returns to the `WHERE`
+clause. It stays on the `SELECT` list, where it runs seventeen times rather
+than fifteen hundred and where the Go side genuinely needs it.
+
+This was found while answering a different question, which is worth
+recording because the wrong answer was the plausible one. Asked whether a
+configurable dashboard should trim the counter list to only the tiles on
+screen, the measurement said trimming from eighteen counters to one saves
+62 %. That looked like an argument for coupling the query to the UI. It was
+an argument that the predicate was bad: fixing it saves 49 % for everybody,
+with no configuration, no coupling, and all sixteen counters still
+collected.
 
 Scheduler load and the memory clerks travel together in a second query rather
 than two, because both are `sys.dm_os_` views needing the same right and

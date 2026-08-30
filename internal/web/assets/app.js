@@ -77,6 +77,7 @@ function hasCap(name) { return caps.has(name); }
 // "not collected" and "not answerable" changes nothing.
 const FIG_GROUPS = [
   {
+    id: "cpu",
     title: "cpu and schedulers",
     tiles: [
       { key: "sql_cpu_percent", label: "sql server cpu", fmt: fPct },
@@ -88,6 +89,7 @@ const FIG_GROUPS = [
     ],
   },
   {
+    id: "memory",
     title: "memory",
     tiles: [
       { key: "total_server_memory_kb", label: "total server memory", fmt: fKB },
@@ -104,6 +106,7 @@ const FIG_GROUPS = [
     ],
   },
   {
+    id: "throughput",
     title: "throughput",
     tiles: [
       { key: "active_requests", label: "active requests", fmt: fInt },
@@ -117,6 +120,7 @@ const FIG_GROUPS = [
     ],
   },
   {
+    id: "tempdb",
     title: "transactions and tempdb",
     tiles: [
       { key: "open_transactions", label: "open transactions", fmt: fInt },
@@ -201,17 +205,18 @@ function head() {
 // Lays the tiles out once and remembers the two nodes each one updates.
 // After this the per-tick path writes text and one attribute per tile.
 function buildDashboard() {
-  $("dashBody").innerHTML = FIG_GROUPS.map((g) => `<section class="figGroup"><h2>${esc(g.title)}</h2><div class="figTiles">` +
+  $("dashBody").innerHTML = FIG_GROUPS.map((g) => `<details class="figGroup" id="g-${esc(g.id)}" open><summary>${esc(g.title)}</summary><div class="figTiles">` +
     g.tiles.map((t) => `<div class="tile"><span class="tileLabel">${esc(t.label)}</span>` +
       `<span class="tileValue na" id="v-${esc(t.key)}">n/a</span>` +
       `<svg class="spark" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">` +
       `<polyline id="s-${esc(t.key)}" points=""></polyline></svg></div>`).join("") +
-    `</div></section>`).join("");
+    `</div></details>`).join("");
 
   for (const g of FIG_GROUPS) {
     for (const t of g.tiles) {
       tiles.set(t.key, { def: t, value: $("v-" + t.key), spark: $("s-" + t.key) });
     }
+    remember($("g-" + g.id), "sqltop.group." + g.id);
   }
 }
 //
@@ -421,26 +426,30 @@ document.querySelector(".gridScroll").addEventListener("scroll", layout, { passi
 // snapshot happens to call layout().
 globalThis.addEventListener("resize", layout);
 
-// Collapsing hands the dashboard's whole height to the grid: watching a
-// blocking chain, you want the process list and nothing else. The toggle
-// fires no resize event, hence the explicit layout().
+// Collapsing hands height back to the grid: watching a blocking chain, you
+// want the process list and nothing else. A <details> toggle fires no resize
+// event, hence the explicit layout(). The same applies one level down, per
+// group, so a dashboard can be trimmed to the two groups that matter today
+// rather than only all-or-nothing.
 //
-// The choice is remembered. localStorage is per origin, so per port here,
-// which beats inventing a preference file for one boolean. Both accesses
-// are wrapped: a browser with site data blocked throws on the property
-// itself, and an unhandled throw would take the startup path with it.
-const DASH_KEY = "sqltop.dashboard.open";
-try {
-  const saved = localStorage.getItem(DASH_KEY);
-  if (saved !== null) $("dashboard").open = saved === "1";
-} catch { /* no stored preference is not a problem worth reporting */ }
-
-$("dashboard").addEventListener("toggle", () => {
+// Debt: spec section 8.2 says this state belongs in the named layout the
+// server owns, not in the browser. Layouts do not exist yet, so this is
+// localStorage, which is per origin and therefore per port. The way out is
+// the layout file, and when it lands these keys are what it replaces.
+function remember(el, key) {
   try {
-    localStorage.setItem(DASH_KEY, $("dashboard").open ? "1" : "0");
-  } catch { /* a browser that will not store it still works, it just forgets */ }
-  layout();
-});
+    const saved = localStorage.getItem(key);
+    if (saved !== null) el.open = saved === "1";
+  } catch { /* no stored preference is not worth reporting */ }
+  el.addEventListener("toggle", () => {
+    try {
+      localStorage.setItem(key, el.open ? "1" : "0");
+    } catch { /* a browser that will not store it still works, it forgets */ }
+    layout();
+  });
+}
+
+remember($("dashboard"), "sqltop.dashboard.open");
 head();
 buildDashboard();
 // Counts locally: it keeps moving while the connection is down, which is
