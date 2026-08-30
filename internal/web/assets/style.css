@@ -12,12 +12,33 @@
 
 * { box-sizing: border-box; }
 
+/* One viewport-high column: the grid takes whatever the header, the server
+   information, the dashboard and the status bar leave it, and gets it back
+   when the dashboard is collapsed. The grid used to be a fixed 78vh, which
+   was right when it was the only thing on the page and became wrong the
+   moment a dashboard sat above it: the whole page scrolled, so the status
+   bar left the screen and the sticky column headers stuck to a viewport
+   that was no longer where the table was. */
 body {
   margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg);
   color: var(--fg);
   font: 13px/1.4 ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
 }
+
+header, .serverInfo, .message, #statusBar { flex: none; }
+
+/* On a window too short for both, the dashboard is what gives way: it
+   scrolls inside itself rather than squeezing the grid out of existence.
+   min-height: 0 is what lets it shrink at all, and the grid's own
+   min-height below is what it shrinks in favour of. Measured on a 493 px
+   viewport, where without this pair the grid rendered at exactly zero
+   pixels and the page looked like it had lost its table. */
+.dashboard { flex: 0 1 auto; overflow: auto; min-height: 0; }
 
 header {
   display: flex;
@@ -107,7 +128,12 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 
 .gridScroll {
   margin: 0 14px 14px;
-  height: 78vh;
+  /* flex: 1 1 0 takes what is left, and the min-height is a floor rather
+     than the 0 a shrinkable flex item would otherwise need: the grid is the
+     point of this page and it never disappears, however short the window or
+     however much the dashboard wants. */
+  flex: 1 1 0;
+  min-height: 160px;
   overflow: auto;
   border: 1px solid var(--line);
   background: var(--panel);

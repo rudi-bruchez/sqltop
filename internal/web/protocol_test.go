@@ -2,6 +2,9 @@ package web
 
 import (
 	"encoding/json"
+	"math"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -583,4 +586,124 @@ func TestUnknownStartTimeIsNotSentAsAnInstant(t *testing.T) {
 	if strings.Contains(string(b), "startedAt") {
 		t.Errorf("payload = %s; an unknown start time must be omitted, not sent as a number the page could render", b)
 	}
+}
+
+// TestRowFieldsMatchTheStruct is what makes the positional row format safe.
+// The client is told the column order once and then indexes by position, so
+// a field added to Row without a matching entry in rowFields would shift
+// every column after it and put reads under writes with nothing failing.
+// Reflection over the json tags, in declaration order, is the only check
+// that cannot itself be forgotten.
+func TestRowFieldsMatchTheStruct(t *testing.T) {
+	rt := reflect.TypeOf(Row{})
+	var tags []string
+	for i := 0; i < rt.NumField(); i++ {
+		tag, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
+		if tag == "" || tag == "-" {
+			t.Fatalf("Row.%s has no json tag; every column has to be nameable on the wire", rt.Field(i).Name)
+		}
+		tags = append(tags, tag)
+	}
+	if !slices.Equal(tags, rowFields) {
+		t.Errorf("rowFields does not match Row's json tags in order:\n struct: %v\n rowFields: %v", tags, rowFields)
+	}
+}
+
+// TestRowRoundTripsThroughTheArrayForm checks the format end to end: every
+// field arrives back in its own place. A transposition of two same-typed
+// neighbours is the defect this format invites and the one a size check
+// alone would miss, so every value here is distinct.
+func TestRowRoundTripsThroughTheArrayForm(t *testing.T) {
+	want := Row{
+		SPID: 51, RequestID: 2, RefKey: "51:abc", Status: "suspended",
+		Database: "OLTP_Main", Command: "SELECT", BlockedBy: 47, Depth: 3,
+		ElapsedMs: 12345, CPUMs: 678, Reads: 90123, Writes: 456,
+		TempdbMB: 7.25, GrantMB: 1024.5, DOP: 8, WaitType: "LCK_M_X",
+		WaitMs: 999, Percent: 42.5,
+	}
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b[0] != '[' {
+		t.Fatalf("row marshalled as %s; the wire format is a positional array, not an object", b)
+	}
+	var got Row
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("%v (from %s)", err, b)
+	}
+	if got != want {
+		t.Errorf("round trip lost or moved a value:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestFirstSnapshotCarriesTheColumnHeaderAndLaterOnesDoNot pins the "sent
+// once" half of the format. Without the header the client cannot read a
+// single row; with it on every tick it would cost the bytes the format was
+// changed to save.
+func TestFirstSnapshotCarriesTheColumnHeaderAndLaterOnesDoNot(t *testing.T) {
+	e := NewEncoder()
+	first := e.Snapshot(nil, nil, collector.Status{})
+	if !slices.Equal(first.Cols, rowFields) {
+		t.Fatalf("first snapshot Cols = %v, want %v", first.Cols, rowFields)
+	}
+	second := e.Snapshot(nil, nil, collector.Status{})
+	if second.Cols != nil {
+		t.Errorf("second snapshot repeats the column header: %v", second.Cols)
+	}
+	// A reconnecting client gets a new encoder and has to be told again,
+	// or its grid would be unreadable for the life of the connection.
+	if again := NewEncoder().Snapshot(nil, nil, collector.Status{}); !slices.Equal(again.Cols, rowFields) {
+		t.Errorf("a fresh encoder did not send the header: %v", again.Cols)
+	}
+}
+
+// FuzzAppendJSONString is why the hand-rolled string writer is allowed to
+// exist. It runs five times per row, 800 rows a second, which is what
+// justifies not calling encoding/json; this proves it produces exactly what
+// encoding/json would, invalid UTF-8, control characters, HTML escaping and
+// the JavaScript line terminators included.
+func FuzzAppendJSONString(f *testing.F) {
+	for _, seed := range []string{
+		"", "plain", `quote " backslash \`, "<script>&amp;", "tab\tnewline\nreturn\r",
+		"\x00\x01\x1f", "café", "日本語", "\xff\xfe invalid", "  ",
+		"emoji 🐢 and a lone surrogate byte \xed\xa0\x80",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		want, err := json.Marshal(s)
+		if err != nil {
+			t.Skip("encoding/json refuses it, so there is nothing to match")
+		}
+		got := appendJSONString(nil, s)
+		if string(got) != string(want) {
+			t.Errorf("appendJSONString(%q)\n got %s\nwant %s", s, got, want)
+		}
+	})
+}
+
+// FuzzAppendJSONFloat holds the number writer to the same standard, with
+// the one documented exception: encoding/json refuses NaN and infinity,
+// and this writes 0 rather than failing a whole snapshot over one cell.
+func FuzzAppendJSONFloat(f *testing.F) {
+	for _, seed := range []float64{0, 1, -1, 0.5, 1e-7, 1e21, 1e-320, 123456.789, math.MaxFloat64} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, v float64) {
+		got := string(appendJSONFloat(nil, v))
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			if got != "0" {
+				t.Errorf("appendJSONFloat(%v) = %s, want 0", v, got)
+			}
+			return
+		}
+		want, err := json.Marshal(v)
+		if err != nil {
+			t.Skip()
+		}
+		if got != string(want) {
+			t.Errorf("appendJSONFloat(%v)\n got %s\nwant %s", v, got, want)
+		}
+	})
 }

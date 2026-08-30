@@ -6,8 +6,22 @@ constant changes.
 
 ## Unreleased
 
-Nothing yet. 0.2 is the dashboard, the other views, the plan panel and the
-kill flow.
+0.2 in progress. The server dashboard is in; the other views, the plan panel
+and the kill flow are not.
+
+- The dashboard of `docs/SPECS.md` section 6, above the grid: instance, host,
+  edition, version and uptime read once at connection, then thirty figures in
+  four groups, each with a sparkline. An unavailable figure reads n/a and
+  never falls back to the last value it had.
+- Three families of figures the spec named and nothing collected: scheduler
+  load, the memory clerks behind the buffer pool, plan cache and query
+  memory, and tempdb broken into user objects, internal objects and version
+  store. Plus the instance start time, which had been declared on the model
+  and never once assigned.
+- `docs/QUERIES.md`, every query the tool sends, extracted from the code by a
+  test rather than copied, so it cannot drift. The catalogue behind it also
+  checks that each query carries its hints and that none of them writes to
+  the monitored server.
 
 ## 0.1.0, 30 August 2026
 

@@ -3,9 +3,10 @@
 A `top` for SQL servers: real-time monitoring of active requests, with a short
 rolling history so a query can be reviewed after it has finished.
 
-Status: 0.1. The collector works and the request grid is live. The dashboard,
-the other views, the plan panel and the kill flow are 0.2. The rendering
-strategy for the main screen was settled by measurement against four
+Status: 0.1 released, 0.2 in progress. The collector works, the request grid is
+live and the server dashboard is in. The other views, the plan panel and the
+kill flow are still to come, as are column sorting and filtering. The
+rendering strategy for the main screen was settled by measurement against four
 candidates, using a local harness that is not tracked here.
 
 ## Running it
@@ -90,5 +91,6 @@ material, not project documentation.
 | `sqlstress/` | A load generator for the demonstration database, for tests and demos |
 | `scripts/` | Test container, demonstration database, version bump |
 | `docs/SPECS.md` | The specification, which is the authority |
+| `docs/QUERIES.md` | Every query the tool sends, generated from the code by a test |
 | `docs/plans/` | Implementation plans and the decisions taken while executing them |
 | `docs/` | Research notes, in their original French |
