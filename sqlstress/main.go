@@ -26,7 +26,6 @@ import (
 
 	_ "github.com/microsoft/go-mssqldb"
 
-	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/dotenv"
 )
 
@@ -35,19 +34,45 @@ import (
 //
 // The connection string is not here and never will be: it carries a password,
 // and the project's rule is that secrets come from the environment.
+// duration is sqlstress's own, deliberately not sqltop's config.Duration.
+// It borrowed that type once and the borrowing broke the moment sqltop's
+// configuration format changed from JSON to YAML: this file is JSON, the
+// shared type stopped speaking JSON, and nothing caught it because this
+// binary has no tests. A load generator has no business depending on the
+// wire format of the tool it exercises.
+type duration time.Duration
+
+func (d duration) Std() time.Duration { return time.Duration(d) }
+func (d duration) String() string     { return time.Duration(d).String() }
+
+func (d duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
+
+func (d *duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("a duration is written as a string like \"60s\": %w", err)
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("%q is not a duration: %w", s, err)
+	}
+	*d = duration(v)
+	return nil
+}
+
 type conf struct {
-	Threads  int             `json:"threads"`
-	Duration config.Duration `json:"duration"`
-	Pause    config.Duration `json:"pause"`
-	Queries  string          `json:"queries"`
-	Database string          `json:"database"`
+	Threads  int      `json:"threads"`
+	Duration duration `json:"duration"`
+	Pause    duration `json:"pause"`
+	Queries  string   `json:"queries"`
+	Database string   `json:"database"`
 }
 
 func defaults() conf {
 	return conf{
 		Threads:  8,
-		Duration: config.Duration(60 * time.Second),
-		Pause:    config.Duration(200 * time.Millisecond),
+		Duration: duration(60 * time.Second),
+		Pause:    duration(200 * time.Millisecond),
 		Queries:  "queries",
 		Database: "PachadataFormation",
 	}
@@ -79,7 +104,7 @@ func run() error {
 	confPath := flag.String("config", "sqlstress.json", "configuration file")
 	envPath := flag.String("env", ".env", "environment file holding SQLSTRESS_DSN")
 	threads := flag.Int("threads", 0, "override the configured thread count")
-	duration := flag.Duration("duration", 0, "override the configured duration")
+	durationFlag := flag.Duration("duration", 0, "override the configured duration")
 	flag.Parse()
 
 	envWarnings, err := dotenv.Load(*envPath)
@@ -97,8 +122,8 @@ func run() error {
 	if *threads > 0 {
 		cfg.Threads = *threads
 	}
-	if *duration > 0 {
-		cfg.Duration = config.Duration(*duration)
+	if *durationFlag > 0 {
+		cfg.Duration = duration(*durationFlag)
 	}
 
 	// The queries directory is resolved relative to the configuration file, so
