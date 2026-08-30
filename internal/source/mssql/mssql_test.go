@@ -292,6 +292,62 @@ func TestCostIsCumulativeAndNonZero(t *testing.T) {
 	}
 }
 
+// TestQueryAfterSessionKilledRepairsThePinnedConnection is what
+// repairLocked and connDeadLocked exist for, driven honestly rather than
+// left at the 0 % and 33.3 % coverage a review found: a second, independent
+// connection plays the DBA who kills this session out from under it. Per
+// queryRow's own doc comment, a connection dying this way does not
+// necessarily surface as sql.ErrConnDone or driver.ErrBadConn - go-mssqldb
+// marks it bad internally and the caller gets the raw read error instead,
+// with the sentinel only arriving on the following call - so only
+// connDeadLocked's read of the driver's own connectionGood flag catches it
+// on this same call. This proves the whole chain end to end: a query on
+// the killed session fails, the pinned connection is dropped rather than
+// kept and reused, and the very next query re-pins a fresh one and
+// succeeds rather than the Source staying broken.
+func TestQueryAfterSessionKilledRepairsThePinnedConnection(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	killer, err := sql.Open("sqlserver", os.Getenv("SQLTOP_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer killer.Close()
+
+	if _, err := killer.ExecContext(ctx, fmt.Sprintf("KILL %d", s.spid)); err != nil {
+		t.Fatalf("KILL %d: %v", s.spid, err)
+	}
+
+	// KILL is asynchronous: the session is marked to die, not necessarily
+	// dead by the time ExecContext above returns. Poll rather than assume
+	// the first query after it already sees the break.
+	const probe = "SELECT 1 OPTION (RECOMPILE, MAXDOP 1)"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := s.queryRow(ctx, probe, &n); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session was killed but the pinned connection kept answering queries for ten seconds")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	s.mu.Lock()
+	dead := s.db == nil
+	s.mu.Unlock()
+	if !dead {
+		t.Fatal("repairLocked did not drop the pinned connection after a query on the killed session failed; the next query would have reused a connection nothing can use again")
+	}
+
+	var n int
+	if err := s.queryRow(ctx, probe, &n); err != nil {
+		t.Fatalf("query after repair: %v, want a fresh connection re-pinned and the query to succeed", err)
+	}
+}
+
 func TestSampleRequestsSeesALongQuery(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
