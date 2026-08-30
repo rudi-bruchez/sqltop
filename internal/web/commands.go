@@ -96,8 +96,8 @@ func writeSnapshot(dir string, at time.Time, body []byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		defer f.Close()
 		if _, err := f.Write(body); err != nil {
+			f.Close()
 			return "", err
 		}
 		return path, f.Close()
@@ -139,9 +139,9 @@ func (s *Server) period(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	s.mu.RLock()
 	cfg := s.cfg
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	cfg.Tiers.Requests = config.Duration(d)
 	if err := cfg.Validate(); err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)

@@ -594,9 +594,17 @@ function buildHelp() {
 // setGrid takes every view and its column selection, as the server
 // resolved them from the configuration file. Sent once per connection.
 function setGrid(views) {
-  layouts.clear();
   viewKeys.clear();
   for (const v of views) {
+    // A view already laid out keeps what it has. This runs again on every
+    // reconnection, and the file cannot change under a running process
+    // except through this page's own save, which the page already reflects;
+    // rebuilding from the server would throw away a column the user had
+    // just moved and not yet saved.
+    if (layouts.has(v.id)) {
+      if (v.k) viewKeys.set(v.k, v.id);
+      continue;
+    }
     const L = { order: [], shown: new Set(), width: new Map(), title: new Map() };
     for (const c of v.cols || []) {
       L.order.push(c.f);
@@ -699,12 +707,14 @@ function blockingRows(rows) {
 }
 
 // The shortest gap between two asks of each list view, in milliseconds.
-// Measured, not guessed: docs/PERFORMANCE.md records 0.1 ms of server CPU
-// per call for the sessions query, 1.5 ms for the log list and 40 ms for
-// the locks, against an observation budget of 50 ms per second. The lock
-// scan is the only figure that grows with the server, and polling it at the
-// grid's one second would spend most of the tool's allowance on one tab.
-const POLL_FLOOR = { sessions: 2000, transactions: 5000, logs: 10000 };
+// Measured rather than guessed: docs/PERFORMANCE.md records 0.1 ms of
+// server CPU per call for the sessions query, 1.5 ms for the log list and
+// tens of milliseconds for the locks, against an observation budget of 50 ms
+// per second. Only the lock scan grows with the server, and polling that at
+// the grid's one second would spend most of the tool's allowance on one tab;
+// at five seconds it is about a sixth of it, which is what an operator
+// watching a lock list is asking for.
+const POLL_FLOOR = { sessions: 2000, transactions: 5000, logs: 5000 };
 
 // pollView asks for the active list view and schedules the next ask, at
 // whichever is slower, the sampling period or that view's own floor.
