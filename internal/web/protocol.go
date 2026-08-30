@@ -13,6 +13,7 @@ import (
 
 	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/collector"
+	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
@@ -389,6 +390,12 @@ type SnapshotPayload struct {
 	TS   int64          `json:"ts"`
 	Rows []Row          `json:"rows"`
 	Refs map[string]Ref `json:"refs,omitempty"`
+	// Dash is the dashboard this client should draw: the groups the
+	// configuration asks for, in order, each with the figures it asks for
+	// and their labels. Sent once per connection on the same terms as
+	// Cols, since it comes from a file that does not change while the
+	// process runs.
+	Dash []DashGroup `json:"dash,omitempty"`
 	// Cols names the columns of every Row array, in order. Sent once per
 	// connection, on the first snapshot, for the same reason the reference
 	// table exists: it never changes for the life of a connection, and a
@@ -407,6 +414,59 @@ type SnapshotPayload struct {
 	Status  StatusPayload           `json:"status"`
 }
 
+// DashGroup is one folding section of the dashboard on the wire.
+type DashGroup struct {
+	ID      string    `json:"id"`
+	Title   string    `json:"title"`
+	Folded  bool      `json:"folded,omitempty"`
+	Figures []DashFig `json:"figures"`
+}
+
+// DashFig is one tile: the key to read from Figures, and what to call it.
+type DashFig struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// resolveDashboard turns the configured switches into the list of tiles a
+// client should draw, in the catalogue's order, dropping what is switched
+// off. A group with every figure off is dropped whole rather than drawn as
+// an empty heading. Resolved here rather than shipped as switches for the
+// page to apply, so one place decides what a partial configuration means.
+func resolveDashboard(groups []config.DashboardGroup) []DashGroup {
+	byID := map[string]config.DashboardGroup{}
+	var order []string
+	for _, g := range groups {
+		byID[g.Group] = g
+		order = append(order, g.Group)
+	}
+
+	var out []DashGroup
+	for _, id := range order {
+		var cat model.DashboardGroup
+		for _, c := range model.DashboardCatalogue {
+			if c.ID == id {
+				cat = c
+				break
+			}
+		}
+		if cat.ID == "" {
+			continue
+		}
+		g := DashGroup{ID: cat.ID, Title: cat.Title, Folded: byID[id].Folded}
+		for _, f := range cat.Figures {
+			if on, said := byID[id].Figures[f.Key]; said && !on {
+				continue
+			}
+			g.Figures = append(g.Figures, DashFig{Key: f.Key, Label: f.Label})
+		}
+		if len(g.Figures) > 0 {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 // Encoder remembers which references a client already holds. One encoder per
 // connected client is still the intended use (two clients may have joined at
 // different times, so each needs its own view of what has already been
@@ -419,6 +479,13 @@ type Encoder struct {
 	mu   sync.Mutex
 	seq  uint64
 	sent map[string]struct{} // ref keys already delivered to this client
+	dash []DashGroup         // sent once, with the column header
+}
+
+// WithDashboard sets the dashboard this encoder describes to its client.
+func (e *Encoder) WithDashboard(d []DashGroup) *Encoder {
+	e.dash = d
+	return e
 }
 
 // firstSnapshot reports whether the column header still has to go out. It
@@ -534,6 +601,7 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 	}
 	if e.firstSnapshot() {
 		out.Cols = rowFields
+		out.Dash = e.dash
 	}
 
 	if figures != nil {

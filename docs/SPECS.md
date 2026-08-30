@@ -574,12 +574,19 @@ collect:
 layouts:
   default:
     dashboard:
-      groups:
-        - id: cpu
-          folded: false
-          figures: [sql_cpu_percent, runnable_tasks, scheduler_load_factor]
-        - id: memory
-          folded: true
+      - group: cpu
+        folded: false
+        figures:
+          sql_cpu_percent: true
+          other_cpu_percent: true
+          runnable_tasks: true
+          current_tasks: true
+          scheduler_load_factor: true
+          schedulers_online: true
+      - group: memory
+        folded: true
+        figures:
+          plan_cache_mb: false
     views:
       requests:
         columns:
@@ -607,6 +614,14 @@ layouts:
           - field: sql_text
             width: 520
 ```
+
+`sqltop --write-config` writes that file out in full: every group and every
+figure the tool knows, each with its own switch. The point is that a user can
+see what exists and turn a tile off without knowing its name in advance,
+which is why the generated file lists everything rather than only what is
+enabled. Anything a hand-written file leaves out keeps its default, which is
+on, so a figure added by a later version appears rather than staying
+invisible to everyone who ever saved a configuration.
 
 `collect.skipTiers` is the collection scope of section 8.2. A tier named there
 is never sampled, for every viewer, which removes its query rather than its

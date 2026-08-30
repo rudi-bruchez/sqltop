@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
 // Duration is a time.Duration written as "1s" or "15m" rather than as a
@@ -39,6 +41,29 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	}
 	*d = Duration(v)
 	return nil
+}
+
+// DashboardGroup is one section of the dashboard as the configuration file
+// sees it: whether it starts folded, and an explicit switch for every figure
+// it can hold. Every figure is listed rather than only the enabled ones, so
+// the file shows what is available instead of requiring the names to be
+// known in advance. Section 8.2.
+//
+// Plain bools: go-yaml accepts on and off for them on the way in and writes
+// true and false on the way out, which is what the file will look like
+// after the tool next saves it either way.
+type DashboardGroup struct {
+	Group   string          `yaml:"group"`
+	Folded  bool            `yaml:"folded"`
+	Figures map[string]bool `yaml:"figures"`
+}
+
+// Layout is one named layout. Only the dashboard is typed so far: the views
+// of section 8.2 are carried through untouched, because nothing reads them
+// yet and inventing their shape before something does would be guessing.
+type Layout struct {
+	Dashboard []DashboardGroup `yaml:"dashboard,omitempty"`
+	Views     *yaml.Node       `yaml:"views,omitempty"`
 }
 
 type Instance struct {
@@ -73,16 +98,93 @@ type Config struct {
 	Retention Duration   `yaml:"retention"`
 	Server    Server     `yaml:"server"`
 	Budget    Budget     `yaml:"budget"`
-	// Layouts is spec section 8.2's named layouts, kept opaque until the
-	// UI that owns them exists. A yaml.Node rather than a map so a
-	// hand-written layout survives a rewrite of the rest of the file
-	// unchanged, rather than being normalised by a round trip through
-	// map[string]any.
-	Layouts *yaml.Node `yaml:"layouts,omitempty"`
+	// Layouts is spec section 8.2's named layouts.
+	Layouts map[string]Layout `yaml:"layouts,omitempty"`
 
 	// Path is the file this came from, empty when built-in defaults were
 	// used. The status bar names it, so it must survive loading.
 	Path string `yaml:"-"`
+}
+
+// DefaultLayout builds the layout the tool ships with: every dashboard
+// group present, unfolded, with every figure the catalogue knows listed and
+// switched on. Written out in full rather than left empty, because the point
+// of the file is that somebody can see what exists and switch a tile off
+// without having to know its name in advance.
+func DefaultLayout() Layout {
+	l := Layout{}
+	for _, g := range model.DashboardCatalogue {
+		grp := DashboardGroup{Group: g.ID, Folded: false, Figures: map[string]bool{}}
+		for _, f := range g.Figures {
+			grp.Figures[f.Key] = true
+		}
+		l.Dashboard = append(l.Dashboard, grp)
+	}
+	return l
+}
+
+// Dashboard returns the groups and figures this configuration asks for,
+// resolved against the catalogue. Anything the file does not mention keeps
+// the built-in default, which is on, so a hand-written partial layout is
+// valid and a figure added to a later version of the tool appears rather
+// than staying invisible until somebody edits their file.
+func (cfg Config) Dashboard() []DashboardGroup {
+	byID := map[string]DashboardGroup{}
+	var order []string
+	if l, ok := cfg.Layouts["default"]; ok {
+		for _, g := range l.Dashboard {
+			byID[g.Group] = g
+			order = append(order, g.Group)
+		}
+	}
+
+	var out []DashboardGroup
+	seen := map[string]bool{}
+	// The file's order wins where it says anything, so a user can move a
+	// group up; the catalogue supplies the rest, in its own order.
+	for _, id := range append(order, catalogueIDs()...) {
+		if seen[id] {
+			continue
+		}
+		cat, known := catalogueGroup(id)
+		if !known {
+			// A group the file names and the catalogue does not know is
+			// left out rather than rendered empty: it is a typo or a
+			// leftover from an older version.
+			continue
+		}
+		seen[id] = true
+		cfgGroup, configured := byID[id]
+		grp := DashboardGroup{Group: id, Folded: cfgGroup.Folded, Figures: map[string]bool{}}
+		for _, f := range cat.Figures {
+			on := true
+			if configured {
+				if v, said := cfgGroup.Figures[f.Key]; said {
+					on = v
+				}
+			}
+			grp.Figures[f.Key] = on
+		}
+		out = append(out, grp)
+	}
+	return out
+}
+
+func catalogueIDs() []string {
+	out := make([]string, 0, len(model.DashboardCatalogue))
+	for _, g := range model.DashboardCatalogue {
+		out = append(out, g.ID)
+	}
+	return out
+}
+
+func catalogueGroup(id string) (model.DashboardGroup, bool) {
+	for _, g := range model.DashboardCatalogue {
+		if g.ID == id {
+			return g, true
+		}
+	}
+	return model.DashboardGroup{}, false
 }
 
 func Default() Config {

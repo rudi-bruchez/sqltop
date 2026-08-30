@@ -57,6 +57,16 @@ scripts/restoredb.sh
 cd sqlstress && go run . -duration 2m
 ```
 
+## Configuration
+
+`sqltop --write-config` writes a complete `sqltop.yaml` beside the binary,
+with every dashboard tile listed and switched on, so a tile can be turned off
+without knowing its name. `sqltop --show-config` prints what the tool
+actually resolved and from which file.
+
+The interface opens in the default browser at startup. `--no-browser` stops
+that, which is what you want over SSH.
+
 ## Versions
 
 The version is a constant in `internal/buildinfo`; the commit and the dirty

@@ -143,6 +143,19 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("dashboard rendered %d tiles in %d groups", got.Page.Tiles, len(got.Page.Groups))
 	}
 
+	// The configuration reaches the screen: a tile switched off is absent,
+	// its neighbours are not, and a group configured folded starts folded.
+	// A switch that renders anyway is a switch that lies.
+	if got.Page.HasPlanCache {
+		t.Error("plan_cache_mb was switched off in the configuration and its tile is on the page")
+	}
+	if !got.Page.HasBufferPool {
+		t.Error("buffer_pool_mb is missing although only its neighbour was switched off")
+	}
+	if !got.Page.MemoryFolded {
+		t.Error("the memory group was configured folded and is open")
+	}
+
 	// The honesty rule, end to end, on three figures that reach the page by
 	// three different routes.
 	if got.Honesty.Available == nil || got.Honesty.Available.NA {
@@ -276,6 +289,9 @@ type e2eResult struct {
 		SortButtons      int      `json:"sortButtons"`
 		Groups           []string `json:"groups"`
 		Tiles            int      `json:"tiles"`
+		HasPlanCache     bool     `json:"hasPlanCache"`
+		HasBufferPool    bool     `json:"hasBufferPool"`
+		MemoryFolded     bool     `json:"memoryFolded"`
 		PageScrolls      bool     `json:"pageScrolls"`
 		StatusBarVisible bool     `json:"statusBarVisible"`
 	} `json:"page"`
@@ -397,6 +413,16 @@ func browserTestServer(t *testing.T) (*Server, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One tile switched off and one group folded, so the browser can be
+	// asked whether the configuration file actually reaches the screen.
+	layout := config.DefaultLayout()
+	for i := range layout.Dashboard {
+		if layout.Dashboard[i].Group == "memory" {
+			layout.Dashboard[i].Folded = true
+			layout.Dashboard[i].Figures["plan_cache_mb"] = false
+		}
+	}
+	srv = srv.WithDashboard(layout.Dashboard)
 	ctx, cancel := context.WithCancel(context.Background())
 	go c.Run(ctx)
 	go func() { _ = srv.Serve(ctx) }()

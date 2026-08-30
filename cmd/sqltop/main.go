@@ -3,12 +3,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/collector"
@@ -23,6 +24,8 @@ func main() {
 	configPath := flag.String("config", "", "path to sqltop.yaml (default: beside the binary, then the user config directory)")
 	envPath := flag.String("env", ".env", "path to the .env file holding secrets")
 	showConfig := flag.Bool("show-config", false, "print the resolved configuration and exit")
+	writeConfig := flag.Bool("write-config", false, "write a complete sqltop.yaml, every dashboard tile listed, and exit")
+	noBrowser := flag.Bool("no-browser", false, "do not open the interface in a browser at startup")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -61,11 +64,33 @@ func main() {
 			where = "(built-in defaults, no file found)"
 		}
 		fmt.Fprintln(os.Stderr, "configuration from:", where)
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(cfg); err != nil {
+		// YAML, because that is what the file is. This printed JSON for a
+		// release after the format changed, which meant it emitted Go field
+		// names rather than the keys anybody could put back in a file.
+		out, err := yaml.Marshal(cfg)
+		if err != nil {
 			log.Fatal(err)
 		}
+		os.Stdout.Write(out)
+		return
+	}
+
+	// -write-config exists so nobody has to know a tile's name to switch it
+	// off. It writes every dashboard group and every figure the catalogue
+	// knows, each with its own switch, on top of whatever was already
+	// configured.
+	if *writeConfig {
+		if cfg.Layouts == nil {
+			cfg.Layouts = map[string]config.Layout{}
+		}
+		l := cfg.Layouts["default"]
+		l.Dashboard = cfg.Dashboard()
+		cfg.Layouts["default"] = l
+		path, err := config.Save(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "wrote", path)
 		return
 	}
 
@@ -107,6 +132,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	srv = srv.WithDashboard(cfg.Dashboard())
 	// The token in this URL is exactly what URL's own doc comment names as
 	// its cost: printing it here sends it to stderr, and from there to
 	// whatever captures this process's output, journald, a CI log, a
@@ -114,6 +140,17 @@ func main() {
 	// for the same reason URL accepts putting it in the address at all;
 	// see that comment for the full reasoning rather than repeating it here.
 	log.Printf("sqltop on %s", srv.URL())
+
+	// Opened by default, because the interface is the tool and a URL with a
+	// token in it is not something anybody enjoys retyping. A failure is a
+	// line in the log and nothing more: most machines a DBA logs into have
+	// no desktop at all, and refusing to run there would be worse than
+	// printing the address and letting them paste it.
+	if !*noBrowser {
+		if name, err := web.OpenBrowser(srv.URL()); err != nil {
+			log.Printf("could not open a browser with %s (%v); the address above is what to paste, or pass -no-browser to stop trying", name, err)
+		}
+	}
 	if err := srv.Serve(ctx); err != nil {
 		log.Fatal(err)
 	}

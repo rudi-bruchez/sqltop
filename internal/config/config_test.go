@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/rudi-bruchez/sqltop/internal/model"
 	"os"
 	"path/filepath"
 	"strings"
@@ -500,5 +501,78 @@ func TestMalformedYAMLNamesTheLine(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "line") {
 		t.Errorf("error %q does not say which line; that is the whole reason this file is not JSON", err)
+	}
+}
+
+// TestDefaultLayoutListsEveryTile is the point of the whole exercise: the
+// file has to show what exists, so somebody can switch a tile off without
+// knowing its name in advance.
+func TestDefaultLayoutListsEveryTile(t *testing.T) {
+	l := DefaultLayout()
+	if len(l.Dashboard) != len(model.DashboardCatalogue) {
+		t.Fatalf("wrote %d groups, the catalogue has %d", len(l.Dashboard), len(model.DashboardCatalogue))
+	}
+	for i, g := range model.DashboardCatalogue {
+		got := l.Dashboard[i]
+		if got.Group != g.ID {
+			t.Errorf("group %d is %q, want %q; the file follows the catalogue's order", i, got.Group, g.ID)
+		}
+		for _, f := range g.Figures {
+			on, listed := got.Figures[f.Key]
+			if !listed {
+				t.Errorf("%s: %q is missing, so it can only be switched off by somebody who already knows the name", g.ID, f.Key)
+			}
+			if !on {
+				t.Errorf("%s: %q defaults to off", g.ID, f.Key)
+			}
+		}
+		if len(got.Figures) != len(g.Figures) {
+			t.Errorf("%s lists %d figures, the catalogue has %d", g.ID, len(got.Figures), len(g.Figures))
+		}
+	}
+}
+
+// TestDashboardResolvesAPartialFile holds the rule that makes a hand-edited
+// file safe: what the file does not mention keeps its default, which is on.
+// Without it, a figure added by a later version stays invisible to everyone
+// who ever saved a configuration.
+func TestDashboardResolvesAPartialFile(t *testing.T) {
+	cfg := Default()
+	cfg.Layouts = map[string]Layout{"default": {Dashboard: []DashboardGroup{
+		{Group: "memory", Folded: true, Figures: map[string]bool{"plan_cache_mb": false}},
+	}}}
+
+	got := cfg.Dashboard()
+	if len(got) != len(model.DashboardCatalogue) {
+		t.Fatalf("resolved %d groups from a file naming one, want all %d", len(got), len(model.DashboardCatalogue))
+	}
+	// The one the file names comes first, because the file's order wins.
+	if got[0].Group != "memory" || !got[0].Folded {
+		t.Errorf("first group is %+v; a group the file names keeps its place and its folded state", got[0])
+	}
+	if got[0].Figures["plan_cache_mb"] {
+		t.Error("plan_cache_mb is on despite being switched off in the file")
+	}
+	if !got[0].Figures["buffer_pool_mb"] {
+		t.Error("buffer_pool_mb is off although the file never mentions it; unmentioned means default, and the default is on")
+	}
+	for _, g := range got[1:] {
+		for k, on := range g.Figures {
+			if !on {
+				t.Errorf("%s/%s is off although the file never mentions its group", g.Group, k)
+			}
+		}
+	}
+}
+
+// TestDashboardIgnoresAnUnknownGroup keeps a typo or a leftover from an
+// older version from rendering an empty heading.
+func TestDashboardIgnoresAnUnknownGroup(t *testing.T) {
+	cfg := Default()
+	cfg.Layouts = map[string]Layout{"default": {Dashboard: []DashboardGroup{{Group: "no-such-group"}}}}
+	for _, g := range cfg.Dashboard() {
+		if g.Group == "no-such-group" {
+			t.Error("an unknown group survived resolution")
+		}
 	}
 }

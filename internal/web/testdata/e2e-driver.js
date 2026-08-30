@@ -106,6 +106,9 @@ out.page = await json(`({
   sortButtons: [...document.querySelectorAll(".sortBtn")].length,
   groups: [...document.querySelectorAll(".figGroup")].map((g) => g.id),
   tiles: document.querySelectorAll(".tile").length,
+  hasPlanCache: !!document.getElementById("v-plan_cache_mb"),
+  hasBufferPool: !!document.getElementById("v-buffer_pool_mb"),
+  memoryFolded: !document.getElementById("g-memory").open,
   pageScrolls: document.documentElement.scrollHeight > innerHeight + 2,
   statusBarVisible: document.getElementById("statusBar").getBoundingClientRect().bottom <= innerHeight + 1
 })`);
@@ -143,7 +146,10 @@ out.honesty = await json(`(() => {
 out.fold = await json(`(() => {
   const sc = document.querySelector(".gridScroll");
   const before = sc.clientHeight;
-  const g = document.getElementById("g-memory");
+  // A group the configuration left open, so folding it actually changes
+  // something: g-memory starts folded in this fixture and folding it again
+  // would measure nothing.
+  const g = document.getElementById("g-cpu");
   g.open = false;
   g.dispatchEvent(new Event("toggle"));
   const afterGroup = sc.clientHeight;

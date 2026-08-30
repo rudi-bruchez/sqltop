@@ -70,71 +70,56 @@ function rowKey(r) { return val(r, "spid") + ":" + val(r, "rqid"); }
 let caps = new Set();
 function hasCap(name) { return caps.has(name); }
 
-// Spec section 6's dashboard, in the order you read a misbehaving server:
-// cpu, then memory, then arriving work, then what is holding on. Keys are
-// SnapshotPayload.Figures keys. A key nobody sends renders like one sent
-// unavailable, deliberately: at three in the morning the difference between
-// "not collected" and "not answerable" changes nothing.
-const FIG_GROUPS = [
-  {
-    id: "cpu",
-    title: "cpu and schedulers",
-    tiles: [
-      { key: "sql_cpu_percent", label: "sql server cpu", fmt: fPct },
-      { key: "other_cpu_percent", label: "other processes", fmt: fPct },
-      { key: "runnable_tasks", label: "runnable tasks", fmt: fInt },
-      { key: "current_tasks", label: "current tasks", fmt: fInt },
-      { key: "scheduler_load_factor", label: "load factor", fmt: fNum1 },
-      { key: "schedulers_online", label: "schedulers", fmt: fInt },
-    ],
-  },
-  {
-    id: "memory",
-    title: "memory",
-    tiles: [
-      { key: "total_server_memory_kb", label: "total server memory", fmt: fKB },
-      { key: "target_server_memory_kb", label: "target server memory", fmt: fKB },
-      { key: "buffer_pool_mb", label: "buffer pool", fmt: fMB },
-      { key: "plan_cache_mb", label: "plan cache", fmt: fMB },
-      { key: "query_memory_mb", label: "query memory", fmt: fMB },
-      { key: "page_life_expectancy", label: "page life expectancy", fmt: fDur },
-      // Windowed, not raw: the raw counter sits at 99-point-something on
-      // every server forever. Page life expectancy is the one to trust.
-      { key: "buffer_cache_hit_ratio", label: "cache hit ratio", fmt: fPct1 },
-      { key: "memory_grants_pending", label: "grants pending", fmt: fInt },
-      { key: "memory_grants_outstanding", label: "grants outstanding", fmt: fInt },
-    ],
-  },
-  {
-    id: "throughput",
-    title: "throughput",
-    tiles: [
-      { key: "active_requests", label: "active requests", fmt: fInt },
-      { key: "batch_requests_sec", label: "batch requests", fmt: fRate },
-      { key: "compilations_sec", label: "compilations", fmt: fRate },
-      { key: "recompilations_sec", label: "recompilations", fmt: fRate },
-      { key: "full_scans_sec", label: "full scans", fmt: fRate },
-      { key: "page_reads_sec", label: "page reads", fmt: fRate },
-      { key: "page_writes_sec", label: "page writes", fmt: fRate },
-      { key: "lazy_writes_sec", label: "lazy writes", fmt: fRate },
-    ],
-  },
-  {
-    id: "tempdb",
-    title: "transactions and tempdb",
-    tiles: [
-      { key: "open_transactions", label: "open transactions", fmt: fInt },
-      { key: "longest_transaction_s", label: "longest transaction", fmt: fDur },
-      { key: "tempdb_used_mb", label: "tempdb used", fmt: fMB },
-      { key: "tempdb_free_mb", label: "tempdb free", fmt: fMB },
-      { key: "tempdb_user_objects_mb", label: "tempdb user objects", fmt: fMB },
-      { key: "tempdb_internal_objects_mb", label: "tempdb internal", fmt: fMB },
-      { key: "tempdb_version_store_mb", label: "tempdb version store", fmt: fMB },
-      { key: "version_store_mb", label: "version store", fmt: fMB },
-      { key: "version_store_growth_mb_s", label: "version store growth", fmt: fSigned },
-    ],
-  },
-];
+// The dashboard's shape comes from the server, once per connection: which
+// groups, in what order, with which figures and what to call them. That is
+// resolved there from the configuration file, so one place decides what a
+// partial file means and the catalogue lives in one language rather than
+// two. What stays here is how to draw a number, which Go has no business
+// knowing.
+//
+// A key with no formatter falls back to a plain integer rather than
+// throwing, so a figure added to the catalogue renders sensibly before
+// anybody thinks about its units.
+const FMT = {
+  sql_cpu_percent: fPct,
+  other_cpu_percent: fPct,
+  runnable_tasks: fInt,
+  current_tasks: fInt,
+  scheduler_load_factor: fNum1,
+  schedulers_online: fInt,
+  total_server_memory_kb: fKB,
+  target_server_memory_kb: fKB,
+  buffer_pool_mb: fMB,
+  plan_cache_mb: fMB,
+  query_memory_mb: fMB,
+  page_life_expectancy: fDur,
+  // Windowed, not raw: the raw counter sits at 99-point-something on every
+  // server forever. Page life expectancy is the one to trust.
+  buffer_cache_hit_ratio: fPct1,
+  memory_grants_pending: fInt,
+  memory_grants_outstanding: fInt,
+  active_requests: fInt,
+  batch_requests_sec: fRate,
+  compilations_sec: fRate,
+  recompilations_sec: fRate,
+  full_scans_sec: fRate,
+  page_reads_sec: fRate,
+  page_writes_sec: fRate,
+  lazy_writes_sec: fRate,
+  open_transactions: fInt,
+  longest_transaction_s: fDur,
+  tempdb_used_mb: fMB,
+  tempdb_free_mb: fMB,
+  tempdb_user_objects_mb: fMB,
+  tempdb_internal_objects_mb: fMB,
+  tempdb_version_store_mb: fMB,
+  version_store_mb: fMB,
+  version_store_growth_mb_s: fSigned,
+};
+
+// FIG_GROUPS is what the server last told us to draw. Empty until the first
+// snapshot arrives, which is also when the grid's columns arrive.
+let FIG_GROUPS = [];
 
 // Not the retention window section 6 asks for: fifteen minutes is nine
 // hundred points and a hundred-pixel sparkline draws that as a smear. It
@@ -396,18 +381,24 @@ function head() {
 
 // Lays the tiles out once and remembers the two nodes each one updates.
 // After this the per-tick path writes text and one attribute per tile.
-function buildDashboard() {
-  $("dashBody").innerHTML = FIG_GROUPS.map((g) => `<details class="figGroup" id="g-${esc(g.id)}" open><summary>${esc(g.title)}</summary><div class="figTiles">` +
-    g.tiles.map((t) => `<div class="tile"><span class="tileLabel">${esc(t.label)}</span>` +
+function buildDashboard(groups) {
+  FIG_GROUPS = groups || [];
+  tiles.clear();
+  history.clear();
+  $("dashBody").innerHTML = FIG_GROUPS.map((g) =>
+    `<details class="figGroup" id="g-${esc(g.id)}" ${g.folded ? "" : "open"}><summary>${esc(g.title)}</summary><div class="figTiles">` +
+    (g.figures || []).map((t) => `<div class="tile"><span class="tileLabel">${esc(t.label)}</span>` +
       `<span class="tileValue na" id="v-${esc(t.key)}">n/a</span>` +
       `<svg class="spark" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">` +
       `<polyline id="s-${esc(t.key)}" points=""></polyline></svg></div>`).join("") +
     `</div></details>`).join("");
 
   for (const g of FIG_GROUPS) {
-    for (const t of g.tiles) {
-      tiles.set(t.key, { def: t, value: $("v-" + t.key), spark: $("s-" + t.key) });
+    for (const t of g.figures || []) {
+      tiles.set(t.key, { fmt: FMT[t.key] || fInt, value: $("v-" + t.key), spark: $("s-" + t.key) });
     }
+    // The configuration says whether a group starts folded; what the user
+    // then does with it is remembered and wins from that point.
     remember($("g-" + g.id), "sqltop.group." + g.id);
   }
 }
@@ -467,7 +458,7 @@ function updateDashboard(figures, seq, ts) {
     const ok = !!(f && f.available);
     // Never falls back to the last value it had. A stale number that looks
     // live is the most convincing lie this page could tell.
-    const text = ok ? t.def.fmt(f.value) : "n/a";
+    const text = ok ? t.fmt(f.value) : "n/a";
     if (t.value.textContent !== text) t.value.textContent = text;
     t.value.classList.toggle("na", !ok);
 
@@ -607,8 +598,10 @@ function applyStatus(st, seq) {
 const es = new EventSource("/api/stream?t=" + encodeURIComponent(token));
 es.addEventListener("snapshot", (e) => {
   const p = JSON.parse(e.data);
-  // The column header comes once, on the first snapshot of a connection.
+  // The column header and the dashboard shape both come once, on the first
+  // snapshot of a connection.
   if (p.cols) setCols(p.cols);
+  if (p.dash) buildDashboard(p.dash);
   data = p.rows || [];
   caps = new Set((p.status && p.status.caps) || []);
 
@@ -663,7 +656,6 @@ function remember(el, key) {
 
 remember($("dashboard"), "sqltop.dashboard.open");
 head();
-buildDashboard();
 // Counts locally: it keeps moving while the connection is down, which is
 // honest, the instance is still up and this tool just cannot see it.
 setInterval(updateUptime, 1000);

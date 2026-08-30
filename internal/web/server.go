@@ -35,6 +35,18 @@ type Server struct {
 	win      *window.Window
 	token    string
 	listener net.Listener
+	// dash is the dashboard every client is told to draw, resolved once
+	// from the configuration file at startup because that file does not
+	// change while the process runs.
+	dash []DashGroup
+}
+
+// WithDashboard sets what the dashboard shows, from the resolved
+// configuration. A server built without one still serves the full
+// catalogue, which is what the tests and a defaults-only run want.
+func (s *Server) WithDashboard(groups []config.DashboardGroup) *Server {
+	s.dash = resolveDashboard(groups)
+	return s
 }
 
 // NewServer binds 127.0.0.1 and nothing else. There is deliberately no
@@ -86,6 +98,16 @@ func (s *Server) URL() string {
 // tests that want to exercise Handler without ever starting Serve.
 func (s *Server) Close() error {
 	return s.listener.Close()
+}
+
+// dashboard is what a new client is told to draw. A server that was never
+// given a configuration falls back to the whole catalogue, so a run on
+// built-in defaults shows everything rather than nothing.
+func (s *Server) dashboard() []DashGroup {
+	if s.dash != nil {
+		return s.dash
+	}
+	return resolveDashboard(config.DefaultLayout().Dashboard)
 }
 
 // route pairs a path with the handler that serves it.
