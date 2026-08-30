@@ -127,5 +127,6 @@ documentation and user interface.
 | `docs/QUERIES.md` | Every query the tool sends, generated from the code by a test |
 | `docs/PERFORMANCE.md` | What was optimised, what was measured, and what was measured and rejected |
 | `docs/plans/` | Implementation plans and the decisions taken while executing them |
+| `docs/IDEES.md` | Candidate features, with the reasons for and against each |
 | `LICENSE` | MIT |
 
