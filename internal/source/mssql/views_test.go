@@ -127,6 +127,72 @@ func TestTransactionsSeesAnOpenTransactionAndWhatItLocked(t *testing.T) {
 	}
 }
 
+// TestTransactionNamesTheDatabaseTheWorkIsIn is a regression test for a
+// defect an external reviewer predicted and the container confirmed in one
+// run. sys.dm_tran_database_transactions has a row per database a
+// transaction has touched, and nearly every transaction touches more than
+// the one its work is in: a single INSERT into a single table produced
+// three rows, one of them the resource database, and the first version of
+// this reported "3 databases" and named master by taking MIN(database_id).
+//
+// Both halves of that are the plausible-looking wrong answer this project's
+// rules exist to prevent, so both are asserted here rather than left to a
+// comment.
+func TestTransactionNamesTheDatabaseTheWorkIsIn(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+	db := adminConn(t)
+
+	if _, err := db.ExecContext(ctx, `IF OBJECT_ID('dbo.sqltop_db_probe') IS NULL CREATE TABLE dbo.sqltop_db_probe (id int, pad char(200))`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS dbo.sqltop_db_probe`)
+	})
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO dbo.sqltop_db_probe (id, pad) SELECT TOP (500) object_id, 'x' FROM sys.all_columns`); err != nil {
+		t.Fatal(err)
+	}
+	// No tempdb work is arranged on purpose: the engine adds the tempdb and
+	// resource rows to this transaction by itself, which is exactly what
+	// made the first version of the query report three databases for one
+	// insert.
+
+	var spid int64
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT @@SPID, DB_NAME()`).Scan(&spid, &current); err != nil {
+		t.Fatal(err)
+	}
+
+	trans, _, err := s.Transactions(ctx)
+	if err != nil {
+		t.Fatalf("Transactions: %v", err)
+	}
+	for _, r := range trans {
+		if r.SessionID != spid {
+			continue
+		}
+		if r.Database != current {
+			t.Errorf("the transaction is named %q and its work is in %q", r.Database, current)
+		}
+		if r.Databases != 1 {
+			t.Errorf("a transaction writing in one database reports spanning %d; tempdb and the resource database are not databases it spans", r.Databases)
+		}
+		if r.LogBytes <= 0 {
+			t.Errorf("an insert of five hundred rows reports %d bytes of log", r.LogBytes)
+		}
+		return
+	}
+	t.Fatalf("session %d holds an open transaction and it is not in the list of %d", spid, len(trans))
+}
+
 func TestLogSpaceCoversEveryDatabase(t *testing.T) {
 	s := open(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

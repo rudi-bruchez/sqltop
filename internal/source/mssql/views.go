@@ -67,6 +67,36 @@ func (s *Source) Sessions(ctx context.Context) ([]model.SessionSample, error) {
 	return out, err
 }
 
+// transactionsQuery names one database per transaction and counts how many
+// it spans. Both of those are less obvious than they look, and the obvious
+// versions are both wrong.
+//
+// sys.dm_tran_database_transactions has one row per database a transaction
+// has touched, and nearly every transaction touches more than the one its
+// work is in: an external reviewer pointed this out and the container
+// agreed immediately, reporting three databases for a single INSERT into a
+// single table, and naming master. So counting rows overstates the span,
+// and MIN(database_id) names whichever database sorts first, which is
+// master or tempdb rather than the one the work is in.
+//
+// What is reported instead: the name is the database this transaction has
+// written the most log in, and the count is how many databases it has
+// written any log in at all, tempdb excluded. Written log is what separates
+// the database the work is in from the ones the engine touched on the way
+// past, and tempdb is excluded from the count because a temporary table is
+// not a second database anybody means when they say a transaction spans
+// two. A transaction that has written nowhere yet still gets a name and
+// counts zero, which is the truth about it.
+//
+// The resource database, id 32767, is excluded alongside tempdb, and that
+// exclusion is not cosmetic: the first version of this ranked user
+// databases first with database_id > 4, which put 32767 at the top of every
+// transaction and made DB_NAME return NULL, so every row came back with no
+// database at all. The container found that in one run.
+//
+// The log bytes and the record count stay summed across every database
+// including tempdb, because that figure answers "how much log is this
+// transaction holding down" and tempdb's share of it is still log.
 const transactionsQuery = `
 SELECT tx.transaction_id, stx.session_id,
        ISNULL(tx.name, N''),
@@ -78,11 +108,22 @@ FROM sys.dm_tran_active_transactions AS tx
 INNER JOIN sys.dm_tran_session_transactions AS stx ON stx.transaction_id = tx.transaction_id
 LEFT JOIN (
     SELECT transaction_id,
-           MIN(database_id) AS database_id,
-           COUNT(*) AS db_count,
-           SUM(database_transaction_log_bytes_used) AS log_bytes,
-           SUM(database_transaction_log_record_count) AS log_records
-    FROM sys.dm_tran_database_transactions
+           MAX(CASE WHEN rn = 1 THEN database_id END) AS database_id,
+           COUNT(CASE WHEN log_bytes > 0 AND database_id NOT IN (2, 32767) THEN 1 END) AS db_count,
+           SUM(log_bytes) AS log_bytes,
+           SUM(log_records) AS log_records
+    FROM (
+        SELECT transaction_id, database_id,
+               database_transaction_log_bytes_used AS log_bytes,
+               database_transaction_log_record_count AS log_records,
+               ROW_NUMBER() OVER (
+                   PARTITION BY transaction_id
+                   ORDER BY CASE WHEN database_transaction_log_bytes_used > 0 THEN 0 ELSE 1 END,
+                            CASE WHEN database_id IN (2, 32767) THEN 1 ELSE 0 END,
+                            database_transaction_log_bytes_used DESC,
+                            database_id) AS rn
+        FROM sys.dm_tran_database_transactions
+    ) AS d
     GROUP BY transaction_id
 ) AS dbt ON dbt.transaction_id = tx.transaction_id
 WHERE stx.is_user_transaction = 1

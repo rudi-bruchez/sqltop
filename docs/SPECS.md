@@ -418,6 +418,21 @@ the used size, which is the active portion, next to `log_reuse_wait_desc`
 from `sys.databases`, which is the answer somebody looking at a full log
 actually wants and which a percentage on its own never gives.
 
+On the transactions view's two derived figures. The database a transaction
+is named with is the one it has written the most log in, and the count of
+databases it spans counts only those it has written log in, `tempdb`
+excluded. Neither is the obvious reading of
+`sys.dm_tran_database_transactions`, and the obvious reading is wrong: that
+view has a row per database a transaction has touched, and nearly every
+transaction touches `tempdb` and the resource database as well as the one
+its work is in, so counting rows says three for a single insert and taking
+the lowest database id names `master`. `docs/PERFORMANCE.md` records both,
+and the second, subtler version of the same mistake that followed the fix.
+
+On Azure SQL Database, `OBJECT_NAME` with a database id resolves only inside
+the connected database, so a lock held elsewhere shows no name. That is the
+same "not resolvable cheaply" the column already means everywhere else.
+
 All three need `VIEW SERVER STATE`. A login without it gets the reason
 rather than a list of one session presented as the instance: a plausible
 answer that happens to be a lie is the thing the whole Available convention

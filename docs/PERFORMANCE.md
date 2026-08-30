@@ -45,7 +45,7 @@ read from the tool's own session's `cpu_time`:
 | `sessionsQuery`, on demand | 3.2 ms | 0.1 ms | 97 % |
 | `transactionsQuery`, on demand | 3.2 ms | 0.02 ms | 99 % |
 | `logSpaceQuery`, on demand | 18.1 ms | 1.5 ms | 92 % |
-| `locksQuery`, on demand | 51.5 ms | 40.8 ms | 21 % |
+| `locksQuery`, on demand | see below | see below | not comparable |
 
 Steady state, the three tier queries together: 12.6 ms of server CPU per
 second before, 1.8 ms after. The observation budget is 50 ms per second, so
@@ -54,9 +54,18 @@ the tool went from a quarter of its own allowance to a twenty-fifth of it.
 All of that was compilation. `SELECT name, recovery_model_desc,
 log_reuse_wait_desc, state_desc FROM sys.databases` costs 11.15 ms with the
 hint and 0.07 ms without, on five databases; nothing about executing that
-statement takes eleven milliseconds. `locksQuery` is the exception that
-proves it, and the reason its saving is the smallest: its cost is the walk
-of the lock manager, which no hint changes.
+statement takes eleven milliseconds.
+
+`locksQuery` is left out of the table on purpose. Its cost is the walk of
+the lock manager, which no hint changes, and that walk depends on how many
+locks exist at the instant of the call. Under the load these numbers were
+taken under, that population comes and goes with the blocker transaction the
+generator opens and rolls back, so two consecutive measurements of the same
+statement came out at 31 ms and 16 ms and one ordering of the runs made the
+`RECOMPILE` version look faster. The honest statement is that it costs tens
+of milliseconds, that compilation is a small part of that, and that a
+figure for it is only worth quoting alongside the lock count it was taken
+at. Nothing else in the tool has that property.
 
 What the hint bought was ten fewer cached plans on a server that holds
 thousands. The argument that usually justifies `RECOMPILE` on a monitoring
@@ -79,6 +88,28 @@ workers on the server it is watching, it is per statement, and it costs
 nothing. `TestEveryQueryCarriesTheHints` now requires it and forbids
 `RECOMPILE`, so putting the hint back on one statement means changing that
 test and redoing this measurement, which is the point.
+
+### The database a transaction is in
+
+`sys.dm_tran_database_transactions` has one row per database a transaction
+has touched, and the first version of the transactions view took
+`COUNT(*)` as the number of databases it spans and `MIN(database_id)` as the
+one it is in. Both are wrong, and the container said so within one run of a
+test written to check it: a single `INSERT` into a single table reported
+three databases and named `master`.
+
+The three rows are the database the work is in, `tempdb`, and the resource
+database at id 32767. What separates them is written log: only the real one
+has any. So the name is now the database with the most log written, and the
+count is how many databases have written any log at all with `tempdb`
+excluded, because a temporary table is not a second database anybody means
+when they say a transaction spans two.
+
+The first attempt at that fix ranked user databases first with `database_id
+> 4`, which put the resource database at the top of every transaction and
+made `DB_NAME` return NULL, so every row came back with no database at all.
+The same test caught it. `TestTransactionNamesTheDatabaseTheWorkIsIn` is the
+regression guard for both.
 
 ### The requests query
 
@@ -410,6 +441,80 @@ means nothing without the state of the machine that produced it. Every table
 here now says what else was running. And the case nobody has measured is the
 realistic one, a browser with forty tabs and a dozen extensions, which is
 what the tool will actually run in.
+
+## Suggested by an external reviewer, and what came of each
+
+An external reviewer was given docs/QUERIES.md and the cost table above and
+asked what else could be done. Six suggestions came back. They are recorded
+here with their verdicts, because a rejected suggestion with no reason
+written down gets raised again by the next reviewer and paid for twice.
+
+**Group the lock aggregate on the entity id and resolve the object name once
+per group.** The reasoning was that `OBJECT_NAME` is called once per lock and
+takes a schema latch each time. Measured, twice, and it was slower: 39.4 ms
+against 31.7 ms on the same lock population. The `CASE WHEN resource_type =
+'OBJECT'` guard already stops the function being called for the key and page
+locks that make up almost all of a large population, and grouping on the raw
+entity id splits what is now one row per index back into one row per
+partition. Rejected, with the caveat that the lock population moves under
+the measurement and neither figure is worth much on its own.
+
+**Restrict the lock view to sessions in a blocking chain.** The same reviewer
+argued against its own suggestion, correctly: an idle transaction holding a
+large lock count and blocking nobody yet is exactly what a DBA is looking
+for. Not done.
+
+**Take the SQL text out of the tick.** `sys.dm_exec_sql_text` is applied once
+per row in the grid query, and on a server with eight hundred active requests
+that is eight hundred calls into the plan cache for text the client already
+holds and caches by fingerprint. This is the most promising of the six and
+it is not done, because the container cannot produce eight hundred concurrent
+requests and a change of this size on an unmeasured hypothesis is exactly
+what section 2.1 forbids. Two shapes are worth measuring when a server that
+big is available: deduplicating the handles inside the query, which needs no
+client change and cannot lose much, and returning handles rather than text
+with a second query for the ones the tool has not seen, which needs a cache
+in the source and is the larger win if handle diversity is low.
+
+**Pre-aggregate `sys.dm_db_task_space_usage` by session and LEFT JOIN it,
+instead of applying it per row.** Plausible and not yet measured. Note that
+this is not the shape already rejected above under "the requests query":
+that one moved the filter, this one moves the aggregation.
+
+**Merge the round trips.** `countersQuery`, `osViewsQuery` and `costQuery`
+run on the same tier in the same tick and are three batches today. They could
+be one, read back with `Rows.NextResultSet`. It saves TDS framing and two
+round trips, which on a loopback connection is a fraction of a millisecond of
+wall clock and no server CPU at all. It would matter on a server across a
+WAN, which is in the list of things this project has never measured. Not done.
+
+**A larger TDS packet size.** Measured, on an 800 row result of about 400 kB,
+four runs: 1.50 to 1.63 ms of wall clock at the default 4096 bytes, and 1.16
+to 1.31 ms at 16384 or 32767. A real 15 to 20 % of the transfer, and no
+change in server CPU that the noise allows to be read. Not taken yet for the
+same reason as the merge: the saving is wall clock on a link that has no
+latency, and the case for it is a remote server nobody here has measured.
+
+### And what it got wrong
+
+The same reviewer said `FROM tempdb.sys.dm_db_file_space_usage` would fail on
+Azure SQL Database because three-part names are not supported there. It is
+wrong: Microsoft's own T-SQL differences page says "three part names
+referencing the tempdb database and the current database are supported", and
+the tempdb page gives `SELECT ... FROM tempdb.sys.database_files` as an
+example. Checked against the documentation rather than argued about, because
+this is one of the two things the project cannot test locally.
+
+It also reported that the ring buffer CPU history silently returns nothing on
+Azure SQL Database. That is half right and already handled: the capability
+probe skips that check outright on Azure SQL Database, so the two CPU tiles
+are greyed as unavailable rather than showing a plausible zero. What is true
+underneath it is a real gap rather than a defect, and it is in the list
+below: Azure SQL Database reports CPU through `sys.dm_db_resource_stats`, and
+this tool does not read it.
+
+It was right about one thing, and it was a defect in code written the same
+day. See "the database a transaction is in" above.
 
 ## What has not been measured
 

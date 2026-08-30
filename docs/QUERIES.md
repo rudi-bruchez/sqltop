@@ -372,11 +372,22 @@ FROM sys.dm_tran_active_transactions AS tx
 INNER JOIN sys.dm_tran_session_transactions AS stx ON stx.transaction_id = tx.transaction_id
 LEFT JOIN (
     SELECT transaction_id,
-           MIN(database_id) AS database_id,
-           COUNT(*) AS db_count,
-           SUM(database_transaction_log_bytes_used) AS log_bytes,
-           SUM(database_transaction_log_record_count) AS log_records
-    FROM sys.dm_tran_database_transactions
+           MAX(CASE WHEN rn = 1 THEN database_id END) AS database_id,
+           COUNT(CASE WHEN log_bytes > 0 AND database_id NOT IN (2, 32767) THEN 1 END) AS db_count,
+           SUM(log_bytes) AS log_bytes,
+           SUM(log_records) AS log_records
+    FROM (
+        SELECT transaction_id, database_id,
+               database_transaction_log_bytes_used AS log_bytes,
+               database_transaction_log_record_count AS log_records,
+               ROW_NUMBER() OVER (
+                   PARTITION BY transaction_id
+                   ORDER BY CASE WHEN database_transaction_log_bytes_used > 0 THEN 0 ELSE 1 END,
+                            CASE WHEN database_id IN (2, 32767) THEN 1 ELSE 0 END,
+                            database_transaction_log_bytes_used DESC,
+                            database_id) AS rn
+        FROM sys.dm_tran_database_transactions
+    ) AS d
     GROUP BY transaction_id
 ) AS dbt ON dbt.transaction_id = tx.transaction_id
 WHERE stx.is_user_transaction = 1
