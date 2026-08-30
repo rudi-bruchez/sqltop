@@ -33,9 +33,22 @@ this tool cost the server it watches.
 - The connection names itself. `Application Name` is `sqltop` and the
   version, so `program_name` says which tool and which build produced the
   load. An explicit name in the DSN wins.
+- Fixed, found by external review: two endpoints copied the configuration by
+  assignment and so shared its maps, one to mutate and one to validate, which
+  a pair of ordinary clients could turn into a fatal concurrent map access.
+- Fixed: the configuration file was written in place, so a write that failed
+  halfway left a truncated file rather than the one the user had. It is now
+  written beside and renamed over.
 - Fixed: the transactions view named a transaction after the lowest database
   id and counted every database it had touched, so a single insert into a
   single table reported three databases and named `master`.
+- Fixed: the sessions view reported a session that was executing a statement
+  at that instant as having been idle for several seconds, and showed
+  physical reads under a heading saying logical reads.
+- Fixed: pausing while a session, transaction or log view was open left it
+  frozen after resuming.
+- Fixed: the status, database and command columns of the grid drew nothing,
+  and the items in the status bar ran into each other.
 
 Still to come: the waits, repetitive-query, throughput and programs views,
 the plan panel, the kill flow, and the instance switcher.
