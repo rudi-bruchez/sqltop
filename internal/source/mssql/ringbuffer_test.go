@@ -7,8 +7,8 @@ const ringOne = `<RingBufferTarget truncated="0" processingTime="0" totalEventsP
     <data name="duration"><type name="uint64" package="package0"></type><value>1234</value></data>
     <data name="cpu_time"><value>1000</value></data>
     <data name="logical_reads"><value>7</value></data>
-    <data name="physical_reads"><value>0</value></data>
-    <data name="writes"><value>0</value></data>
+    <data name="physical_reads"><value>3</value></data>
+    <data name="writes"><value>5</value></data>
     <data name="row_count"><value>1</value></data>
     <data name="result"><type name="rpc_return_result" package="sqlserver"></type><value>0</value><text><![CDATA[OK]]></text></data>
     <data name="batch_text"><type name="unicode_string" package="package0"></type><value><![CDATA[SELECT 1]]></value></data>
@@ -42,7 +42,10 @@ func TestParseRingBufferReadsFieldsAndActions(t *testing.T) {
 	if b.Kind != "batch" || b.Text != "SELECT 1" {
 		t.Errorf("first statement is %s %q", b.Kind, b.Text)
 	}
-	if b.DurationUs != 1234 || b.CPUUs != 1000 || b.LogicalReads != 7 || b.RowCount != 1 {
+	// Every number distinct in the fixture, so a field wired to the wrong
+	// name cannot pass by matching a neighbour's zero.
+	if b.DurationUs != 1234 || b.CPUUs != 1000 || b.LogicalReads != 7 ||
+		b.PhysicalReads != 3 || b.Writes != 5 || b.RowCount != 1 {
 		t.Errorf("numbers came out %+v", b)
 	}
 	// The field that made this test necessary: <value> is the numeric code.
@@ -100,16 +103,13 @@ func TestParseRingBufferCountsWhatPassedThroughUnread(t *testing.T) {
 }
 
 func TestATruncatedDocumentKeepsTheOldestAndIsStillPlaceable(t *testing.T) {
-	// Measured against 2022: driving 4000 events through an unbounded ring
-	// buffer gave totalEventsProcessed=4000, eventCount=4000, truncated=1,
-	// and 2191 nodes in the document holding markers 0 through 2190. The
-	// document keeps the OLDEST of the buffer and drops the newest, so the
-	// first node sits at total-eventCount and NOT at total-len(nodes).
-	//
-	// Getting this backwards is not a near miss. It labels the oldest event
-	// with a high index, concludes placement is impossible, emits the whole
-	// document every poll, and ships duplicates while discarding what was
-	// really missing.
+	// A truncated document keeps the OLDEST events of the buffer and drops
+	// the newest, measured on 2019 and 2022, so the first node sits at
+	// total-eventCount and never at total-len(nodes). The two only differ
+	// once the buffer has also wrapped, which is the case this fixture is.
+	// How many nodes fit is not a property of the engine: it is 4 MB divided
+	// by the size of an event, so it moves with the workload and no figure
+	// for it belongs here.
 	x := `<RingBufferTarget truncated="1" totalEventsProcessed="500" eventCount="400">
 	  <event name="sql_batch_completed" timestamp="2026-08-30T20:19:50.238Z"><data name="batch_text"><value>oldest</value></data></event>
 	  <event name="sql_batch_completed" timestamp="2026-08-30T20:19:50.239Z"><data name="batch_text"><value>next</value></data></event>
@@ -159,5 +159,49 @@ func TestParseRingBufferOnAnEmptyTarget(t *testing.T) {
 	}
 	if len(got) != 0 || prog.Total != 0 || prog.Missed != 0 {
 		t.Errorf("an empty target gave %d statements and %+v", len(got), prog)
+	}
+}
+
+func TestAShortDocumentIsTruncationEvenWithoutTheFlag(t *testing.T) {
+	// The server sets the flag, but a node count below eventCount says the
+	// same thing and is the signal that arrives first. Each half of that
+	// test has to be able to fail on its own or only one of them is doing
+	// any work.
+	x := `<RingBufferTarget truncated="0" totalEventsProcessed="500" eventCount="400">
+	  <event name="sql_batch_completed" timestamp="2026-08-30T20:19:50.238Z"><data name="batch_text"><value>a</value></data></event>
+	</RingBufferTarget>`
+	_, prog, err := parseRingBuffer(x, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prog.Truncated {
+		t.Error("a document holding fewer nodes than eventCount is truncated whatever the flag says")
+	}
+}
+
+func TestAMalformedDocumentDoesNotAdvanceTheMark(t *testing.T) {
+	// A parse failure must leave the caller exactly where it was, or the
+	// events it has not seen are skipped on the strength of a broken read.
+	got, prog, err := parseRingBuffer(`<RingBufferTarget truncated="0"`, 42)
+	if err == nil {
+		t.Fatal("malformed XML parsed without error")
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d statements out of a document that would not parse", len(got))
+	}
+	if prog.Seen != 42 {
+		t.Errorf("Seen is %d, want the caller's own mark back", prog.Seen)
+	}
+}
+
+func TestTheMarkNeverRewinds(t *testing.T) {
+	// A document that parses but carries no events would otherwise compute
+	// Seen as zero and hand a caller back events it has already consumed.
+	_, prog, err := parseRingBuffer(`<RingBufferTarget truncated="0" totalEventsProcessed="0" eventCount="0"/>`, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prog.Seen != 7 {
+		t.Errorf("Seen is %d, want 7: a mark may stand still but never go back", prog.Seen)
 	}
 }

@@ -70,8 +70,8 @@ type CaptureHandle struct {
 // nothing calls it unless the operator passed the flag that permits that.
 type Capturer interface {
 	// CanCapture reports whether a capture is possible here, and says why
-	// not when it is not. A greyed key with no explanation is the failure
-	// this project has already fixed twice in the dashboard.
+	// not when it is not, so the interface can explain a key that does
+	// nothing instead of merely greying it.
 	CanCapture(ctx context.Context) (bool, string, error)
 
 	// SweepCaptures drops the event sessions under this tool's prefix that

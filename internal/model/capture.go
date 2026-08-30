@@ -36,9 +36,16 @@ type CaptureProgress struct {
 	Seen    int64
 	Missed  int64
 	Dropped int64
-	// Truncated means the document held less than the buffer. Placement
-	// still holds, so Missed stays exact; what it signals is that newer
-	// events are in the buffer and could not be returned this time.
+	// Truncated means the document held less than the buffer: newer events
+	// are in the buffer and could not be returned this time. Placement
+	// still holds, and Missed stays exact wherever the buffer evicts, which
+	// it always does under the caps this tool sets.
+	//
+	// It does not hold for a buffer that never evicts. There the oldest
+	// events stay put, every read returns the same window, Seen stops
+	// advancing and Missed reads zero while the workload runs past unseen.
+	// Only this flag would say so. Anything raising the event or memory cap
+	// far enough to overflow a 4 MB document has to face that.
 	Truncated bool
 }
 

@@ -318,6 +318,18 @@ anyway, and the reason is not caution: the handling is what makes a future
 change to either cap fail loudly instead of silently, and the unit tests
 exercise a path the engine will not.
 
+There is one shape of that future change that would fail quietly instead, and
+it is worth writing down beside the caps rather than leaving in a comment. The
+placement arithmetic and the exact loss count both rest on the buffer evicting
+its oldest events, which the thousand-event cap guarantees. Remove that cap and
+raise the memory one past four megabytes and the buffer stops evicting: the
+oldest events stay put, every read returns the same window, the mark stops
+advancing, and the capture reports no loss at all while the workload runs past
+unseen. Measured, on 2022, two reads six thousand events apart returning
+byte-identical documents. Only the truncation flag would say anything was
+wrong. Whoever changes either cap owns that, and the caps are written out in
+section 6 partly so the change cannot be made by accident.
+
 `MAX_DISPATCH_LATENCY = 2 SECONDS` matches the drain interval, so events reach
 the target at roughly the rate we read them.
 
