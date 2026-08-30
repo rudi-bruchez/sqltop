@@ -286,3 +286,137 @@ shapes they are actually built into.
 	}
 	return b.String()
 }
+
+// queryCallers are the methods that actually send SQL to the monitored
+// server. Anything added beside them has to be added here too, which is the
+// same naming-convention bargain the catalogue makes, one level down.
+var queryCallers = map[string]bool{"query": true, "queryRow": true}
+
+// TestEveryQuerySentComesFromTheCatalogue closes the hole an external review
+// found in the check above: that one enforces a naming convention on
+// package-level declarations, so a statement written as a literal at the
+// call site, or built into a local variable from something that is not a
+// catalogued query, never reaches it. The read-only rule and the query
+// hints would then be guaranteed for the queries somebody remembered to
+// name, which is not a guarantee.
+//
+// This walks the call sites instead. The second argument of every s.query
+// and s.queryRow must be an identifier, never a literal, and must resolve
+// to a catalogued query: either directly, or through an assignment in the
+// same function whose right-hand side mentions one. That is one level of
+// data flow rather than a real analysis, which is enough for this package
+// and fails loudly rather than silently if the code ever gets cleverer than
+// that.
+func TestEveryQuerySentComesFromTheCatalogue(t *testing.T) {
+	known := map[string]bool{
+		// requestsQuery is a field on Source, built by buildRequestsQuery
+		// from the template; the catalogue documents both of its shapes.
+		"requestsQuery": true,
+	}
+	for _, e := range queryCatalogue() {
+		name, _, _ := strings.Cut(e.name, " ")
+		known[name] = true
+	}
+	known["requestsQueryTemplate"] = true
+
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	checked := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				return true
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || len(call.Args) < 2 {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !queryCallers[sel.Sel.Name] {
+					return true
+				}
+				checked++
+				where := fset.Position(call.Pos())
+				switch arg := call.Args[1].(type) {
+				case *ast.Ident:
+					if known[arg.Name] {
+						return true
+					}
+					if resolvesToKnown(fn.Body, arg.Name, known) {
+						return true
+					}
+					t.Errorf("%s: %s is sent a query built from %s, which is not in queryCatalogue; it is therefore checked for neither the read-only rule nor the query hints", where, sel.Sel.Name, arg.Name)
+				case *ast.SelectorExpr:
+					if known[arg.Sel.Name] {
+						return true
+					}
+					t.Errorf("%s: %s is sent %s, which is not in queryCatalogue", where, sel.Sel.Name, arg.Sel.Name)
+				default:
+					t.Errorf("%s: %s is sent a query that is not a named value (%T). A statement written at the call site is invisible to every check in this file", where, sel.Sel.Name, call.Args[1])
+				}
+				return true
+			})
+			return true
+		})
+	}
+	if checked == 0 {
+		t.Fatal("found no s.query or s.queryRow call sites at all; this test has stopped looking at what it claims to look at")
+	}
+}
+
+// resolvesToKnown reports whether every assignment to name inside body
+// mentions a catalogued query. One level of data flow: enough to accept
+// `q := s.requestsQuery` and `q := fmt.Sprintf(canQueryTemplate, from)`,
+// and to reject a local built from anything else.
+func resolvesToKnown(body *ast.BlockStmt, name string, known map[string]bool) bool {
+	assignments := 0
+	ok := true
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, is := n.(*ast.AssignStmt)
+		if !is {
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			id, is := lhs.(*ast.Ident)
+			if !is || id.Name != name || i >= len(as.Rhs) {
+				continue
+			}
+			assignments++
+			if !mentionsKnown(as.Rhs[i], known) {
+				ok = false
+			}
+		}
+		return true
+	})
+	return assignments > 0 && ok
+}
+
+func mentionsKnown(e ast.Expr, known map[string]bool) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.Ident:
+			if known[v.Name] {
+				found = true
+			}
+		case *ast.SelectorExpr:
+			if known[v.Sel.Name] {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}

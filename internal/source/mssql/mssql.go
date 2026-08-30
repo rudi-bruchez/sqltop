@@ -418,6 +418,13 @@ func (s *Source) readCommittedSnapshotAnywhere(ctx context.Context) bool {
 // sqlserver_start_time is present on it there as well as on-premises, so
 // this needs no Azure branch. It does need VIEW SERVER STATE, which is why
 // the caller tolerates a failure rather than propagating it.
+//
+// It is the one read in this file with no capability gate in front of it,
+// which an external review flagged and which is deliberate: readCounters
+// gates because it would otherwise pay for a failing round trip every
+// second forever, and that reasoning does not reach a query that runs once
+// at connection and once more after a reconnection. A gate here would be a
+// probe query to avoid a probe query.
 const startTimeQuery = `
 SELECT sqlserver_start_time FROM sys.dm_os_sys_info
 OPTION (RECOMPILE, MAXDOP 1)`

@@ -165,6 +165,30 @@ func Load(path string) (Config, error) {
 // on it by accident.
 const minTierPeriod = 100 * time.Millisecond
 
+// The ceilings. An external review pointed out that validate had floors and
+// no ceilings, which leaves the same class of hole the missing floors did:
+// a value nobody would type on purpose that the program accepts and then
+// behaves strangely because of. These are not policy, they are typo
+// detection, so each is set well beyond any legitimate configuration.
+//
+//	maxTierPeriod   an hour between samples is not monitoring, and the
+//	                CPU history tier's own minute is the slowest thing the
+//	                spec asks for
+//	maxRetention    a day of history, when the default is fifteen minutes
+//	maxSamplesCap   at roughly 200 bytes a sample this is about 2 GB, which
+//	                is where "bounded memory" stops meaning anything
+//	maxBudgetMs     1000 ms of server CPU per second is one whole core of
+//	                the monitored server spent on watching it; past that
+//	                the budget is not a budget and the throttle can never
+//	                intervene, which is exactly what the zero-period bug
+//	                did from the other end
+const (
+	maxTierPeriod = time.Hour
+	maxRetention  = 24 * time.Hour
+	maxSamplesCap = 10_000_000
+	maxBudgetMs   = 1000
+)
+
 // validate rejects a configuration that would either hammer the monitored
 // server or silently produce an empty tool. Every check names the field and
 // the value it rejected, so a typo reads as an error message rather than as
@@ -184,15 +208,27 @@ func (cfg Config) validate() error {
 		if t.d.Std() < minTierPeriod {
 			return fmt.Errorf("%s: %s is below the floor of %s", t.field, t.d, minTierPeriod)
 		}
+		if t.d.Std() > maxTierPeriod {
+			return fmt.Errorf("%s: %s is above the ceiling of %s; a tier that slow is not monitoring", t.field, t.d, maxTierPeriod)
+		}
 	}
 	if cfg.Retention.Std() <= 0 {
 		return fmt.Errorf("retention: %s must be positive", cfg.Retention)
 	}
+	if cfg.Retention.Std() > maxRetention {
+		return fmt.Errorf("retention: %s is above the ceiling of %s", cfg.Retention, maxRetention)
+	}
 	if cfg.Budget.MaxSamples <= 0 {
 		return fmt.Errorf("budget.maxSamples: %d must be positive", cfg.Budget.MaxSamples)
 	}
+	if cfg.Budget.MaxSamples > maxSamplesCap {
+		return fmt.Errorf("budget.maxSamples: %d is above the ceiling of %d, which is already about 2 GB of retained samples", cfg.Budget.MaxSamples, maxSamplesCap)
+	}
 	if cfg.Budget.ServerCPUMsPerSecond <= 0 {
 		return fmt.Errorf("budget.serverCpuMsPerSecond: %d must be positive", cfg.Budget.ServerCPUMsPerSecond)
+	}
+	if cfg.Budget.ServerCPUMsPerSecond > maxBudgetMs {
+		return fmt.Errorf("budget.serverCpuMsPerSecond: %d is above the ceiling of %d, a whole core of the monitored server; past that the throttle can never intervene", cfg.Budget.ServerCPUMsPerSecond, maxBudgetMs)
 	}
 	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port: %d is out of range 1-65535", cfg.Server.Port)

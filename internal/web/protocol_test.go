@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"reflect"
 	"slices"
@@ -706,4 +707,72 @@ func FuzzAppendJSONFloat(f *testing.F) {
 			t.Errorf("appendJSONFloat(%v)\n got %s\nwant %s", v, got, want)
 		}
 	})
+}
+
+// TestMarshalledOrderMatchesTheAdvertisedColumns closes the hole an external
+// review opened by driving it: transposing two same-typed fields in both
+// MarshalJSON and UnmarshalJSON leaves every other test in this package
+// green, because the round trip uses the same wrong order on both sides,
+// while the wire now disagrees with the column header the client indexes
+// by. The browser shows reads under writes and nothing anywhere fails.
+//
+// TestRowFieldsMatchTheStruct checks rowFields against the struct and
+// TestRowRoundTripsThroughTheArrayForm checks Marshal against Unmarshal.
+// Neither checks the one thing that matters: that the order MarshalJSON
+// actually writes is the order rowFields advertises. This does, by filling
+// every field with a value no other field has and reading the marshalled
+// array back position by position.
+func TestMarshalledOrderMatchesTheAdvertisedColumns(t *testing.T) {
+	rt := reflect.TypeOf(Row{})
+	rv := reflect.New(rt).Elem()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rv.Field(i)
+		switch f.Kind() {
+		case reflect.Int, reflect.Int32, reflect.Int64:
+			f.SetInt(int64(100 + i))
+		case reflect.Float64:
+			f.SetFloat(float64(100+i) + 0.5)
+		case reflect.String:
+			f.SetString(fmt.Sprintf("f%d", i))
+		default:
+			t.Fatalf("Row.%s is a %s, which this test cannot fill with a distinguishable value; teach it that kind before adding the field", rt.Field(i).Name, f.Kind())
+		}
+	}
+
+	b, err := json.Marshal(rv.Interface().(Row))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("%v (from %s)", err, b)
+	}
+	if len(got) != len(rowFields) {
+		t.Fatalf("MarshalJSON wrote %d columns, rowFields advertises %d", len(got), len(rowFields))
+	}
+
+	for i, name := range rowFields {
+		field, ok := fieldByJSONTag(rt, rv, name)
+		if !ok {
+			t.Errorf("rowFields[%d] is %q, which is not a json tag on Row", i, name)
+			continue
+		}
+		want, err := json.Marshal(field.Interface())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got[i]) != string(want) {
+			t.Errorf("position %d is advertised as %q but MarshalJSON wrote %s there, and %q holds %s; the wire order and the column header disagree, so the browser will show one column's values under another's label",
+				i, name, got[i], name, want)
+		}
+	}
+}
+
+func fieldByJSONTag(rt reflect.Type, rv reflect.Value, tag string) (reflect.Value, bool) {
+	for i := 0; i < rt.NumField(); i++ {
+		if name, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ","); name == tag {
+			return rv.Field(i), true
+		}
+	}
+	return reflect.Value{}, false
 }
