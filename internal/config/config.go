@@ -498,7 +498,32 @@ func Save(cfg Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	// Written to a temporary file in the same directory and renamed over
+	// the target, rather than written in place. os.WriteFile truncates
+	// first, so a write that fails halfway (a full disk, a process killed)
+	// leaves the user holding a truncated configuration instead of the one
+	// they had. This file is edited by hand and kept under version control
+	// by the sort of person who does that, and the interface rewrites it on
+	// a button press; losing it to a partial write is not a risk worth
+	// carrying for one fewer syscall. Same directory, because rename is
+	// only atomic within a filesystem.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".sqltop-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("config: %w", err)
+	}
+	name := tmp.Name()
+	defer os.Remove(name) // a no-op once the rename below has succeeded
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("config: %w", err)
+	}
+	if err := os.Chmod(name, 0o644); err != nil {
+		return "", fmt.Errorf("config: %w", err)
+	}
+	if err := os.Rename(name, path); err != nil {
 		return "", fmt.Errorf("config: %w", err)
 	}
 	return path, nil

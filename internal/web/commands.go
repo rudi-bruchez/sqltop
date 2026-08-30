@@ -139,8 +139,10 @@ func (s *Server) period(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// A clone, not the shared value: Config carries maps, and Validate
+	// walks them. See cloneConfig.
 	s.mu.RLock()
-	cfg := s.cfg
+	cfg := cloneConfig(s.cfg)
 	s.mu.RUnlock()
 	cfg.Tiers.Requests = config.Duration(d)
 	if err := cfg.Validate(); err != nil {

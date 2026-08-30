@@ -17,11 +17,18 @@ import (
 	"github.com/rudi-bruchez/sqltop/internal/window"
 )
 
+// commandCollector is a collector over a fake source, for the handlers that
+// need one to talk to.
+func commandCollector(t *testing.T) *collector.Collector {
+	t.Helper()
+	return collector.New(fake.New(nil), window.New(time.Minute, 1000), collector.NewBudget(50, config.Default().Tiers))
+}
+
 // commandServer is a server with a real collector behind it, so the period
 // endpoint has something whose rate can actually be read back.
 func commandServer(t *testing.T) *Server {
 	t.Helper()
-	col := collector.New(fake.New(nil), window.New(time.Minute, 1000), collector.NewBudget(50, config.Default().Tiers))
+	col := commandCollector(t)
 	srv, err := NewServer(col, window.New(time.Minute, 1000), config.Server{Port: 0})
 	if err != nil {
 		t.Fatal(err)

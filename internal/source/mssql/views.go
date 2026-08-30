@@ -15,6 +15,13 @@ import (
 // this tool giving those.
 var errNoInstanceWideView = errors.New("mssql: this login cannot see the whole instance; the session, transaction and log views need VIEW SERVER STATE")
 
+// s.logical_reads, not s.reads. The two are different columns:
+// documentation gives reads as physical reads and logical_reads as logical
+// ones, and the request grid shows logical reads, so taking reads here put
+// a physical count under a heading that said logical. A real number naming
+// the wrong thing, which is the same defect class as everything else
+// commented in this file.
+//
 // On the idle figure, which took two attempts to get right.
 //
 // last_request_end_time is not null while a request is running: it holds the
@@ -50,7 +57,7 @@ SELECT s.session_id,
        ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
        CASE WHEN s.status = 'running' THEN 0
             ELSE ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0) END,
-       s.cpu_time, s.reads, s.writes, s.memory_usage,
+       s.cpu_time, s.logical_reads, s.writes, s.memory_usage,
        s.open_transaction_count,
        ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)
 FROM sys.dm_exec_sessions AS s

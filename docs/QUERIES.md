@@ -342,7 +342,7 @@ SELECT s.session_id,
        ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
        CASE WHEN s.status = 'running' THEN 0
             ELSE ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0) END,
-       s.cpu_time, s.reads, s.writes, s.memory_usage,
+       s.cpu_time, s.logical_reads, s.writes, s.memory_usage,
        s.open_transaction_count,
        ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)
 FROM sys.dm_exec_sessions AS s

@@ -726,7 +726,11 @@ function pollView() {
   if (isGrid(v)) return;
   fetch("/api/" + v + "?t=" + encodeURIComponent(token))
     .then((r) => r.json().then((j) => (r.ok ? j : Promise.reject(new Error(j.error || r.statusText)))))
-    .then((j) => renderList(v, j))
+    // Guarded because a response can land after the user has moved on: it
+    // would then redraw a hidden panel with the view's own data, which is
+    // harmless, and set that view's cached payload to something older than
+    // what a later request may already have returned, which is not.
+    .then((j) => { if (activeView === v) renderList(v, j); })
     .catch((e) => showListError(v, e.message))
     .finally(() => {
       if (activeView === v && !paused) pollTimer = setTimeout(pollView, Math.max(periodMs || 1000, POLL_FLOOR[v] || 5000));
@@ -853,8 +857,15 @@ let paused = false;
 function togglePause() {
   paused = !paused;
   $("pauseMark").hidden = !paused;
-  if (!paused) say("");
-  else say("display paused, press p to resume");
+  if (paused) {
+    say("display paused, press p to resume");
+    return;
+  }
+  say("");
+  // pollView stops rescheduling itself while paused, so resuming has to
+  // start it again. Without this a paused list view stayed frozen after
+  // resuming until the user switched tabs and back.
+  if (!isGrid(activeView)) pollView();
 }
 
 // The ladder the f command steps through. Fixed rather than typed in:

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
@@ -190,4 +191,69 @@ func gridFields(cols []GridCol) []string {
 		out[i] = c.Field
 	}
 	return out
+}
+
+// TestLayoutAndPeriodDoNotRaceOnTheConfiguration is the regression guard for
+// a defect an external reviewer found by reading. config.Config carries maps,
+// and a copy made by assignment shares them; both handlers copied it that
+// way, one to mutate and one to validate. A concurrent map read and write is
+// a fatal throw in Go, not a recoverable error, so the failure mode was the
+// whole process dying under two clients doing ordinary things.
+//
+// Only meaningful under -race, which is how the suite runs, but the fatal
+// throw would take the test binary down without it too.
+func TestLayoutAndPeriodDoNotRaceOnTheConfiguration(t *testing.T) {
+	srv, _ := layoutServer(t)
+	srv.col = commandCollector(t)
+
+	body := `{"view":"requests","columns":[{"field":"spid","show":true,"width":60},{"field":"cpu_ms","show":true,"width":90}]}`
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < 25; n++ {
+				postLayout(t, srv, body)
+			}
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < 25; n++ {
+				rw := httptest.NewRecorder()
+				srv.period(rw, httptest.NewRequest(http.MethodPost, "/api/period", strings.NewReader(`{"period":"2s"}`)))
+			}
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < 25; n++ {
+				_ = srv.gridColumns()
+				_ = srv.dashboard()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestSaveLeavesNoTemporaryFileBehind. The configuration is written to a
+// temporary file and renamed, so a write that fails halfway cannot leave the
+// user holding a truncated file. The cost of that is a temporary file, and
+// one left behind on every save would be its own kind of mess.
+func TestSaveLeavesNoTemporaryFileBehind(t *testing.T) {
+	srv, path := layoutServer(t)
+	for i := 0; i < 3; i++ {
+		if rw := postLayout(t, srv, `{"view":"requests","columns":[{"field":"spid","show":true,"width":60}]}`); rw.Code != http.StatusOK {
+			t.Fatalf("save returned %d: %s", rw.Code, rw.Body)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Errorf("saving left %q beside the configuration file", e.Name())
+		}
+	}
 }

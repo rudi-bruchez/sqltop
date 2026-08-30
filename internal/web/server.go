@@ -37,10 +37,15 @@ type Server struct {
 	listener net.Listener
 	// mu guards cfg, dash and grid, which the layout endpoint rewrites
 	// while stream goroutines are reading them.
-	mu   sync.RWMutex
-	cfg  config.Config
-	dash []DashGroup
-	grid []GridView
+	mu sync.RWMutex
+	// saveMu serialises writes of the configuration file against each
+	// other. Separate from mu on purpose: mu guards fields that a stream
+	// reads on every connection, and holding it across a file write would
+	// make every new client wait on a disk.
+	saveMu sync.Mutex
+	cfg    config.Config
+	dash   []DashGroup
+	grid   []GridView
 }
 
 // WithConfig gives the server the resolved configuration: what the
