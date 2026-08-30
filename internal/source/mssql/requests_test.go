@@ -11,7 +11,11 @@ import (
 // exercises one of them. These check the gates rather than the SQL, which is
 // proven against the container by the integration tests.
 func TestBuiltQueryGates(t *testing.T) {
-	const dop = "r.dop"
+	// The outer SELECT list always reads a plain "r.dop" from the inner
+	// derived table's own "dop" alias, present regardless of capability, so
+	// the marker for "the real column was read" has to be the substituted
+	// expression itself, not the bare column reference.
+	const dop = "ISNULL(r.dop, 0)"
 	const tempdb = "dm_db_task_space_usage"
 	tempdbCaps := model.Caps(model.CapTempdbPerTask)
 	dopCaps := model.Caps(model.CapRequestDOP)

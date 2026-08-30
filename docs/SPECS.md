@@ -364,6 +364,27 @@ re-query the server.
 
 ## 8. Request grid
 
+Not every row `sys.dm_exec_requests` can produce belongs in it. Measured
+under load, the large majority of what that view returns at any instant is
+the engine's own scheduler bookkeeping: worker threads named TASK MANAGER,
+LOG WRITER, RESOURCE MONITOR, BRKR TASK and the like, present continuously
+and never the reason a DBA opened this tool. Finding out what each row is
+doing in tempdb, one of the columns below, costs more server CPU than the
+rest of the query combined, because it means a separate lookup against
+`sys.dm_db_task_space_usage` for every row fetched; paying that cost for a
+row nobody reads is exactly the kind of self-inflicted load section 2
+rules out. The grid therefore keeps a row only when `sys.dm_exec_sessions`
+marks it as an actual login rather than one of the engine's own worker
+threads, or when it is blocking another session or is itself blocked, or
+when it is running a parallel plan. The first of those covers essentially
+all real work whatever its status or wait, because it asks the server
+directly what kind of session this is rather than reconstructing the
+answer from status text; the other two exist so that a worker thread doing
+something worth seeing, chiefly one on either side of a block, is never
+dropped for want of being a login. There is no setting to see the excluded
+rows: the filter exists to stop the tool paying for what nobody reads, not
+to be turned off.
+
 ### 8.1 Columns
 
 Every column is sortable and filterable. Two of them were called out

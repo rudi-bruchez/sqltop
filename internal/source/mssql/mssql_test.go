@@ -212,6 +212,203 @@ func TestSampleRequestsExcludesItself(t *testing.T) {
 	}
 }
 
+// TestSampleRequestsFilterKeepsBothSidesOfABlock is the CRITICAL TWO
+// blocking escape hatch, exercised for real. A blocker session holds a row
+// lock inside an open transaction and then sits inside WAITFOR DELAY, which
+// keeps it actively executing (status 'suspended', on the noise filter's
+// drop list) rather than idle between batches; sys.dm_exec_requests carries
+// no row at all for a session with no request in flight, blocker or not,
+// which is a limitation of the DMV itself and predates this filter, so the
+// scenario has to keep the blocker inside a request to be representative of
+// what the query can ever show. A second session then blocks trying to
+// touch the same row (status 'suspended' too). Both rows must survive,
+// because spec section 8.1 lists blocked_by and blocking_depth as columns
+// of this exact grid, and a filter that hid either side of a block would be
+// worse than the noise it was built to remove.
+//
+// Everything the blocker does past the CREATE TABLE happens in one
+// ExecContext call. Splitting it across several round trips on a pooled
+// *sql.DB was tried first and does not work: go-mssqldb resets the session
+// between checkouts even at MaxOpenConns(1), which rolls back the open
+// transaction and drops the global temp table between calls, the same
+// reset TestIsolationSurvivesASessionReset exists to catch on the tool's
+// own pinned connection.
+func TestSampleRequestsFilterKeepsBothSidesOfABlock(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	dsn := os.Getenv("SQLTOP_TEST_DSN")
+
+	blocker, err := sql.Open("sqlserver", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+
+	blockCtx, cancelBlock := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelBlock()
+	blockDone := make(chan error, 1)
+	go func() {
+		_, err := blocker.ExecContext(blockCtx, `
+			CREATE TABLE ##sqltop_block_test (id INT PRIMARY KEY, val INT);
+			INSERT INTO ##sqltop_block_test VALUES (1, 1);
+			BEGIN TRAN;
+			UPDATE ##sqltop_block_test SET val = val WHERE id = 1;
+			WAITFOR DELAY '00:00:06';
+			ROLLBACK TRAN;`)
+		blockDone <- err
+	}()
+	defer func() { cancelBlock(); <-blockDone }()
+
+	// Give the setup statements time to run and the WAITFOR to start before
+	// a second connection tries to touch the same row.
+	time.Sleep(1500 * time.Millisecond)
+
+	victim, err := sql.Open("sqlserver", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer victim.Close()
+	victimCtx, cancelVictim := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelVictim()
+	victimDone := make(chan error, 1)
+	go func() {
+		_, err := victim.ExecContext(victimCtx, `UPDATE ##sqltop_block_test SET val = val WHERE id = 1`)
+		victimDone <- err
+	}()
+	defer func() { cancelVictim(); <-victimDone }()
+
+	// Give the lock wait time to register before sampling.
+	time.Sleep(1500 * time.Millisecond)
+
+	rows, err := s.SampleRequests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var victimRow *model.RequestSample
+	for i := range rows {
+		if rows[i].BlockedBy != 0 {
+			victimRow = &rows[i]
+			break
+		}
+	}
+	if victimRow == nil {
+		t.Fatalf("no blocked row found among %d sampled rows: the filter hid the victim", len(rows))
+	}
+
+	var blockerRow *model.RequestSample
+	for i := range rows {
+		if rows[i].Ref.SessionID == victimRow.BlockedBy {
+			blockerRow = &rows[i]
+			break
+		}
+	}
+	if blockerRow == nil {
+		t.Fatalf("blocking session (spid %d) is missing from %d sampled rows: the filter hid the blocker", victimRow.BlockedBy, len(rows))
+	}
+	t.Logf("blocker: spid=%d status=%q open_tran=%d; victim: spid=%d status=%q open_tran=%d blocked_by=%d",
+		blockerRow.Ref.SessionID, blockerRow.Status, blockerRow.OpenTran,
+		victimRow.Ref.SessionID, victimRow.Status, victimRow.OpenTran, victimRow.BlockedBy)
+}
+
+// TestSampleRequestsFilterInvariant checks both directions of the noise
+// filter's real predicate (is_user_process = 1, or blocked, or a parallel
+// plan; see the WHERE clause's own comment in requests.go for how it got
+// there) against a raw, independent reading of the same instant: nothing
+// SampleRequests returns is there without one of those reasons, and
+// nothing that has one of those reasons is missing. The second half is the
+// one that matters most - it is a direct check of "no real user work is
+// silently hidden", read from sys.dm_exec_sessions.is_user_process itself
+// rather than reconstructed from status text the way the ported prototype
+// predicate tried to and failed (see TestSampleRequestsSeesALongQuery).
+func TestSampleRequestsFilterInvariant(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, _, err := s.Identify(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A side connection reads the same instant's ground truth independently
+	// of the query under test, so this does not just check the query
+	// against its own idea of what is real.
+	raw, err := sql.Open("sqlserver", os.Getenv("SQLTOP_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	rows, err := s.SampleRequests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	present := make(map[int64]bool, len(rows))
+	for _, r := range rows {
+		present[r.Ref.SessionID] = true
+	}
+
+	type ground struct {
+		sessionID  int64
+		isUserProc bool
+		blockedBy  int64
+		dop        int
+	}
+	var truth []ground
+	grows, err := raw.QueryContext(ctx, `
+		SELECT r.session_id, ISNULL(s.is_user_process, 1), ISNULL(r.blocking_session_id, 0), ISNULL(r.dop, 0)
+		FROM sys.dm_exec_requests AS r LEFT JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
+		WHERE r.session_id <> @@SPID
+		OPTION (RECOMPILE, MAXDOP 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grows.Close()
+	for grows.Next() {
+		var g ground
+		if err := grows.Scan(&g.sessionID, &g.isUserProc, &g.blockedBy, &g.dop); err != nil {
+			t.Fatal(err)
+		}
+		truth = append(truth, g)
+	}
+	if err := grows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(truth) == 0 {
+		t.Skip("nothing active this tick")
+	}
+
+	for _, g := range truth {
+		shouldBeKept := g.isUserProc || g.blockedBy != 0 || g.dop > 1
+		if shouldBeKept && !present[g.sessionID] {
+			t.Errorf("session %d (is_user_process=%v, blocked_by=%d, dop=%d) should have been kept but is missing from %d sampled rows",
+				g.sessionID, g.isUserProc, g.blockedBy, g.dop, len(rows))
+		}
+	}
+
+	truthByID := make(map[int64]ground, len(truth))
+	for _, g := range truth {
+		truthByID[g.sessionID] = g
+	}
+	for _, r := range rows {
+		g, found := truthByID[r.Ref.SessionID]
+		if !found {
+			// The ground-truth snapshot and SampleRequests ran a moment
+			// apart; a request that finished in between is not a filter
+			// bug.
+			continue
+		}
+		reason := g.isUserProc || g.blockedBy != 0 || g.dop > 1
+		if !reason {
+			t.Errorf("session %d: kept without a reason the filter documents (is_user_process=%v, blocked_by=%d, dop=%d)",
+				r.Ref.SessionID, g.isUserProc, g.blockedBy, g.dop)
+		}
+	}
+}
+
 func TestSampleServerCountersNeedTwoTicks(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
