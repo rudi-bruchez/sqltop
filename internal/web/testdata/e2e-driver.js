@@ -415,6 +415,32 @@ await ev(key("f"));
 await sleep(2500);
 out.commands.rate = await ev(`document.getElementById("rate").textContent`);
 
+// Column geometry. The floors in the catalogue are floors, not sizes, and
+// the table is at least as wide as its container, so the surplus on a wide
+// screen has to go somewhere. It goes to the widest column; without that it
+// is handed out in equal shares and every column under about 180 px comes
+// out identical whatever its floor says, which is how a spid column ended up
+// as wide as a program name.
+out.widths = await json(`(() => {
+  const probe = (text, cls) => {
+    const el = document.createElement("span");
+    el.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap";
+    if (cls) el.className = cls;
+    el.textContent = text;
+    document.getElementById("grid").appendChild(el);
+    const w = Math.ceil(el.getBoundingClientRect().width);
+    el.remove();
+    return w;
+  };
+  const cols = [...document.querySelectorAll("#gridHead th")].map((th) => th.dataset.f);
+  const out = { char: probe("0123456789") / 10, headings: {}, rendered: {} };
+  [...document.querySelectorAll("#gridHead th")].forEach((th, i) => {
+    out.headings[cols[i]] = probe(th.textContent.trim());
+    out.rendered[cols[i]] = Math.ceil(th.getBoundingClientRect().width);
+  });
+  return out;
+})()`);
+
 console.log(JSON.stringify(out));
 ws.close();
 Deno.exit(0);

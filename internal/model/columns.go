@@ -12,6 +12,12 @@ type Column struct {
 	Field string
 	Title string
 	Width int
+	// Width is a floor, not a size: the tables lay out to their content, so
+	// a column is as wide as the wider of this and what is in it. It is set
+	// close to the heading, because anything more is space taken from the
+	// column that has something to say. The widest column of each view
+	// absorbs whatever the window has left over; see head() in app.js.
+	//
 	// Default is what a column does when the configuration says nothing
 	// about it, which is also what a column added by a later version does
 	// to everybody who already saved a layout. Most are on; the two that
@@ -40,27 +46,27 @@ type ViewDef struct {
 // is why they are built from one function rather than written twice.
 func requestColumns(depth, wide bool) []Column {
 	return []Column{
-		{"spid", "spid", 60, true},
-		{"blocking_depth", "depth", 70, depth},
-		{"status", "status", 90, true},
-		{"database", "database", 110, true},
-		{"login", "login", 100, true},
-		{"host", "host", 95, wide},
-		{"program", "program", 200, true},
-		{"command", "command", 110, true},
-		{"wait_type", "wait type", 150, true},
-		{"wait_ms", "wait ms", 85, true},
-		{"elapsed", "elapsed ms", 100, true},
-		{"cpu_ms", "cpu ms", 90, true},
-		{"logical_reads", "reads", 95, wide},
-		{"writes", "writes", 90, wide},
-		{"tempdb_mb", "tempdb MB", 100, wide},
-		{"memory_grant_mb", "grant MB", 95, wide},
-		{"dop", "dop", 55, wide},
+		{"spid", "spid", 48, true},
+		{"blocking_depth", "depth", 56, depth},
+		{"status", "status", 70, true},
+		{"database", "database", 90, true},
+		{"login", "login", 90, true},
+		{"host", "host", 80, wide},
+		{"program", "program", 160, true},
+		{"command", "command", 90, true},
+		{"wait_type", "wait type", 110, true},
+		{"wait_ms", "wait ms", 70, true},
+		{"elapsed", "elapsed ms", 90, true},
+		{"cpu_ms", "cpu ms", 70, true},
+		{"logical_reads", "reads", 70, wide},
+		{"writes", "writes", 70, wide},
+		{"tempdb_mb", "tempdb MB", 80, wide},
+		{"memory_grant_mb", "grant MB", 80, wide},
+		{"dop", "dop", 44, wide},
 		// Blank on everything but BACKUP, DBCC and a handful of others,
 		// so it is off until somebody is watching one of those.
-		{"percent_complete", "progress", 90, false},
-		{"blocked_by", "blocked by", 95, true},
+		{"percent_complete", "progress", 80, false},
+		{"blocked_by", "blocked by", 90, true},
 		{"sql_text", "SQL text", 520, true},
 	}
 }
@@ -80,62 +86,62 @@ var ViewCatalogue = []ViewDef{
 	{ID: "blocking", Title: "blocking", Key: "b", Columns: requestColumns(true, false)},
 
 	{ID: "sessions", Title: "sessions", Key: "u", Columns: []Column{
-		{"spid", "spid", 60, true},
-		{"login", "login", 130, true},
-		{"host", "host", 110, true},
-		{"program", "program", 220, true},
-		{"status", "status", 80, true},
-		{"database", "database", 110, true},
-		{"connected", "connected", 100, true},
-		{"idle", "idle", 90, true},
-		{"open_tran", "open tran", 85, true},
+		{"spid", "spid", 48, true},
+		{"login", "login", 110, true},
+		{"host", "host", 90, true},
+		{"program", "program", 200, true},
+		{"status", "status", 70, true},
+		{"database", "database", 90, true},
+		{"connected", "connected", 80, true},
+		{"idle", "idle", 70, true},
+		{"open_tran", "open tran", 76, true},
 		// The reason this view exists: a session idle for an hour with a
 		// transaction open for an hour.
-		{"tran_age", "tran age", 100, true},
-		{"cpu_ms", "cpu ms", 90, true},
-		{"logical_reads", "reads", 95, false},
-		{"writes", "writes", 90, false},
-		{"memory_mb", "memory MB", 95, false},
+		{"tran_age", "tran age", 76, true},
+		{"cpu_ms", "cpu ms", 70, true},
+		{"logical_reads", "reads", 70, false},
+		{"writes", "writes", 70, false},
+		{"memory_mb", "memory MB", 80, false},
 	}},
 
 	// x rather than t: xact is the engine's own abbreviation, in
 	// XACT_STATE and in every sys.dm_tran_ view, and t is the throughput
 	// view of section 7.
 	{ID: "transactions", Title: "transactions", Key: "x", Columns: []Column{
-		{"xid", "transaction", 130, false},
-		{"spid", "spid", 60, true},
+		{"xid", "transaction", 110, false},
+		{"spid", "spid", 48, true},
 		{"name", "name", 150, true},
-		{"age", "age", 100, true},
-		{"state", "state", 110, true},
-		{"type", "type", 100, true},
-		{"database", "database", 130, true},
-		{"databases", "databases", 90, false},
-		{"log_mb", "log MB", 90, true},
-		{"log_records", "log records", 100, false},
+		{"age", "age", 70, true},
+		{"state", "state", 90, true},
+		{"type", "type", 80, true},
+		{"database", "database", 110, true},
+		{"databases", "databases", 80, false},
+		{"log_mb", "log MB", 70, true},
+		{"log_records", "log records", 90, false},
 	}},
 
 	// Part of the transactions view rather than a tab of its own: an open
 	// transaction and what it has locked are one question.
 	{ID: "locks", Title: "locks held", Columns: []Column{
-		{"spid", "spid", 60, true},
-		{"database", "database", 130, true},
-		{"resource_type", "resource", 100, true},
-		{"object", "object", 220, true},
-		{"mode", "mode", 80, true},
-		{"status", "status", 80, true},
-		{"count", "locks", 90, true},
+		{"spid", "spid", 48, true},
+		{"database", "database", 110, true},
+		{"resource_type", "resource", 80, true},
+		{"object", "object", 200, true},
+		{"mode", "mode", 60, true},
+		{"status", "status", 70, true},
+		{"count", "locks", 70, true},
 	}},
 
 	{ID: "logs", Title: "transaction logs", Key: "l", Columns: []Column{
-		{"database", "database", 160, true},
-		{"size_mb", "size MB", 100, true},
-		{"used_mb", "active MB", 100, true},
-		{"used_percent", "used", 90, true},
+		{"database", "database", 150, true},
+		{"size_mb", "size MB", 80, true},
+		{"used_mb", "active MB", 80, true},
+		{"used_percent", "used", 60, true},
 		// What is actually stopping the log being reused, which the
 		// percentage on its own never says.
 		{"reuse_wait", "reuse wait", 160, true},
-		{"recovery_model", "recovery", 110, true},
-		{"state", "state", 90, false},
+		{"recovery_model", "recovery", 90, true},
+		{"state", "state", 70, false},
 	}},
 }
 

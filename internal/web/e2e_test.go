@@ -196,6 +196,30 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("after switching a column back on the row pool has %d cells per row and the header has %d columns (%d rows in view)", got.Columns.PoolCells, len(got.Columns.AfterShow), got.Columns.Rows)
 	}
 
+	// Column geometry. A floor is a floor: a narrow column has to come out
+	// narrow, and the surplus a wide window leaves has to land on the one
+	// column with something to say rather than being shared out equally.
+	// Measured rather than eyeballed, because the failure looks like a
+	// design decision: seventeen of eighteen columns at exactly 178 px.
+	widest, widestField := 0, ""
+	for f, w := range got.Widths.Rendered {
+		if f != "sql_text" && w > widest {
+			widest, widestField = w, f
+		}
+	}
+	t.Logf("columns: spid %d px, cpu_ms %d px, widest other %s %d px, sql_text %d px",
+		got.Widths.Rendered["spid"], got.Widths.Rendered["cpu_ms"], widestField, widest, got.Widths.Rendered["sql_text"])
+	if w := got.Widths.Rendered["spid"]; w > 60 {
+		t.Errorf("the spid column renders at %d px; its heading is %d px and its floor is 48", w, got.Widths.Headings["spid"])
+	}
+	if w := got.Widths.Rendered["cpu_ms"]; w > 90 {
+		t.Errorf("the cpu ms column renders at %d px; a millisecond figure does not need it", w)
+	}
+	if got.Widths.Rendered["sql_text"] < 2*widest {
+		t.Errorf("sql_text renders at %d px against %d for %s; the window's surplus is being shared out rather than given to the column that can use it",
+			got.Widths.Rendered["sql_text"], widest, widestField)
+	}
+
 	// Every visible column of a real row draws something. The fixture gives
 	// each of these a value, so an empty cell here is the renderer losing
 	// it, not the server withholding it.
@@ -497,7 +521,12 @@ type e2eResult struct {
 		Rows      int      `json:"rows"`
 		AfterShow []string `json:"afterShow"`
 	} `json:"columns"`
-	Cells map[string]string `json:"cells"`
+	Cells  map[string]string `json:"cells"`
+	Widths struct {
+		Char     float64        `json:"char"`
+		Headings map[string]int `json:"headings"`
+		Rendered map[string]int `json:"rendered"`
+	} `json:"widths"`
 	Views struct {
 		Tabs   []string `json:"tabs"`
 		Hints  []string `json:"hints"`

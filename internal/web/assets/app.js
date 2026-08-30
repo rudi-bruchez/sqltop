@@ -447,9 +447,23 @@ let spacerTop = null, spacerBottom = null;
 // and both run once from a fixed list. app_assets_test.go reads these two
 // markers verbatim and takes the last of each, so there must be exactly one
 // region: read that test before touching them.
+// stretchOf names the column that absorbs whatever the window has left
+// over: the widest one, which is the one with something to say. Without it
+// the table, which is max-content but at least as wide as its container,
+// hands the surplus out in equal shares, and on a wide screen every column
+// under about 180 px comes out at exactly the same width whatever its floor
+// says. Measured in the browser, which is how that was found: eighteen
+// columns, seventeen of them 178 px.
+function stretchOf(cols) {
+  let best = -1, w = -1;
+  cols.forEach((c, i) => { if (c.width > w) { w = c.width; best = i; } });
+  return best;
+}
+
 function head() {
-  $("gridHead").innerHTML = COLUMNS.map((c) =>
-    `<th scope="col" draggable="true" data-f="${esc(c.field)}" style="min-width:${c.width}px">` +
+  const stretch = stretchOf(COLUMNS);
+  $("gridHead").innerHTML = COLUMNS.map((c, i) =>
+    `<th scope="col" draggable="true" data-f="${esc(c.field)}" style="min-width:${c.width}px${i === stretch ? ";width:100%" : ""}">` +
     `<button type="button" class="sortBtn" data-f="${esc(c.field)}" ` +
     `title="sort by ${esc(c.title)}, drag to move">${esc(c.title)}<span class="sortMark" id="sort-${esc(c.field)}"></span></button></th>`).join("");
 
@@ -766,13 +780,15 @@ function listTable(view, rows) {
   const t = document.createElement("table");
   t.className = "listTable";
   const hr = t.createTHead().insertRow();
-  for (const c of cols) {
+  const stretch = stretchOf(cols);
+  cols.forEach((c, i) => {
     const th = document.createElement("th");
     th.scope = "col";
     th.textContent = c.title;
     th.style.minWidth = c.width + "px";
+    if (i === stretch) th.style.width = "100%";
     hr.appendChild(th);
-  }
+  });
   const tb = t.createTBody();
   for (const r of rows) {
     const tr = tb.insertRow();
