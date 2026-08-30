@@ -71,15 +71,13 @@ OPTION (RECOMPILE, MAXDOP 1)`
 // "Invalid column name 'dop'", leaving the grid permanently empty on a
 // version spec section 3 promises works. Below 2016, and not Azure SQL
 // Database (which is always current), the DOP column becomes the literal
-// 0 instead. This is a version fact, independent of what caps says: a
-// login can lack every optional right and still be on SQL Server 2022, and
-// TestBuiltQueryGates's "no rights on the tempdb dmv" case pins exactly
-// that down, DOP present with caps otherwise empty. Identify sets
-// model.CapRequestDOP from the identical condition (info.IsAzure() ||
-// info.MajorVersion >= 13) so the browser can grey the same column this
-// gate is deciding, but that is a second read of the same fact for the
-// wire, not the source of truth for this substitution; keep both
-// conditions in sync by hand if either ever changes.
+// 0 instead. The gate is model.CapRequestDOP, which Identify sets from
+// supportsRequestDOP below. It is a version fact rather than a login right,
+// so a login can lack every optional right and still get the column on SQL
+// Server 2022, but it rides in caps because caps is what reaches the
+// browser, and the column has to be greyed on exactly the servers where
+// this substitution happens. One condition, in one place, read here and on
+// the wire.
 //
 // sys.dm_db_task_space_usage, behind the tempdb figure, needs a right the
 // probe already checked for as model.CapTempdbPerTask. A login without it
@@ -95,9 +93,22 @@ OPTION (RECOMPILE, MAXDOP 1)`
 // Called once, right after Identify has version and capabilities in hand -
 // not per sample, since nothing here changes between two calls to
 // SampleRequests on the same connection.
+// supportsRequestDOP reports whether sys.dm_exec_requests carries a dop
+// column. It is a version fact rather than a login right, which is why it is
+// decided here and not inside probe, but it travels as model.CapRequestDOP so
+// that the browser can grey the column on exactly the servers where the query
+// substitutes a literal zero for it.
+//
+// Both Azure engines report product version 12.0.x while sitting at or above
+// the newest boxed release, so the version alone would strip a column they
+// have. That is why IsAzure comes first.
+func supportsRequestDOP(info model.ServerInfo) bool {
+	return info.IsAzure() || info.MajorVersion >= 13
+}
+
 func buildRequestsQuery(info model.ServerInfo, caps model.Capabilities) string {
 	dopExpr := "0"
-	if info.IsAzure() || info.MajorVersion >= 13 {
+	if caps.Has(model.CapRequestDOP) {
 		dopExpr = "ISNULL(r.dop, 0)"
 	}
 

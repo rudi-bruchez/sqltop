@@ -347,15 +347,12 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	}
 
 	// CapRequestDOP is a version fact, not a login right, so it is decided
-	// here rather than inside probe, which only asks the server what a
-	// login can read. It travels on the wire so the browser can grey the
-	// dop column exactly when buildRequestsQuery below substitutes the
-	// literal 0 for it (fix round 1, task 14): same condition, computed
-	// twice on purpose rather than threaded through caps into
-	// buildRequestsQuery, because that function's own gate has to stay
-	// independent of everything else in caps - see its doc comment and
-	// TestBuiltQueryGates's "no rights on the tempdb dmv" case.
-	if info.IsAzure() || info.MajorVersion >= 13 {
+	// here rather than inside probe, which only asks the server what a login
+	// can read. It rides in caps because caps is what reaches the browser,
+	// and buildRequestsQuery gates the column on the same bit, so the grid
+	// greys it on exactly the servers where the query substitutes a literal
+	// zero. See supportsRequestDOP in requests.go.
+	if supportsRequestDOP(info) {
 		caps = caps.With(model.CapRequestDOP)
 	}
 
