@@ -57,6 +57,13 @@ const (
 	// travelling on the same channel as the rest for the reason
 	// CapRequestDOP's comment gives.
 	CapSessionWaitStats
+	// CapCaptureSession reports whether this source can create a scoped
+	// event capture on one session: the right to create an event session
+	// and the right to read the DMVs that drain it, both, since neither
+	// implies the other. The only capability describing something the tool
+	// would write rather than read, and false unless the operator passed
+	// the flag that permits writing at all.
+	CapCaptureSession
 )
 
 type Capabilities uint32
