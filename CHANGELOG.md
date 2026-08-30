@@ -6,8 +6,39 @@ constant changes.
 
 ## Unreleased
 
-Nothing yet. Still to come: the other views, the plan panel, the kill flow,
-and the instance switcher.
+Four more views, the columns made configurable everywhere, the single-key
+commands, and a query hint removed after it turned out to be most of what
+this tool cost the server it watches.
+
+- Every grid column of every view is listed in `sqltop.yaml` with an explicit
+  switch and a place in the order, and `sqltop --write-config` writes all
+  seventy-eight of them. A column can be moved by dragging its heading and
+  shown or hidden from a panel off the status bar, and the layout is saved
+  back to the file rather than to browser storage.
+- Four single-key commands. `s` saves the visible state to
+  `snapshots/server-yyyy-mm-dd-hhmmss.html` beside the binary, with the whole
+  grid written out rather than the forty rows the virtualised table happens
+  to hold. `p` pauses the display. `f` steps the sampling period through 1,
+  2, 5, 10 and 30 seconds. `h` lists them.
+- Four new views: blocking chains, open user sessions with how long each has
+  held a transaction, open transactions with the objects they have locked,
+  and every database's transaction log with its active portion and what is
+  stopping it being reused. The blocking view needs no query; the other three
+  run only while their tab is open.
+- `OPTION (RECOMPILE)` removed from every query. It was measured at 7.6 ms of
+  server CPU per call on the grid against 0.4 ms without it, and 12.6 ms per
+  second against 1.8 ms across the three tier queries together, all of it
+  compilation. Against a live instance under load the tool went from 32 to 53
+  ms per second, throttling itself, to a steady 3.3.
+- The connection names itself. `Application Name` is `sqltop` and the
+  version, so `program_name` says which tool and which build produced the
+  load. An explicit name in the DSN wins.
+- Fixed: the transactions view named a transaction after the lowest database
+  id and counted every database it had touched, so a single insert into a
+  single table reported three databases and named `master`.
+
+Still to come: the waits, repetitive-query, throughput and programs views,
+the plan panel, the kill flow, and the instance switcher.
 
 ## 0.2.1, 30 August 2026
 
