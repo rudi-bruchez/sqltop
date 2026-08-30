@@ -190,6 +190,11 @@ function applyStatus(st, seq) {
   $("message").textContent = st.message || "";
   $("rowCount").textContent = data.length + " requests";
   $("seq").textContent = "tick " + seq;
+  // Spec section 10: "an instrument that claims to bound its own cost
+  // should show it", at all times, not only once the tool has already
+  // throttled itself - which is the only place this number used to reach
+  // the browser, interpolated into the throttle message.
+  $("cost").textContent = "cost: " + Math.round(st.costMsPerSecond || 0) + " ms/s";
 }
 
 const es = new EventSource("/api/stream?t=" + encodeURIComponent(token));

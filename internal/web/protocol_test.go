@@ -149,8 +149,9 @@ func TestUnavailableFigureIsNotEncodedAsZero(t *testing.T) {
 func TestStatusCarriesWhateverTheCollectorReports(t *testing.T) {
 	e := NewEncoder()
 	st := collector.Status{
-		Connected: false,
-		Message:   "sampling requests: connection reset by peer",
+		Connected:       false,
+		Message:         "sampling requests: connection reset by peer",
+		CostMsPerSecond: 12.5,
 	}
 
 	payload := e.Snapshot(nil, nil, st)
@@ -159,6 +160,15 @@ func TestStatusCarriesWhateverTheCollectorReports(t *testing.T) {
 	}
 	if payload.Status.Message != st.Message {
 		t.Fatalf("status message = %q, want %q", payload.Status.Message, st.Message)
+	}
+	// Spec section 10: an instrument that claims to bound its own cost
+	// should show it, at all times rather than only while throttled, which
+	// is what interpolating it solely into the throttle message used to
+	// mean. This crosses the seam between Collector.Status, which already
+	// had the figure, and the wire payload, which reached the browser
+	// without it.
+	if payload.Status.CostMsPerSecond != st.CostMsPerSecond {
+		t.Fatalf("status cost = %v, want %v", payload.Status.CostMsPerSecond, st.CostMsPerSecond)
 	}
 }
 

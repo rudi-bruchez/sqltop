@@ -107,6 +107,18 @@ func NewBudget(limitMsPerSecond int, base config.Tiers) *Budget {
 // Observe takes the cumulative cost of the tool's own session, as read from
 // the server, differentiates it into a reading, and folds that reading into
 // the sliding window the throttle decides from.
+//
+// Debt: c.LogicalReads is read from the server on every counters tick (see
+// mssql.Source.Cost) and never looked at, here or anywhere else. Spec
+// section 10 defines the observation budget in server CPU milliseconds
+// only, which is what this whole type throttles on, so there was never a
+// second budget for it to feed. The way out, if a second cost dimension is
+// ever wanted, is a twin of windowAverage differentiating LogicalReads the
+// same way CPUMs already is, surfaced next to CostMsPerSecond in
+// collector.Status; until then it stays collected but unconsumed rather
+// than dropped from model.Cost, since Source.Cost's own round trip already
+// reads it as part of the same row and dropping the field would be a wire
+// change for nothing.
 func (b *Budget) Observe(c model.Cost) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

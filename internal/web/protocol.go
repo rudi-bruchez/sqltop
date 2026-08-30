@@ -96,6 +96,14 @@ type StatusPayload struct {
 	Instance  string   `json:"instance"`
 	Version   string   `json:"version"`
 	Caps      []string `json:"caps,omitempty"`
+	// CostMsPerSecond is collector.Status.CostMsPerSecond: the tool's own
+	// server CPU cost, averaged over the observation budget's sliding
+	// window, spec section 10's "an instrument that claims to bound its own
+	// cost should show it". Always sent, not only while throttled: before
+	// that it used to reach the browser solely as an interpolated number
+	// inside the throttle message, which only renders once the tool is
+	// already throttled.
+	CostMsPerSecond float64 `json:"costMsPerSecond"`
 }
 
 // capName is checked against every bit in model.Capabilities in this fixed
@@ -260,12 +268,13 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 		TS:   time.Now().UnixMilli(),
 		Rows: make([]Row, 0, len(rows)),
 		Status: StatusPayload{
-			Sqltop:    buildinfo.String(),
-			Connected: st.Connected,
-			Message:   st.Message,
-			Instance:  st.Info.Instance,
-			Version:   st.Info.ProductVersion,
-			Caps:      capNames(st.Caps),
+			Sqltop:          buildinfo.String(),
+			Connected:       st.Connected,
+			Message:         st.Message,
+			Instance:        st.Info.Instance,
+			Version:         st.Info.ProductVersion,
+			Caps:            capNames(st.Caps),
+			CostMsPerSecond: st.CostMsPerSecond,
 		},
 	}
 

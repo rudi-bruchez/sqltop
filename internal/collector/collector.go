@@ -35,6 +35,14 @@ type Status struct {
 	Message   string
 	Info      model.ServerInfo
 	Caps      model.Capabilities
+	// CostMsPerSecond is the tool's own server CPU cost, averaged over
+	// Budget's sliding window: the same figure the throttle decides from.
+	// Spec section 10: "an instrument that claims to bound its own cost
+	// should show it", which used to reach only one consumer, the throttle
+	// message itself, so the cost was visible exactly when it was already
+	// too high to be useful as an instrument. Carried here unconditionally,
+	// not only while throttled, so the status bar can show it at all times.
+	CostMsPerSecond float64
 }
 
 // Collector drives one Source: one goroutine per tier, each on its own
@@ -307,11 +315,13 @@ func (c *Collector) Period(tier model.Tier) time.Duration {
 func (c *Collector) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	used, _, _ := c.bud.State()
 	return Status{
-		Connected: c.identifyErr == "" && len(c.tierErr) == 0,
-		Message:   c.messageLocked(),
-		Info:      c.info,
-		Caps:      c.caps,
+		Connected:       c.identifyErr == "" && len(c.tierErr) == 0,
+		Message:         c.messageLocked(),
+		Info:            c.info,
+		Caps:            c.caps,
+		CostMsPerSecond: used,
 	}
 }
 

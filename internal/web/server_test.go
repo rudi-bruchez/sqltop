@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -83,6 +84,42 @@ func TestCorrectTokenIsAccepted(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 with the run's token", rec.Code)
+	}
+}
+
+// TestStatusEndpointCarriesTheObservationCost crosses the seam between
+// Budget, which has always computed this figure, and the /api/status
+// response, which used to have no field for it at all: spec section 10
+// says an instrument that claims to bound its own cost should show it,
+// and before this fix the only place the number reached the browser was
+// interpolated into the throttle message, which does not render until the
+// tool is already throttled.
+func TestStatusEndpointCarriesTheObservationCost(t *testing.T) {
+	w := window.New(time.Minute, 1000)
+	bud := collector.NewBudget(50, testTiers())
+	now := time.Now()
+	bud.Observe(model.Cost{At: now, CPUMs: 0})
+	bud.Observe(model.Cost{At: now.Add(time.Second), CPUMs: 80})
+	c := collector.New(fake.New(nil), w, bud)
+
+	s, err := NewServer(c, w, config.Server{Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, loopbackRequest(http.MethodGet, "/api/status?t="+s.token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var got statusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding /api/status: %v", err)
+	}
+	if got.CostMsPerSecond != 80 {
+		t.Fatalf("costMsPerSecond = %v, want 80 (the observed server CPU per second)", got.CostMsPerSecond)
 	}
 }
 

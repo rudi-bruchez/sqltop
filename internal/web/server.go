@@ -262,12 +262,13 @@ func (s *Server) status(rw http.ResponseWriter, _ *http.Request) {
 	oldest, samples, capped := s.win.Depth()
 	writeJSON(rw, statusResponse{
 		StatusPayload: StatusPayload{
-			Sqltop:    buildinfo.String(),
-			Connected: st.Connected,
-			Message:   st.Message,
-			Instance:  st.Info.Instance,
-			Version:   st.Info.ProductVersion,
-			Caps:      capNames(st.Caps),
+			Sqltop:          buildinfo.String(),
+			Connected:       st.Connected,
+			Message:         st.Message,
+			Instance:        st.Info.Instance,
+			Version:         st.Info.ProductVersion,
+			Caps:            capNames(st.Caps),
+			CostMsPerSecond: st.CostMsPerSecond,
 		},
 		Window: windowInfo{Oldest: oldest, Samples: samples, Capped: capped},
 	})
