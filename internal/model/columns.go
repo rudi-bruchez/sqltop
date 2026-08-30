@@ -92,7 +92,14 @@ var ViewCatalogue = []ViewDef{
 		{"program", "program", 200, true},
 		{"status", "status", 70, true},
 		{"database", "database", 90, true},
+		// Two clocks, not one. connected is the physical connection's age;
+		// since reset is the age of the current use of it, because a pooled
+		// connection handed back and taken out again is reset and that
+		// moves login_time to now. The counters that follow are reset with
+		// it, which is why since_reset sits immediately before them: the
+		// scope belongs next to what it scopes.
 		{"connected", "connected", 80, true},
+		{"since_reset", "since reset", 90, true},
 		{"idle", "idle", 70, true},
 		{"open_tran", "open tran", 76, true},
 		// The reason this view exists: a session idle for an hour with a
@@ -151,6 +158,44 @@ var ViewCatalogue = []ViewDef{
 		{"elapsed_ms", "elapsed ms", 90, false},
 		{"cpu_ms", "cpu ms", 70, false},
 		{"reads", "reads", 70, false},
+	}},
+
+	// What one session has been seen doing over the retention window. Part
+	// of the request view rather than a tab: it is about the selected row.
+	{ID: "history", Title: "session history", Columns: []Column{
+		{"last_seen", "last seen", 90, true},
+		{"seen_for", "seen for", 90, true},
+		// How many ticks it was seen in, which is the only honest measure
+		// of duration here: the window samples, it does not record.
+		{"samples", "samples", 76, false},
+		{"command", "command", 90, true},
+		{"database", "database", 100, true},
+		// On by default because a session id is reused, so two unrelated
+		// logins can hold the same number inside one window. Seeing the
+		// login and the program is what makes that visible rather than
+		// silently merged.
+		{"login", "login", 100, true},
+		{"program", "program", 160, true},
+		{"max_elapsed", "max elapsed", 100, true},
+		{"max_cpu", "max cpu ms", 90, true},
+		{"max_reads", "max reads", 90, false},
+		{"top_wait", "waited on", 130, true},
+		{"sql_text", "SQL text", 520, true},
+	}},
+
+	// One session's accumulated waits. Reset when a pooled connection is
+	// handed out again, so they cover the current use of it.
+	{ID: "sessionwaits", Title: "session waits", Columns: []Column{
+		{"wait_type", "wait type", 180, true},
+		{"share", "share", 80, true},
+		{"wait_ms", "wait ms", 90, true},
+		{"waits", "waits", 80, true},
+		{"max_wait_ms", "longest ms", 90, true},
+		// The part of the wait that was the thread queueing for a
+		// scheduler after being signalled, rather than waiting for the
+		// resource. High signal time is a CPU pressure reading, not a
+		// resource one.
+		{"signal_ms", "signal ms", 90, false},
 	}},
 
 	{ID: "logs", Title: "transaction logs", Key: "l", Columns: []Column{

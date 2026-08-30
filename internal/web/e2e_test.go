@@ -245,7 +245,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 
 	// A command nobody can discover is a command nobody uses, so the keys
 	// are on the page rather than only behind h.
-	if want := []string{"t", "e", "d", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
+	if want := []string{"t", "e", "d", "y", "n", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
 		t.Errorf("the command strip shows %v, want %v", got.Views.Hints, want)
 	}
 	if got.Views.Blocking.Rows == 0 || got.Views.Blocking.Rows >= got.Views.Blocking.Total {
@@ -435,6 +435,45 @@ func TestEndToEndInABrowser(t *testing.T) {
 	if len(pl.Cells) < 3 || !containsString(pl.Cells[2], "300 %") {
 		t.Errorf("the operator at 90000 rows against an estimate of 30000 reads %v", pl.Cells)
 	}
+	// y: what the selected session has been seen running, out of the
+	// retention window, with no query at all.
+	hy := got.Commands.History
+	// Asserted on content, not on a row count: an empty list still draws
+	// one row saying so, and counting rows called that a history. The
+	// fixture's statements all select from dbo.T.
+	if len(hy.Cells) == 0 || !anyContains(hy.Cells[0], "FROM dbo.T") {
+		t.Errorf("y drew %v for a session the window has samples of; the heading reads %q", hy.Cells, hy.Who)
+	}
+	if !anyContains(hy.Cells[0], "svc") {
+		t.Errorf("the history row does not name the login that ran it: %v", hy.Cells[0])
+	}
+	if hy.RowLines != 1 {
+		t.Errorf("the history panel's first row sits on %d lines", hy.RowLines)
+	}
+	if len(hy.Headings) == 0 || hy.Headings[0] != "last seen" {
+		t.Errorf("the history panel's headings are %v", hy.Headings)
+	}
+	// The two clocks belong in the heading: they are what makes the list
+	// readable on a pooled connection.
+	if !strings.Contains(hy.Who, "connected") {
+		t.Errorf("the history heading reads %q and does not say how long the connection has been open", hy.Who)
+	}
+
+	// n: what it has waited on since its last reset.
+	wt := got.Commands.Waits
+	if wt.Rows != 2 {
+		t.Errorf("n drew %d wait types from a fixture of 2; the heading reads %q", wt.Rows, wt.Who)
+	}
+	if !wt.SQLHidden {
+		t.Error("the waits panel left the statement showing underneath it")
+	}
+	if len(wt.Cells) < 1 || !containsString(wt.Cells[0], "LCK_M_X") || !containsString(wt.Cells[0], "80.0 %") {
+		t.Errorf("the first wait row is %v; the fixture's is LCK_M_X at 80 per cent", wt.Cells)
+	}
+	if !strings.Contains(wt.Who, "since its last reset") {
+		t.Errorf("the waits heading reads %q and does not say what window the numbers cover", wt.Who)
+	}
+
 	if !strings.HasPrefix(got.Commands.PlanSaved, "live plan written to ") {
 		t.Errorf("d reported %q", got.Commands.PlanSaved)
 	}
@@ -747,6 +786,19 @@ type e2eResult struct {
 			RowLines    int        `json:"rowLines"`
 			Cells       [][]string `json:"cells"`
 		} `json:"plan"`
+		History struct {
+			Who      string     `json:"who"`
+			Rows     int        `json:"rows"`
+			Headings []string   `json:"headings"`
+			RowLines int        `json:"rowLines"`
+			Cells    [][]string `json:"cells"`
+		} `json:"history"`
+		Waits struct {
+			Who       string     `json:"who"`
+			Rows      int        `json:"rows"`
+			SQLHidden bool       `json:"sqlHidden"`
+			Cells     [][]string `json:"cells"`
+		} `json:"waits"`
 		PlanSaved       string `json:"planSaved"`
 		SnapshotMessage string `json:"snapshotMessage"`
 		RowsWhenSaved   int    `json:"rowsWhenSaved"`
@@ -834,11 +886,14 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 	// tab, the request it makes and the table it draws, not the arithmetic
 	// of a server that is not here.
 	src.SessionRows = []model.SessionSample{
+		// Connected for an hour and handed out by the pool a minute ago:
+		// the two clocks that were one wrong one.
 		{SessionID: 51, Login: "svc", Host: "APP01", Program: "sqltop e2e", Status: "sleeping",
-			Database: "alpha", ConnectedSec: 3600, IdleSec: 120, OpenTran: 1, TranSec: 900,
+			Database: "alpha", ConnectedSec: 3600, SinceResetSec: 60, IdleSec: 120, OpenTran: 1, TranSec: 900,
 			CPUMs: 4200, Reads: 99, Writes: 3, MemoryMB: 1.5},
+		// Never handed back, so both clocks agree and the column is blank.
 		{SessionID: 52, Login: "reporting", Host: "BI02", Program: "SSMS", Status: "running",
-			Database: "beta", ConnectedSec: 60, CPUMs: 12},
+			Database: "beta", ConnectedSec: 60, SinceResetSec: 60, CPUMs: 12},
 	}
 	src.TranRows = []model.TransactionSample{
 		{TransactionID: 90210, SessionID: 51, Name: "user_transaction", ElapsedSec: 900,
@@ -856,6 +911,10 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 		// An operator well past its estimate, which is the reading this
 		// panel exists for and must not be capped at a hundred per cent.
 		{NodeID: 2, Operator: "Nested Loops", Rows: 90000, Estimated: 30000, Threads: 4},
+	}
+	src.WaitRows = []model.SessionWait{
+		{WaitType: "LCK_M_X", Waits: 12, WaitMs: 8000, MaxWaitMs: 3000, SignalMs: 4, SharePercent: 80},
+		{WaitType: "PAGEIOLATCH_SH", Waits: 300, WaitMs: 2000, MaxWaitMs: 40, SignalMs: 90, SharePercent: 20},
 	}
 	src.LogRows = []model.LogSpaceSample{
 		{Database: "alpha", RecoveryModel: "FULL", ReuseWait: "LOG_BACKUP", State: "ONLINE",
@@ -974,6 +1033,17 @@ func equalStrings(a, b []string) bool {
 }
 
 func containsString(s []string, want string) bool { return idx(s, want) >= 0 }
+
+// anyContains is containsString for cells whose text is longer than the
+// thing being looked for.
+func anyContains(cells []string, want string) bool {
+	for _, c := range cells {
+		if strings.Contains(c, want) {
+			return true
+		}
+	}
+	return false
+}
 
 // checkPlanFile reads what the d command wrote. The extension is what makes
 // a plan open as a plan rather than as text, which is the point of saving

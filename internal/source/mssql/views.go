@@ -23,6 +23,26 @@ var errNoInstanceWideView = errors.New("mssql: this login cannot see the whole i
 // the wrong thing, which is the same defect class as everything else
 // commented in this file.
 //
+// On connected and since_reset, which are two different clocks and were one
+// wrong one. login_time is not when the session connected: a connection
+// handed back to a pool and taken out again is reset by sp_reset_connection,
+// and that reset moves login_time to now. Measured against the container by
+// diffing every column of this view across a pooled reuse: login_time moved,
+// and cpu_time, logical_reads, reads, writes, row_count, memory_usage,
+// total_elapsed_time, total_scheduled_time and context_info all went back to
+// zero, from 69 ms of CPU and 1158 logical reads on real work a moment
+// earlier.
+//
+// sys.dm_exec_connections.connect_time does not move, so the two together
+// say what a person actually wants to know: this connection has been open
+// for six hours and the pool handed it out three hundred milliseconds ago.
+// Reading login_time alone, as the first version did, reported the second
+// number under the first one's name on every pooled application there is.
+//
+// The counters below are per reset for the same reason, which is why
+// since_reset sits immediately before them in the default column order: the
+// scope belongs next to what it scopes.
+//
 // On the idle figure, which took two attempts to get right.
 //
 // last_request_end_time is not null while a request is running: it holds the
@@ -55,6 +75,7 @@ const sessionsQuery = `
 SELECT s.session_id,
        ISNULL(s.login_name, N''), ISNULL(s.host_name, N''), ISNULL(s.program_name, N''),
        ISNULL(s.status, N''), ISNULL(DB_NAME(s.database_id), N''),
+       ISNULL(DATEDIFF(second, c.connect_time, SYSDATETIME()), 0),
        ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
        CASE WHEN s.status = 'running' THEN 0
             ELSE ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0) END,
@@ -62,6 +83,14 @@ SELECT s.session_id,
        s.open_transaction_count,
        ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)
 FROM sys.dm_exec_sessions AS s
+OUTER APPLY (
+    -- The physical connection. MIN because a session using MARS has one row
+    -- per logical session in this view alongside its parent, and the parent
+    -- is the earliest.
+    SELECT MIN(x.connect_time) AS connect_time
+    FROM sys.dm_exec_connections AS x
+    WHERE x.session_id = s.session_id
+) AS c
 OUTER APPLY (
     SELECT MIN(tx.transaction_begin_time) AS oldest_begin
     FROM sys.dm_tran_session_transactions AS stx
@@ -83,7 +112,7 @@ func (s *Source) Sessions(ctx context.Context) ([]model.SessionSample, error) {
 		var r model.SessionSample
 		var memoryPages int64
 		if err := rows.Scan(&r.SessionID, &r.Login, &r.Host, &r.Program, &r.Status, &r.Database,
-			&r.ConnectedSec, &r.IdleSec, &r.CPUMs, &r.Reads, &r.Writes, &memoryPages,
+			&r.ConnectedSec, &r.SinceResetSec, &r.IdleSec, &r.CPUMs, &r.Reads, &r.Writes, &memoryPages,
 			&r.OpenTran, &r.TranSec); err != nil {
 			return err
 		}
@@ -383,4 +412,65 @@ func (s *Source) PlanProgress(ctx context.Context, ref model.RequestRef) ([]mode
 		return nil
 	})
 	return out, err
+}
+
+// errNoSessionWaits is what SessionWaits returns below SQL Server 2016.
+// sys.dm_exec_session_wait_stats does not exist there, and the spec's floor
+// is 2012, so the panel says why it is empty rather than failing.
+var errNoSessionWaits = errors.New("mssql: this server does not report per-session waits; sys.dm_exec_session_wait_stats is SQL Server 2016 and later, and both Azure engines")
+
+// sessionWaitsQueryTemplate reads one session's accumulated waits.
+//
+// The engine resets these when a pooled connection is handed out again, the
+// same reset that moves login_time and zeroes the session counters, so they
+// cover the current use of the connection rather than its whole life. That
+// is the scope a person reading this wants: on a pooled application these
+// are the waits of the operation in front of you, not of every operation
+// that connection has ever served.
+//
+// The reset is lazy. It rides on the next statement sent over the
+// connection, not on the moment it went back to the pool, so a connection
+// sitting idle in a pool still carries the waits of whatever it did last.
+// A test written on the other assumption reported the documentation as
+// wrong; TestSessionWaitsResetWithThePool is what settles it.
+//
+// The substitution is a session id, an integer by type before it gets here.
+const sessionWaitsQueryTemplate = `
+SELECT TOP (50) RTRIM(w.wait_type), w.waiting_tasks_count, w.wait_time_ms,
+       w.max_wait_time_ms, w.signal_wait_time_ms
+FROM sys.dm_exec_session_wait_stats AS w
+WHERE w.session_id = %d AND w.wait_time_ms > 0
+ORDER BY w.wait_time_ms DESC
+OPTION (MAXDOP 1)`
+
+// SessionWaits reports what one session has waited on. The share of the
+// total is computed here rather than in the query: a window function over
+// fifty rows is the server's work to do for nothing.
+func (s *Source) SessionWaits(ctx context.Context, spid int64) ([]model.SessionWait, error) {
+	if _, caps := s.snapshot(); !caps.Has(model.CapSessionWaitStats) {
+		return nil, errNoSessionWaits
+	}
+	q := fmt.Sprintf(sessionWaitsQueryTemplate, spid)
+	var out []model.SessionWait
+	err := s.query(ctx, q, func(rows *sql.Rows) error {
+		var w model.SessionWait
+		if err := rows.Scan(&w.WaitType, &w.Waits, &w.WaitMs, &w.MaxWaitMs, &w.SignalMs); err != nil {
+			return err
+		}
+		out = append(out, w)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var total int64
+	for _, w := range out {
+		total += w.WaitMs
+	}
+	if total > 0 {
+		for i := range out {
+			out[i].SharePercent = float64(out[i].WaitMs) / float64(total) * 100
+		}
+	}
+	return out, nil
 }

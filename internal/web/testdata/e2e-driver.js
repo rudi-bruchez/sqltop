@@ -540,7 +540,7 @@ await ev(`(() => {
 await ev(key("e"));
 await sleep(700);
 out.commands.plan = await json(`(() => {
-  const body = document.getElementById("planBody");
+  const body = document.getElementById("detailList");
   const trs = [...body.querySelectorAll("tbody tr")];
   return {
     shown: !document.getElementById("detail").hidden,
@@ -553,6 +553,36 @@ out.commands.plan = await json(`(() => {
     cells: trs.map((tr) => [...tr.cells].map((td) => td.textContent)),
   };
 })()`);
+
+// y, the session's history out of the retention window, and n, its waits.
+// Neither needs the request id: both belong to the session.
+await ev(key("y"));
+await sleep(700);
+out.commands.history = await json(`(() => {
+  const body = document.getElementById("detailList");
+  const trs = [...body.querySelectorAll("tbody tr")];
+  return {
+    who: document.getElementById("detailWho").textContent,
+    rows: trs.length,
+    headings: [...body.querySelectorAll("th")].map((th) => th.textContent),
+    rowLines: trs.length ? new Set([...trs[0].cells].map((td) => Math.round(td.getBoundingClientRect().top))).size : 0,
+    cells: trs.map((tr) => [...tr.cells].map((td) => td.textContent)),
+  };
+})()`);
+
+await ev(key("n"));
+await sleep(700);
+out.commands.waits = await json(`(() => {
+  const body = document.getElementById("detailList");
+  const trs = [...body.querySelectorAll("tbody tr")];
+  return {
+    who: document.getElementById("detailWho").textContent,
+    rows: trs.length,
+    sqlHidden: document.getElementById("sqlText").hidden,
+    cells: trs.map((tr) => [...tr.cells].map((td) => td.textContent)),
+  };
+})()`);
+await ev(key("n"));
 
 // d writes the plan beside the binary. The file itself is checked in Go.
 await ev(key("d"));

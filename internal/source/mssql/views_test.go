@@ -436,3 +436,148 @@ func TestPlanOfAFinishedRequestSaysSo(t *testing.T) {
 		t.Errorf("the error reads %q; it should say the request is gone", err)
 	}
 }
+
+// TestConnectedAndSinceResetAreTwoDifferentClocks is the regression test for
+// a defect that shipped in two releases. login_time is not when a session
+// connected: a pooled connection handed back and taken out again is reset by
+// sp_reset_connection, and that reset moves login_time to now while
+// connect_time stays where it was. Reading login_time alone reported the age
+// of the current checkout under the heading "connected", which on a pooled
+// application is a plausible number naming the wrong thing.
+func TestConnectedAndSinceResetAreTwoDifferentClocks(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+
+	// A pool of exactly one connection, used, handed back, and used again:
+	// the second use is what triggers the reset.
+	db := adminConn(t)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	var spid int64
+	if err := db.QueryRowContext(ctx, `SELECT @@SPID`).Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+	// Long enough that the connection is measurably older than its reset.
+	time.Sleep(3 * time.Second)
+	var again int64
+	if err := db.QueryRowContext(ctx, `SELECT @@SPID`).Scan(&again); err != nil {
+		t.Fatal(err)
+	}
+	if again != spid {
+		t.Skipf("the pool handed out a different session (%d then %d); this test needs the same one reused", spid, again)
+	}
+
+	rows, err := s.Sessions(ctx)
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	for _, r := range rows {
+		if r.SessionID != spid {
+			continue
+		}
+		if r.ConnectedSec < 3 {
+			t.Errorf("the connection has been open for at least three seconds and reports %ds", r.ConnectedSec)
+		}
+		if r.SinceResetSec >= r.ConnectedSec {
+			t.Errorf("connected=%ds and since reset=%ds; the reset happened after the connection was made, so it must be the smaller of the two",
+				r.ConnectedSec, r.SinceResetSec)
+		}
+		return
+	}
+	t.Fatalf("session %d is not in the list of %d", spid, len(rows))
+}
+
+// TestSessionWaitsReportsWhatASessionWaitedOn, against a session made to
+// wait on purpose. WAITFOR shows up as WAITFOR, which is exactly the kind of
+// wait this view is for: it belongs to one session and no instance-wide
+// total would attribute it.
+func TestSessionWaitsReportsWhatASessionWaitedOn(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+
+	if _, caps := s.snapshot(); !caps.Has(model.CapSessionWaitStats) {
+		t.Skip("this server does not have sys.dm_exec_session_wait_stats")
+	}
+
+	conn, spid := pinnedSession(t, ctx)
+	if _, err := conn.ExecContext(ctx, `WAITFOR DELAY '00:00:02'`); err != nil {
+		t.Fatal(err)
+	}
+
+	waits, err := s.SessionWaits(ctx, spid)
+	if err != nil {
+		t.Fatalf("SessionWaits: %v", err)
+	}
+	if len(waits) == 0 {
+		t.Fatal("a session that has just waited two seconds reports no waits")
+	}
+
+	var share float64
+	var found bool
+	for _, w := range waits {
+		share += w.SharePercent
+		if w.WaitType == "WAITFOR" {
+			found = true
+			if w.WaitMs < 1500 {
+				t.Errorf("a two second WAITFOR reports %d ms", w.WaitMs)
+			}
+			if w.Waits < 1 {
+				t.Errorf("WAITFOR reports %d waits", w.Waits)
+			}
+		}
+		if w.WaitMs <= 0 {
+			t.Errorf("%s is listed with %d ms of wait; the query asks for more than zero", w.WaitType, w.WaitMs)
+		}
+	}
+	if !found {
+		t.Errorf("WAITFOR is not among the %d wait types reported", len(waits))
+	}
+	if share < 99 || share > 101 {
+		t.Errorf("the shares add up to %.1f %%", share)
+	}
+}
+
+// TestSessionWaitsResetWithThePool is the fact the whole scope of this view
+// rests on, checked rather than quoted from the documentation.
+func TestSessionWaitsResetWithThePool(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+	if _, caps := s.snapshot(); !caps.Has(model.CapSessionWaitStats) {
+		t.Skip("this server does not have sys.dm_exec_session_wait_stats")
+	}
+
+	db := adminConn(t)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	var spid int64
+	if err := db.QueryRowContext(ctx, `SELECT @@SPID`).Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `WAITFOR DELAY '00:00:02'`); err != nil {
+		t.Fatal(err)
+	}
+	// The reset is lazy: it rides on the next statement sent over the
+	// connection, not on the moment it went back to the pool. Without this
+	// call the two seconds are still on the books, which is what the first
+	// version of this test measured and mistook for the documentation being
+	// wrong.
+	var one int
+	if err := db.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+		t.Fatal(err)
+	}
+	waits, err := s.SessionWaits(ctx, spid)
+	if err != nil {
+		t.Fatalf("SessionWaits: %v", err)
+	}
+	for _, w := range waits {
+		if w.WaitType == "WAITFOR" {
+			t.Errorf("WAITFOR survived a pooled reset with %d ms; these counters are documented as resetting, and the whole scope of this view depends on it", w.WaitMs)
+		}
+	}
+}

@@ -171,6 +171,10 @@ const CELL_SESSIONS = {
   status: { text: (r) => r.status },
   database: { text: (r) => r.database },
   connected: { num: true, text: (r) => fDur(r.connected) },
+  // Blank when it equals the connection's own age, which is what a session
+  // that was never handed back to a pool looks like: repeating the same
+  // duration in two columns says nothing.
+  since_reset: { num: true, text: (r) => (r.since_reset === r.connected ? "" : fDur(r.since_reset)) },
   // Blank while a request is running. The engine does report an end time
   // then, the previous request's, so the source is what decides this; here
   // a zero means "not idle" and drawing it as "0s" would read as one.
@@ -226,6 +230,32 @@ const CELL_PLAN = {
   reads: { num: true, text: (r) => n0(r.reads) },
 };
 
+const CELL_HISTORY = {
+  last_seen: { num: true, text: (r) => fDur(r.last_seen) + " ago" },
+  // Blank rather than "0s" when it was seen once: the window samples, so a
+  // single sample says nothing about how long the statement ran.
+  seen_for: { num: true, text: (r) => (r.seen_for ? fDur(r.seen_for) : "one sample") },
+  samples: { num: true, text: (r) => n0(r.samples) },
+  command: { text: (r) => r.command },
+  database: { text: (r) => r.database },
+  login: { text: (r) => r.login },
+  program: { text: (r) => r.program },
+  max_elapsed: { num: true, text: (r) => n0(r.max_elapsed) },
+  max_cpu: { num: true, text: (r) => n0(r.max_cpu) },
+  max_reads: { num: true, text: (r) => n0(r.max_reads) },
+  top_wait: { text: (r) => r.top_wait },
+  sql_text: { text: (r) => r.sql_text },
+};
+
+const CELL_SESSIONWAITS = {
+  wait_type: { text: (r) => r.wait_type },
+  share: { num: true, text: (r) => fPct1(r.share) },
+  wait_ms: { num: true, text: (r) => n0(r.wait_ms) },
+  waits: { num: true, text: (r) => n0(r.waits) },
+  max_wait_ms: { num: true, text: (r) => n0(r.max_wait_ms) },
+  signal_ms: { num: true, text: (r) => n0(r.signal_ms) },
+};
+
 const CELL_LOGS = {
   database: { text: (r) => r.database },
   size_mb: { num: true, text: (r) => n2(r.size_mb) },
@@ -246,6 +276,8 @@ const CELLS = {
   locks: CELL_LOCKS,
   logs: CELL_LOGS,
   plan: CELL_PLAN,
+  history: CELL_HISTORY,
+  sessionwaits: CELL_SESSIONWAITS,
 };
 
 // The columns actually drawn in the grid, in order. Built by applyColumns
@@ -598,6 +630,8 @@ const COMMANDS = [
   ["t", "show the selected row's statement under the grid", "text"],
   ["e", "follow the selected request through its plan as it runs", "plan"],
   ["d", "write the selected request's plan to plans/ beside the binary", "save plan"],
+  ["y", "show what the selected session has been seen running in the window", "history"],
+  ["n", "show what the selected session has waited on", "waits"],
   ["s", "save the current state to snapshots/ beside the binary", "save"],
   ["p", "pause and resume the display", "pause"],
   ["f", "cycle the refresh period", "rate"],
@@ -903,7 +937,7 @@ function togglePause() {
   // to start them again. Without this a paused list view stayed frozen after
   // resuming until the user switched tabs and back.
   if (!isGrid(activeView)) pollView();
-  else if (detailMode === "plan") pollPlan();
+  else pollDetail();
 }
 
 // The ladder the f command steps through. Fixed rather than typed in:
@@ -1039,7 +1073,7 @@ function sqlNodes(sql) {
 // row. The statement is already here, sent once per session in the reference
 // table, so that half costs no request at all; the plan is a query per look
 // and runs only while somebody is looking.
-let detailMode = null; // null, "sql" or "plan"
+let detailMode = null; // null, "sql", or one of DETAIL_SOURCE's keys
 let detailShown = null;
 
 function setDetail(mode) {
@@ -1050,44 +1084,90 @@ function setDetail(mode) {
   detailMode = detailMode === mode ? null : mode;
   $("detail").hidden = detailMode === null;
   $("sqlText").hidden = detailMode !== "sql";
-  $("planBody").hidden = detailMode !== "plan";
+  $("detailList").hidden = detailMode === null || detailMode === "sql";
   detailShown = null;
-  clearTimeout(planTimer);
+  clearTimeout(detailTimer);
   renderDetail();
-  if (detailMode === "plan") pollPlan();
+  pollDetail();
   // The grid gives up its height to the panel, so it has to be told.
   layout();
 }
 
-// pollPlan follows one running statement through its plan. It stops asking
-// after an error rather than retrying every second: the commonest error is
-// a server that cannot report progress at all, which is a fact about that
-// server and not something a retry will change. Pressing the key again
-// asks once more.
-let planTimer = 0;
-function pollPlan() {
-  clearTimeout(planTimer);
-  if (detailMode !== "plan" || !isGrid(activeView)) return;
+// The three panels that ask the server about the selected row. Only the
+// plan needs the request id: a session's history and its waits belong to the
+// session, not to the statement it happens to be running.
+//
+// All three stop asking after an error rather than retrying every second.
+// The commonest one is a fact about the server, a version that cannot report
+// per-session waits or a plan it is not profiling, and no retry changes it;
+// pressing the key again asks once more.
+const DETAIL_SOURCE = {
+  plan: {
+    path: "/api/plan",
+    view: "plan",
+    needsRequest: true,
+    heading: (spid, rows) => (rows.length
+      ? "plan of spid " + spid + ", " + rows.length + " operators"
+      : "spid " + spid + " is not running a statement the engine is profiling"),
+  },
+  history: {
+    path: "/api/history",
+    view: "history",
+    heading: (spid, rows, j) => {
+      let head = "spid " + spid + ", " + rows.length + " statement" + (rows.length === 1 ? "" : "s") + " seen in the window";
+      // The two clocks, because they are what makes the list readable: a
+      // connection open for hours whose pool handed it out a moment ago is
+      // carrying work from before that reset, and nothing here can
+      // separate the two.
+      if (j.connected) head += ", connected " + fDur(j.connected);
+      if (j.since_reset && j.since_reset !== j.connected) head += ", reset " + fDur(j.since_reset) + " ago";
+      return head;
+    },
+  },
+  sessionwaits: {
+    path: "/api/sessionwaits",
+    view: "sessionwaits",
+    heading: (spid, rows) => (rows.length
+      ? "waits of spid " + spid + " since its last reset, " + rows.length + " types"
+      : "spid " + spid + " has waited on nothing since its last reset"),
+  },
+};
+
+let detailTimer = 0;
+function pollDetail() {
+  clearTimeout(detailTimer);
+  const mode = detailMode;
+  const src = DETAIL_SOURCE[mode];
+  if (!src || !isGrid(activeView)) return;
   const r = selectedKey === null ? null : view.find((x) => rowKey(x) === selectedKey);
   if (!r) {
-    planNote("select a row to follow its plan");
+    detailNote("select a row to see this");
     return;
   }
-  const spid = val(r, "spid"), rqid = val(r, "rqid");
-  fetch("/api/plan?t=" + encodeURIComponent(token) + "&spid=" + spid + "&rqid=" + rqid)
+  const spid = val(r, "spid");
+  const q = "?t=" + encodeURIComponent(token) + "&spid=" + spid +
+    (src.needsRequest ? "&rqid=" + val(r, "rqid") : "");
+  fetch(src.path + q)
     .then((res) => res.json().then((j) => (res.ok ? j : Promise.reject(new Error(j.error || res.statusText)))))
     .then((j) => {
-      if (detailMode !== "plan") return;
+      if (detailMode !== mode) return;
       const rows = j.rows || [];
-      $("detailWho").textContent = rows.length
-        ? "plan of spid " + spid + ", " + rows.length + " operators"
-        : "spid " + spid + " is not running a statement the engine is profiling";
-      const el = $("planBody");
+      $("detailWho").textContent = src.heading(spid, rows, j);
+      const el = $("detailList");
       el.textContent = "";
-      el.appendChild(listTable("plan", rows));
-      if (!paused) planTimer = setTimeout(pollPlan, Math.max(periodMs || 1000, 1000));
+      el.appendChild(listTable(src.view, rows));
+      if (!paused) detailTimer = setTimeout(pollDetail, Math.max(periodMs || 1000, 1000));
     })
-    .catch((e) => planNote(e.message));
+    .catch((e) => detailNote(e.message));
+}
+
+function detailNote(text) {
+  const el = $("detailList");
+  el.textContent = "";
+  const p = document.createElement("p");
+  p.className = "listError";
+  p.textContent = text;
+  el.appendChild(p);
 }
 
 // savePlan writes the selected request's plan beside the binary, with the
@@ -1108,16 +1188,6 @@ function savePlan() {
   post("/api/plansave?spid=" + val(r, "spid") + "&rqid=" + val(r, "rqid"), "", "application/json")
     .then((j) => say(j.kind + " plan written to " + j.path))
     .catch((e) => say("could not save the plan: " + e.message));
-}
-
-function planNote(text) {
-  const el = $("planBody");
-  el.textContent = "";
-  const p = document.createElement("p");
-  p.className = "listError";
-  p.textContent = text;
-  el.appendChild(p);
-  $("detailWho").textContent = "plan progress";
 }
 
 // renderDetail runs on every tick while the panel is open, and does nothing
@@ -1186,6 +1256,8 @@ const KEYS = {
   t: () => setDetail("sql"),
   e: () => setDetail("plan"),
   d: savePlan,
+  y: () => setDetail("history"),
+  n: () => setDetail("sessionwaits"),
   s: saveSnapshot,
   p: togglePause,
   f: cycleFrequency,
@@ -1244,7 +1316,7 @@ function acquireRow() {
     selectedKey = tr._key;
     for (const e of pool) e.tr.classList.toggle("sel", e.tr._key === selectedKey);
     renderDetail();
-    if (detailMode === "plan") pollPlan();
+    pollDetail();
   });
   const entry = { tr, tds, key: null, prev: {} };
   pool.push(entry);

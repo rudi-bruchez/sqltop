@@ -42,6 +42,9 @@ type Source interface {
 	// its plan. On demand and per request, never on a tier, and never for
 	// a request nobody is watching.
 	PlanProgress(ctx context.Context, ref model.RequestRef) ([]model.PlanNode, error)
+	// SessionWaits reports what one session has waited on, since the engine
+	// last reset its counters, which a pooled checkout does.
+	SessionWaits(ctx context.Context, spid int64) ([]model.SessionWait, error)
 	Transactions(ctx context.Context) ([]model.TransactionSample, []model.LockSample, error)
 	LogSpace(ctx context.Context) ([]model.LogSpaceSample, error)
 

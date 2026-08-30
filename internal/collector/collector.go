@@ -348,6 +348,10 @@ func (c *Collector) Plan(ctx context.Context, ref model.RequestRef, live bool) (
 	return c.src.Plan(ctx, ref, live)
 }
 
+func (c *Collector) SessionWaits(ctx context.Context, spid int64) ([]model.SessionWait, error) {
+	return c.src.SessionWaits(ctx, spid)
+}
+
 func (c *Collector) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

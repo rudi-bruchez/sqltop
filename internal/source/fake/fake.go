@@ -36,6 +36,7 @@ type Source struct {
 	LockRows    []model.LockSample
 	LogRows     []model.LogSpaceSample
 	PlanRows    []model.PlanNode
+	WaitRows    []model.SessionWait
 
 	cost    model.Cost
 	flipped bool
@@ -135,4 +136,10 @@ func (s *Source) PlanProgress(context.Context, model.RequestRef) ([]model.PlanNo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.PlanRows, s.Err
+}
+
+func (s *Source) SessionWaits(context.Context, int64) ([]model.SessionWait, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.WaitRows, s.Err
 }

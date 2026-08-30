@@ -2,6 +2,7 @@
 package window
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -104,4 +105,85 @@ func (w *Window) Depth() (oldest time.Time, samples int, capped bool) {
 		return time.Time{}, 0, false
 	}
 	return w.ticks[0].at, w.samples, w.capped
+}
+
+// SessionStatements is what one session has been seen doing over the whole
+// window, grouped by statement. It costs the monitored server nothing: every
+// sample it reads is already here, which is the point of keeping a window at
+// all and, until this, the part of it nothing reached.
+//
+// Statements are identified by what makes one distinct on a session: the
+// text, and the login, host and program that ran it. The last three are in
+// the key because SQL Server reuses session ids freely, so two unrelated
+// logins can hold the same number inside one window, and folding them
+// together would invent a history that never happened. Showing them as
+// columns is what makes that visible on screen.
+//
+// The read lock is held for the whole walk, which blocks Append. At the
+// default fifteen minutes and eight hundred rows a tick that is a few
+// hundred thousand integer comparisons, and it happens when a person presses
+// a key rather than on a timer.
+func (w *Window) SessionStatements(spid int64) []model.StatementSeen {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	type acc struct {
+		st    model.StatementSeen
+		waits map[string]int
+	}
+	byKey := map[string]*acc{}
+	var order []string
+
+	for _, t := range w.ticks {
+		for _, r := range t.rows {
+			if r.Ref.SessionID != spid {
+				continue
+			}
+			key := r.Login + "\x00" + r.Host + "\x00" + r.Program + "\x00" + r.SQLText
+			a := byKey[key]
+			if a == nil {
+				a = &acc{
+					st: model.StatementSeen{
+						SessionID: spid, Login: r.Login, Host: r.Host, Program: r.Program,
+						Database: r.Database, Command: r.Command, SQLText: r.SQLText,
+						FirstAt: t.at,
+					},
+					waits: map[string]int{},
+				}
+				byKey[key] = a
+				order = append(order, key)
+			}
+			a.st.LastAt = t.at
+			a.st.Samples++
+			if r.ElapsedMs > a.st.MaxElapsedMs {
+				a.st.MaxElapsedMs = r.ElapsedMs
+			}
+			if r.CPUMs > a.st.MaxCPUMs {
+				a.st.MaxCPUMs = r.CPUMs
+			}
+			if r.LogicalReads > a.st.MaxReads {
+				a.st.MaxReads = r.LogicalReads
+			}
+			if r.WaitType != "" {
+				a.waits[r.WaitType]++
+			}
+		}
+	}
+
+	out := make([]model.StatementSeen, 0, len(order))
+	for _, key := range order {
+		a := byKey[key]
+		for wt, n := range a.waits {
+			// Ties break on the name so the answer does not move between
+			// two calls over the same data.
+			if n > a.st.TopWaitSamples || (n == a.st.TopWaitSamples && wt < a.st.TopWait) {
+				a.st.TopWait, a.st.TopWaitSamples = wt, n
+			}
+		}
+		out = append(out, a.st)
+	}
+	// Most recently seen first: the statement a person is asking about is
+	// almost always the last one.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastAt.After(out[j].LastAt) })
+	return out
 }

@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 // The types below feed the views of spec section 7 that are not projections
 // of the retention window. They are read on demand, while somebody is
 // looking at them, and never from the polling loop: the lock aggregate in
@@ -19,7 +21,14 @@ type SessionSample struct {
 	Status   string
 	Database string
 
-	ConnectedSec int64
+	// ConnectedSec is the age of the physical connection, from
+	// sys.dm_exec_connections. SinceResetSec is the age of the current use
+	// of it: a pooled connection handed back and taken out again is reset,
+	// and that reset moves login_time to now while connect_time stays. The
+	// counters below are reset with it, so they count the current use and
+	// not the connection.
+	ConnectedSec  int64
+	SinceResetSec int64
 	// IdleSec is time since the last request ended. Zero while a request is
 	// running, because the engine reports no end time for one that has not
 	// ended.
@@ -110,4 +119,48 @@ type PlanNode struct {
 	CPUMs     int64
 	Reads     int64
 	Writes    int64
+}
+
+// StatementSeen is one statement observed on one session over the retention
+// window. It is not a log: only statements that were running at a sampling
+// instant appear, so at a one second tier anything shorter than a second is
+// usually missed. What it answers is what a session has been doing, which
+// the current tick cannot say at all.
+type StatementSeen struct {
+	SessionID int64
+	Login     string
+	Host      string
+	Program   string
+	Database  string
+	Command   string
+	SQLText   string
+
+	FirstAt time.Time
+	LastAt  time.Time
+	// Samples is how many ticks this statement was seen in, which is the
+	// only honest measure of how long it ran: the window samples, it does
+	// not record.
+	Samples int
+
+	MaxElapsedMs int64
+	MaxCPUMs     int64
+	MaxReads     int64
+	// TopWait is the wait type it was most often seen waiting on, and
+	// TopWaitSamples how many of its samples that was.
+	TopWait        string
+	TopWaitSamples int
+}
+
+// SessionWait is one wait type accumulated by one session, from
+// sys.dm_exec_session_wait_stats. The engine resets these when a pooled
+// connection is handed out again, so they cover the current use of the
+// connection rather than its whole life, which is the same scope as the
+// session counters next to them.
+type SessionWait struct {
+	WaitType     string
+	Waits        int64
+	WaitMs       int64
+	MaxWaitMs    int64
+	SignalMs     int64
+	SharePercent float64
 }

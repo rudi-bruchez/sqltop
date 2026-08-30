@@ -464,6 +464,8 @@ commands instead of text.
 | `↑` `↓` | Move the selection one row up or down the grid |
 | `e` | Follows the selected request through its plan as it runs |
 | `d` | Writes the selected request's plan to `plans/` beside the binary |
+| `y` | Shows what the selected session has been seen running over the window |
+| `n` | Shows what the selected session has waited on |
 
 The list is generated from one table in the page, which the key handler also
 dispatches from, so a command cannot be bound without being listed or listed
@@ -518,6 +520,62 @@ rather than the whole batch it came from, and the text form returns
 `nvarchar` rather than `xml`, which is what stops a plan more than a hundred
 and twenty-eight levels deep failing outright. Those are exactly the plans
 somebody wants to look at.
+
+On `y`. This is the first thing in the tool that reads the retention window
+back. Section 12 justifies that window by a query which finished thirty
+seconds ago still being inspectable, and until this nothing reached it: the
+stream sent the newest tick and only the newest tick. `y` groups every
+sample of the selected session by statement and reports, per statement, when
+it was last seen, how long it was seen for, how many ticks it appeared in,
+its peak elapsed time, CPU and reads, and the wait it was most often seen
+on. It costs the monitored server nothing at all.
+
+It is a sample, not a log, and the panel is built so that cannot be
+forgotten. Only statements that were running at a sampling instant appear,
+so at a one second tier anything shorter than a second is usually missed,
+and the count of samples is a column rather than a duration.
+
+Statements are identified by their text and by the login, host and program
+that ran them. The last three are in the key because SQL Server reuses
+session ids freely, so two unrelated logins can hold the same number inside
+one window, and folding them together would invent a history that never
+happened. The login and the program are on by default for the same reason:
+what the key separates, the columns have to show.
+
+On the two clocks in that panel's heading, and in the sessions view. A
+connection handed back to a pool and taken out again is reset by
+`sp_reset_connection`, and that reset moves `login_time` to now while
+`sys.dm_exec_connections.connect_time` stays where it was. It also zeroes
+`cpu_time`, `logical_reads`, `reads`, `writes`, `row_count`, `memory_usage`,
+`total_elapsed_time`, `total_scheduled_time` and `context_info`. All of that
+was measured against a container by diffing every column of the two views
+across a pooled reuse, and it is not something the documentation states in
+one place.
+
+So the sessions view reports both: `connected` from `connect_time`, which is
+the physical connection's age, and `since reset` from `login_time`, which is
+the age of the current use of it. The counters beside them are per use, and
+`since reset` sits immediately before them because the scope belongs next to
+what it scopes. Earlier releases read `login_time` alone and put the second
+number under the first one's name, which on a pooled application is a
+plausible number naming the wrong thing.
+
+Nothing can separate two uses of a pooled connection inside the retained
+samples, because the samples carry no login time. The heading states both
+clocks instead, so a reader can see that a connection open for six hours was
+handed out a moment ago and that the list therefore spans work the current
+operation had nothing to do with.
+
+On `n`. It reads `sys.dm_exec_session_wait_stats`, which is SQL Server 2016
+and later plus both Azure engines, so it rides a capability and says why it
+is empty below that rather than failing. The same reset that moves
+`login_time` clears these counters, so they cover the current use of the
+connection, which is the scope somebody reading them wants. That reset is
+lazy: it rides on the next statement sent over the connection rather than on
+the moment it went back to the pool, so a connection idle in a pool still
+carries the waits of whatever it did last. A test written on the other
+assumption reported the documentation as wrong before the ordering was
+understood.
 
 On `s`. The grid is virtualised: the document holds about forty rows of
 however many the view has, so saving the document would save the scroll

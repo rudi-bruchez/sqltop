@@ -81,3 +81,75 @@ func TestDepthOnEmptyWindow(t *testing.T) {
 		t.Fatalf("empty window reported %d samples capped=%v", samples, capped)
 	}
 }
+
+// TestSessionStatementsGroupsWhatASessionRan is the feature that finally
+// reaches the retention window. Spec section 12 justifies the window by a
+// query that finished thirty seconds ago still being inspectable, and until
+// this nothing read it back.
+func TestSessionStatementsGroupsWhatASessionRan(t *testing.T) {
+	w := New(time.Hour, 10000)
+	base := time.Now().Add(-time.Minute)
+
+	sample := func(at time.Time, spid int64, text, wait string, cpu int64) model.RequestSample {
+		return model.RequestSample{
+			At: at, Ref: model.RequestRef{SessionID: spid},
+			Login: "app", Host: "APP01", Program: "svc", Database: "CRM", Command: "SELECT",
+			SQLText: text, WaitType: wait, CPUMs: cpu, ElapsedMs: cpu * 2, LogicalReads: cpu,
+		}
+	}
+
+	// Session 51 runs one statement for three ticks, then another for one.
+	// Session 52 runs its own, and must not be folded in.
+	w.Append(base, []model.RequestSample{sample(base, 51, "SELECT a", "LCK_M_X", 10), sample(base, 52, "SELECT z", "", 1)})
+	w.Append(base.Add(time.Second), []model.RequestSample{sample(base.Add(time.Second), 51, "SELECT a", "LCK_M_X", 40)})
+	w.Append(base.Add(2*time.Second), []model.RequestSample{sample(base.Add(2*time.Second), 51, "SELECT a", "PAGEIOLATCH_SH", 90)})
+	w.Append(base.Add(3*time.Second), []model.RequestSample{sample(base.Add(3*time.Second), 51, "SELECT b", "", 5)})
+
+	got := w.SessionStatements(51)
+	if len(got) != 2 {
+		t.Fatalf("session 51 ran two distinct statements and %d came back", len(got))
+	}
+	// Most recently seen first.
+	if got[0].SQLText != "SELECT b" {
+		t.Errorf("the first row is %q; the most recently seen statement comes first", got[0].SQLText)
+	}
+
+	a := got[1]
+	if a.Samples != 3 {
+		t.Errorf("SELECT a was seen in three ticks and reports %d", a.Samples)
+	}
+	if a.MaxCPUMs != 90 {
+		t.Errorf("SELECT a peaked at 90 ms of CPU and reports %d", a.MaxCPUMs)
+	}
+	if a.LastAt.Sub(a.FirstAt) != 2*time.Second {
+		t.Errorf("SELECT a spans %v, want two seconds", a.LastAt.Sub(a.FirstAt))
+	}
+	// Two samples on LCK_M_X against one on PAGEIOLATCH_SH.
+	if a.TopWait != "LCK_M_X" || a.TopWaitSamples != 2 {
+		t.Errorf("SELECT a waited most on %q in %d samples, want LCK_M_X in 2", a.TopWait, a.TopWaitSamples)
+	}
+}
+
+// TestSessionStatementsKeepsDifferentLoginsApart. SQL Server reuses session
+// ids freely, so two unrelated logins can hold the same number inside one
+// window. Folding them into one history would invent something that never
+// happened.
+func TestSessionStatementsKeepsDifferentLoginsApart(t *testing.T) {
+	w := New(time.Hour, 10000)
+	at := time.Now()
+	w.Append(at, []model.RequestSample{
+		{At: at, Ref: model.RequestRef{SessionID: 51}, Login: "alice", Host: "PC1", Program: "SSMS", SQLText: "SELECT 1"},
+	})
+	w.Append(at.Add(time.Second), []model.RequestSample{
+		{At: at.Add(time.Second), Ref: model.RequestRef{SessionID: 51}, Login: "bob", Host: "PC2", Program: "sqlcmd", SQLText: "SELECT 1"},
+	})
+
+	got := w.SessionStatements(51)
+	if len(got) != 2 {
+		t.Fatalf("the same text under two logins folded into %d row(s); it is two", len(got))
+	}
+	logins := map[string]bool{got[0].Login: true, got[1].Login: true}
+	if !logins["alice"] || !logins["bob"] {
+		t.Errorf("the two rows report logins %q and %q", got[0].Login, got[1].Login)
+	}
+}

@@ -339,6 +339,7 @@ Every open user session: who is connected, for how long, how long since their la
 SELECT s.session_id,
        ISNULL(s.login_name, N''), ISNULL(s.host_name, N''), ISNULL(s.program_name, N''),
        ISNULL(s.status, N''), ISNULL(DB_NAME(s.database_id), N''),
+       ISNULL(DATEDIFF(second, c.connect_time, SYSDATETIME()), 0),
        ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
        CASE WHEN s.status = 'running' THEN 0
             ELSE ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0) END,
@@ -346,6 +347,14 @@ SELECT s.session_id,
        s.open_transaction_count,
        ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)
 FROM sys.dm_exec_sessions AS s
+OUTER APPLY (
+    -- The physical connection. MIN because a session using MARS has one row
+    -- per logical session in this view alongside its parent, and the parent
+    -- is the earliest.
+    SELECT MIN(x.connect_time) AS connect_time
+    FROM sys.dm_exec_connections AS x
+    WHERE x.session_id = s.session_id
+) AS c
 OUTER APPLY (
     SELECT MIN(tx.transaction_begin_time) AS oldest_begin
     FROM sys.dm_tran_session_transactions AS stx
@@ -492,6 +501,21 @@ SELECT ISNULL(p.query_plan, N'')
 FROM sys.dm_exec_requests AS r
 CROSS APPLY sys.dm_exec_text_query_plan(r.plan_handle, r.statement_start_offset, r.statement_end_offset) AS p
 WHERE r.session_id = 51 AND r.request_id = 0
+OPTION (MAXDOP 1)
+```
+
+## sessionWaitsQueryTemplate
+
+Runs on demand, while somebody is watching one session's waits.
+
+What one session has waited on, longest first. The engine resets these counters when a pooled connection is handed out again, the same reset that moves login_time and zeroes the session counters, so they cover the current use of the connection rather than its whole life. sys.dm_exec_session_wait_stats is SQL Server 2016 and later plus both Azure engines, so it is gated on a capability rather than assumed. The substitution is a session id, an integer by type before it reaches the query.
+
+```sql
+SELECT TOP (50) RTRIM(w.wait_type), w.waiting_tasks_count, w.wait_time_ms,
+       w.max_wait_time_ms, w.signal_wait_time_ms
+FROM sys.dm_exec_session_wait_stats AS w
+WHERE w.session_id = 51 AND w.wait_time_ms > 0
+ORDER BY w.wait_time_ms DESC
 OPTION (MAXDOP 1)
 ```
 

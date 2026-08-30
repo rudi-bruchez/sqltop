@@ -163,6 +163,8 @@ func (s *Server) routes() ([]route, error) {
 		{"/api/logs", http.HandlerFunc(s.logs)},
 		{"/api/plan", http.HandlerFunc(s.plan)},
 		{"/api/plansave", http.HandlerFunc(s.plansave)},
+		{"/api/history", http.HandlerFunc(s.history)},
+		{"/api/sessionwaits", http.HandlerFunc(s.sessionwaits)},
 	}, nil
 }
 

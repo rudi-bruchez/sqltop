@@ -51,6 +51,12 @@ const (
 	// grey as unavailable, rather than a second, separate signal for
 	// version-gated columns.
 	CapRequestDOP
+	// CapSessionWaitStats reports whether sys.dm_exec_session_wait_stats
+	// can be read: it is SQL Server 2016 and later plus both Azure engines,
+	// and the tool's floor is 2012. A version fact rather than a right,
+	// travelling on the same channel as the rest for the reason
+	// CapRequestDOP's comment gives.
+	CapSessionWaitStats
 )
 
 type Capabilities uint32

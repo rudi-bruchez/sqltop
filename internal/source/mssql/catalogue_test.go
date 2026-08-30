@@ -165,6 +165,12 @@ func queryCatalogue() []catalogueEntry {
 			sql:  fmt.Sprintf(estimatedPlanQueryTemplate, 51, 0),
 		},
 		{
+			name: "sessionWaitsQueryTemplate",
+			when: "on demand, while somebody is watching one session's waits",
+			why:  "What one session has waited on, longest first. The engine resets these counters when a pooled connection is handed out again, the same reset that moves login_time and zeroes the session counters, so they cover the current use of the connection rather than its whole life. sys.dm_exec_session_wait_stats is SQL Server 2016 and later plus both Azure engines, so it is gated on a capability rather than assumed. The substitution is a session id, an integer by type before it reaches the query.",
+			sql:  fmt.Sprintf(sessionWaitsQueryTemplate, 51),
+		},
+		{
 			name: "costQuery",
 			when: "every tick, on whatever tier ran last",
 			why:  "The tool's own server CPU and logical reads, read from its own session. This is what the observation budget throttles against, and it is why the connection is pinned: a pooled connection would be reset between checkouts and zero these counters.",

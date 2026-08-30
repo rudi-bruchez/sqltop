@@ -6,7 +6,20 @@ constant changes.
 
 ## Unreleased
 
-Nothing yet.
+- `y` shows what the selected session has been seen running over the
+  retention window: one row per statement, when it was last seen, how long
+  for, how many samples, its peaks, and the wait it was most often on. It is
+  the first thing in the tool that reads the window back, and it costs the
+  monitored server nothing.
+- `n` shows what the selected session has waited on, from
+  `sys.dm_exec_session_wait_stats`. SQL Server 2016 and later plus Azure;
+  below that the panel says why it is empty.
+- Fixed: the sessions view read `login_time` as the connection's age. A
+  pooled connection handed back and taken out again is reset, and that reset
+  moves `login_time` to now while `connect_time` stays. On any pooled
+  application the `connected` column reported the age of the current
+  checkout. There are now two columns, and the counters beside them are
+  documented as per checkout, because the same reset zeroes them too.
 
 ## 0.4.0, 30 August 2026
 

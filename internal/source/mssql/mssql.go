@@ -695,6 +695,13 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 		{from: "sys.dm_db_task_space_usage", cap: model.CapTempdbPerTask},
 		{from: "sys.dm_tran_version_store_space_usage", cap: model.CapVersionStoreUsage},
 		{
+			// SQL Server 2016 and later, and both Azure engines, whose
+			// 12.0.x product version would otherwise read as 2014 here.
+			from: "sys.dm_exec_session_wait_stats",
+			cap:  model.CapSessionWaitStats,
+			skip: !info.IsAzure() && info.MajorVersion < 13,
+		},
+		{
 			from: "sys.dm_os_ring_buffers WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'",
 			cap:  model.CapRingBufferCPU,
 			skip: info.IsAzureSQLDB,

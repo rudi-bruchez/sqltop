@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
@@ -24,20 +25,21 @@ import (
 
 // sessionRow is one open user session on the wire.
 type sessionRow struct {
-	SPID      int64   `json:"spid"`
-	Login     string  `json:"login"`
-	Host      string  `json:"host"`
-	Program   string  `json:"program"`
-	Status    string  `json:"status"`
-	Database  string  `json:"database"`
-	Connected int64   `json:"connected"`
-	Idle      int64   `json:"idle"`
-	OpenTran  int     `json:"open_tran"`
-	TranAge   int64   `json:"tran_age"`
-	CPUMs     int64   `json:"cpu_ms"`
-	Reads     int64   `json:"logical_reads"`
-	Writes    int64   `json:"writes"`
-	MemoryMB  float64 `json:"memory_mb"`
+	SPID       int64   `json:"spid"`
+	Login      string  `json:"login"`
+	Host       string  `json:"host"`
+	Program    string  `json:"program"`
+	Status     string  `json:"status"`
+	Database   string  `json:"database"`
+	Connected  int64   `json:"connected"`
+	SinceReset int64   `json:"since_reset"`
+	Idle       int64   `json:"idle"`
+	OpenTran   int     `json:"open_tran"`
+	TranAge    int64   `json:"tran_age"`
+	CPUMs      int64   `json:"cpu_ms"`
+	Reads      int64   `json:"logical_reads"`
+	Writes     int64   `json:"writes"`
+	MemoryMB   float64 `json:"memory_mb"`
 }
 
 func (s *Server) sessions(rw http.ResponseWriter, req *http.Request) {
@@ -51,7 +53,7 @@ func (s *Server) sessions(rw http.ResponseWriter, req *http.Request) {
 		out = append(out, sessionRow{
 			SPID: r.SessionID, Login: r.Login, Host: r.Host, Program: r.Program,
 			Status: r.Status, Database: r.Database,
-			Connected: r.ConnectedSec, Idle: r.IdleSec,
+			Connected: r.ConnectedSec, SinceReset: r.SinceResetSec, Idle: r.IdleSec,
 			OpenTran: r.OpenTran, TranAge: r.TranSec,
 			CPUMs: r.CPUMs, Reads: r.Reads, Writes: r.Writes, MemoryMB: r.MemoryMB,
 		})
@@ -208,4 +210,96 @@ func refFromQuery(req *http.Request) (model.RequestRef, error) {
 		return model.RequestRef{}, errors.New("rqid is not a number")
 	}
 	return model.RequestRef{SessionID: spid, RequestID: int32(rqid)}, nil
+}
+
+// historyRow is one statement a session was seen running, on the wire.
+type historyRow struct {
+	LastSeen   int64  `json:"last_seen"`
+	SeenFor    int64  `json:"seen_for"`
+	Samples    int    `json:"samples"`
+	Command    string `json:"command"`
+	Database   string `json:"database"`
+	Login      string `json:"login"`
+	Program    string `json:"program"`
+	MaxElapsed int64  `json:"max_elapsed"`
+	MaxCPU     int64  `json:"max_cpu"`
+	MaxReads   int64  `json:"max_reads"`
+	TopWait    string `json:"top_wait"`
+	SQLText    string `json:"sql_text"`
+}
+
+// history is what one session has been seen doing over the retention
+// window. It sends no query at all: every sample it reads was collected for
+// the grid and kept because spec section 12 says a query that finished
+// thirty seconds ago must still be inspectable. Until this, nothing reached
+// it.
+//
+// Connected and SinceReset ride along because they are what makes the list
+// readable: a connection open for six hours whose pool handed it out three
+// hundred milliseconds ago is carrying work from before that reset, and
+// nothing here can separate the two. They are best effort, and a login that
+// cannot read sessions gets the list without them rather than an error.
+func (s *Server) history(rw http.ResponseWriter, req *http.Request) {
+	spid, err := strconv.ParseInt(req.URL.Query().Get("spid"), 10, 64)
+	if err != nil {
+		http.Error(rw, "spid is not a number", http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now()
+	seen := s.win.SessionStatements(spid)
+	out := make([]historyRow, 0, len(seen))
+	for _, st := range seen {
+		out = append(out, historyRow{
+			LastSeen: int64(now.Sub(st.LastAt).Seconds()),
+			SeenFor:  int64(st.LastAt.Sub(st.FirstAt).Seconds()),
+			Samples:  st.Samples,
+			Command:  st.Command, Database: st.Database,
+			Login: st.Login, Program: st.Program,
+			MaxElapsed: st.MaxElapsedMs, MaxCPU: st.MaxCPUMs, MaxReads: st.MaxReads,
+			TopWait: st.TopWait, SQLText: st.SQLText,
+		})
+	}
+
+	var connected, sinceReset int64
+	if rows, err := s.col.Sessions(req.Context()); err == nil {
+		for _, r := range rows {
+			if r.SessionID == spid {
+				connected, sinceReset = r.ConnectedSec, r.SinceResetSec
+				break
+			}
+		}
+	}
+	writeJSON(rw, map[string]any{"rows": out, "connected": connected, "since_reset": sinceReset})
+}
+
+// waitRow is one wait type a session has accumulated.
+type waitRow struct {
+	WaitType  string  `json:"wait_type"`
+	Share     float64 `json:"share"`
+	WaitMs    int64   `json:"wait_ms"`
+	Waits     int64   `json:"waits"`
+	MaxWaitMs int64   `json:"max_wait_ms"`
+	SignalMs  int64   `json:"signal_ms"`
+}
+
+func (s *Server) sessionwaits(rw http.ResponseWriter, req *http.Request) {
+	spid, err := strconv.ParseInt(req.URL.Query().Get("spid"), 10, 64)
+	if err != nil {
+		http.Error(rw, "spid is not a number", http.StatusBadRequest)
+		return
+	}
+	waits, err := s.col.SessionWaits(req.Context(), spid)
+	if err != nil {
+		viewError(rw, err)
+		return
+	}
+	out := make([]waitRow, 0, len(waits))
+	for _, w := range waits {
+		out = append(out, waitRow{
+			WaitType: w.WaitType, Share: w.SharePercent, WaitMs: w.WaitMs,
+			Waits: w.Waits, MaxWaitMs: w.MaxWaitMs, SignalMs: w.SignalMs,
+		})
+	}
+	writeJSON(rw, map[string]any{"rows": out})
 }
