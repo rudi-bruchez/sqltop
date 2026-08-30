@@ -134,3 +134,23 @@ func (s *counterState) apply(at time.Time, raw map[string]int64) map[string]mode
 	s.seeded = true
 	return out
 }
+
+// applyLongestTransactionGate overrides longest_transaction_s, which the
+// catalogue above declares kindRaw and apply therefore hands back available
+// whenever the server answers at all. That is wrong specifically for this
+// one counter: Transactions:Longest Transaction Running Time is only
+// populated under read committed snapshot isolation (spec section 6), and a
+// raw value of zero on a server where no database has that on is not "no
+// long transaction", it is "this figure cannot be trusted here" - the exact
+// distinction Available exists to carry. Kept as its own step rather than
+// folded into apply itself: apply's job is the generic per-cntr_type
+// arithmetic shared by every counter in the catalogue, and hasRCSI is a
+// server fact apply has no way to know, discovered once at Identify rather
+// than queried on every tick. Run from SampleServer, after apply, on the
+// TierCounters figures map, so it is the seam between the counter layer and
+// what Identify already knows about this server that actually gets tested.
+func applyLongestTransactionGate(figures map[string]model.Figure, hasRCSI bool) {
+	if !hasRCSI {
+		figures["longest_transaction_s"] = model.Figure{Unit: "s", Available: false}
+	}
+}

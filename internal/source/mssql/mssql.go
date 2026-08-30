@@ -356,6 +356,12 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 		caps = caps.With(model.CapRequestDOP)
 	}
 
+	// Discovered once here, alongside every other server fact, rather than
+	// on every counters tick: see readCommittedSnapshotAnywhere. A failure
+	// reading it is treated as "no", the safe default, rather than failing
+	// Identify itself over a fact only one dashboard tile depends on.
+	info.HasReadCommittedSnapshot = s.readCommittedSnapshotAnywhere(ctx)
+
 	// Task 9's sampling goroutine reads s.info/s.caps, while the collector
 	// may be re-identifying, so the write goes under the same lock every
 	// query uses. requestsQuery is rebuilt here rather than kept as a fixed
@@ -366,6 +372,33 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	s.mu.Unlock()
 
 	return info, caps, nil
+}
+
+// readCommittedSnapshotQuery answers whether any database on the instance
+// has read committed snapshot isolation on. sys.databases is a catalogue
+// view: a login only sees the rows for databases it may see at all, which on
+// Azure SQL Database is just the one it is scoped to, and that is exactly
+// the question worth asking there too.
+const readCommittedSnapshotQuery = `
+SELECT CASE WHEN EXISTS (
+    SELECT 1 FROM sys.databases WHERE is_read_committed_snapshot_on = 1
+) THEN 1 ELSE 0 END
+OPTION (RECOMPILE, MAXDOP 1)`
+
+// readCommittedSnapshotAnywhere gates the longest-running-transaction
+// figure: Transactions:Longest Transaction Running Time is only populated
+// under read committed snapshot isolation (spec section 6), and there is no
+// per-counter way to ask the DMV that directly. A query failure here (a
+// login that cannot even see its own row in sys.databases, or a connection
+// that broke mid-probe) comes back false, the same "unavailable" a genuine
+// absence produces, rather than failing the whole of Identify over a fact
+// one dashboard tile depends on.
+func (s *Source) readCommittedSnapshotAnywhere(ctx context.Context) bool {
+	var on int
+	if err := s.queryRow(ctx, readCommittedSnapshotQuery, &on); err != nil {
+		return false
+	}
+	return on == 1
 }
 
 // majorVersion turns "15.0.4335.1" into 15. Zero when it cannot tell, which

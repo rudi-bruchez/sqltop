@@ -443,6 +443,52 @@ func TestSampleServerCountersNeedTwoTicks(t *testing.T) {
 	}
 }
 
+// TestLongestTransactionGatedByReadCommittedSnapshot crosses the seam this
+// fix closes: Identify discovers whether any database on the instance has
+// read committed snapshot isolation on, and SampleServer(TierCounters) is
+// supposed to act on that fact for longest_transaction_s, rather than the
+// two simply agreeing by construction the way a test of counterState.apply
+// alone, or of Identify alone, would let them. Whichever branch this run
+// lands in is asserted, not skipped, so the test is meaningful whether or
+// not scripts/restoredb.sh has put the read-committed-snapshot demonstration
+// database on the container: a fresh container exercises the "no database
+// has it on" branch, restoredb.sh's PachadataFormation exercises the other.
+//
+// Value itself is not asserted to be nonzero in the positive branch. This
+// counter was found, against the demonstration database's own long-running
+// RCSI transaction, to read zero regardless of how long that transaction
+// ran - the same kind of platform gap TestOtherCPUPercentUnavailableWhenIdleIsZero
+// already documents for SystemIdle. What this fix owns is Available, not
+// what the engine itself chooses to put in cntr_value.
+func TestLongestTransactionGatedByReadCommittedSnapshot(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	info, _, err := s.Identify(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SampleServer(ctx, model.TierCounters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ok := got.Figures["longest_transaction_s"]
+	if !ok {
+		t.Fatal("longest_transaction_s is missing; the dashboard needs the tile marked unavailable, not absent")
+	}
+
+	if info.HasReadCommittedSnapshot {
+		if !f.Available {
+			t.Fatalf("info.HasReadCommittedSnapshot = true (a database on this instance has RCSI on, run scripts/restoredb.sh for the demonstration database) but longest_transaction_s = %+v", f)
+		}
+	} else {
+		if f.Available {
+			t.Fatalf("info.HasReadCommittedSnapshot = false but longest_transaction_s = %+v, want Available false rather than the counter's literal zero", f)
+		}
+	}
+}
+
 func TestSampleServerSpaceTier(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

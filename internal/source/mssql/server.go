@@ -61,6 +61,11 @@ func (s *Source) SampleServer(ctx context.Context, tier model.Tier) (model.Serve
 		out.Figures = s.counter.apply(out.At, raw)
 		s.mu.Unlock()
 
+		// See applyLongestTransactionGate: the fact was discovered once at
+		// Identify, not queried again here.
+		info, _ := s.snapshot()
+		applyLongestTransactionGate(out.Figures, info.HasReadCommittedSnapshot)
+
 	case model.TierSpace:
 		out.Figures = map[string]model.Figure{}
 		if err := s.readSpace(ctx, out.Figures); err != nil {

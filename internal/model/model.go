@@ -140,6 +140,13 @@ type ServerInfo struct {
 	IsAzureSQLDB   bool
 	IsAzureMI      bool
 	StartedAt      time.Time
+	// HasReadCommittedSnapshot reports whether any database on the instance
+	// has read committed snapshot isolation on. Discovered once, alongside
+	// the rest of this struct, rather than on every tick: it exists to gate
+	// the longest-running-transaction figure, which spec section 6 says is
+	// only populated under read committed snapshot isolation and must read
+	// n/a otherwise rather than a misleading zero.
+	HasReadCommittedSnapshot bool
 }
 
 // IsAzure reports whether this is one of the Azure engines, whose reported

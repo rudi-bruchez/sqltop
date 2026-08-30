@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
 func TestFirstSampleIsUnavailableNotZero(t *testing.T) {
@@ -150,5 +152,34 @@ func TestCounterThatVanishesAndReturnsDoesNotInventARate(t *testing.T) {
 
 	if f := got["batch_requests_sec"]; f.Available {
 		t.Fatalf("rate = %v reported as available; a counter that lost its history must report unavailable for one tick rather than differentiate against a stale value", f.Value)
+	}
+}
+
+// TestLongestTransactionGateWithoutRCSI is the unit half of the seam this
+// fix closes, at the counter layer alone. The integration half,
+// TestLongestTransactionGatedByReadCommittedSnapshot in mssql_test.go,
+// exercises Identify and SampleServer together against a real server; this
+// test only proves applyLongestTransactionGate itself does what it claims,
+// without a database, so a regression here fails fast in `go test ./...`
+// rather than only against a container.
+func TestLongestTransactionGateWithoutRCSI(t *testing.T) {
+	figures := map[string]model.Figure{
+		"longest_transaction_s": {Value: 0, Unit: "s", Available: true},
+	}
+	applyLongestTransactionGate(figures, false)
+
+	if f := figures["longest_transaction_s"]; f.Available {
+		t.Fatalf("longest_transaction_s = %+v, want Available false when no database has read committed snapshot isolation on", f)
+	}
+}
+
+func TestLongestTransactionGateWithRCSI(t *testing.T) {
+	figures := map[string]model.Figure{
+		"longest_transaction_s": {Value: 12, Unit: "s", Available: true},
+	}
+	applyLongestTransactionGate(figures, true)
+
+	if f := figures["longest_transaction_s"]; !f.Available || f.Value != 12 {
+		t.Fatalf("longest_transaction_s = %+v, want the raw reading passed through untouched when a database has RCSI on", f)
 	}
 }
