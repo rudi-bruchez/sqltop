@@ -371,7 +371,7 @@ PowerShell prototype. Shortcuts are shown in the tab labels.
 | Blocking | `b` | Blocking chains only, flattened with a depth column, ordered so a blocker is immediately above those it blocks. Head blockers highlighted | Same, plus `sys.dm_os_waiting_tasks` |
 | Waits | `w` | Two sub-modes toggled with `c`: current waits per request, and cumulative wait statistics differentiated over the window | `sys.dm_os_waiting_tasks`, `sys.dm_os_wait_stats` |
 | Repetitive queries | `q` | Aggregation of the retention window by `query_hash`: executions seen, distinct sessions, total CPU, average and maximum elapsed, one sample text. This is what catches the query that is individually fast and collectively ruinous | Derived from stored samples |
-| Throughput | `t` | Request counts and rates over the window: active requests, batch requests/sec, compilations, recompilations, by database and by command | Derived, plus `SQL Statistics` |
+| Throughput | `v` | Request counts and rates over the window: active requests, batch requests/sec, compilations, recompilations, by database and by command. `v` for volume: `t` shows the selected statement and `f` is the refresh rate | Derived, plus `SQL Statistics` |
 | Programs | `a` | Aggregation by program name and login. `a` for applications: `p` is pause | Derived |
 | Sessions | `u` | Every open user session: who, from where, connected for how long, idle for how long, and whether a transaction is open and since when | `sys.dm_exec_sessions`, `sys.dm_tran_session_transactions`, `sys.dm_tran_active_transactions` |
 | Transactions | `x` | Every open user transaction with its age, state, type and log written, and underneath it what each holding session has locked | `sys.dm_tran_active_transactions`, `sys.dm_tran_database_transactions`, `sys.dm_tran_locks` |
@@ -453,6 +453,7 @@ commands instead of text.
 
 | Key | Does |
 |---|---|
+| `t` | Shows the selected row's statement under the grid, on the requests and blocking views |
 | `s` | Saves the state to `snapshots/server-yyyy-mm-dd-hhmmss.html` beside the binary |
 | `p` | Pauses and resumes the display |
 | `f` | Steps the refresh period through 1, 2, 5, 10 and 30 seconds |
@@ -473,6 +474,27 @@ rather than rendering it again in Go is deliberate: what the command saves
 is what is on screen, filters, sort and dashboard included, and a second
 renderer in Go would be a second implementation of the whole interface kept
 in step with the first by hope.
+
+On `t`. It is the first slice of the detail panel of section 9, and it costs
+nothing: the statement is already in the browser, sent once per session in
+the reference table, so opening the panel is a keypress and not a request.
+It sits below the grid rather than beside it, because SQL is tall and a
+narrow column makes it unreadable, and the grid gives up the height rather
+than scrolling the panel out of sight. The statement is shown as it came off
+the server, newlines and all, which is the one thing a grid cell cannot do.
+
+The highlighting is a forty-line tokeniser in the page, not a library. This
+page carries no dependencies and is served inline in full on every load; the
+smallest highlighting library is larger than everything else in it put
+together, and there are six things to tell apart. It builds DOM nodes rather
+than markup, so a statement that arrived from a monitored server is text by
+construction and never an element, and the grid's own render-path guard
+stays as strict as it was.
+
+The panel redraws on a tick only when the statement has changed. A session
+moves from one statement to the next without the selection changing, and a
+panel still showing the previous one would be the same lie as a stale figure
+on a tile.
 
 On `p`. The stream is left running and its reference table is still
 absorbed while frozen, because the server sends a session's SQL text once
@@ -799,6 +821,9 @@ environment, loaded from `.env` at startup.
 
 Selecting a row opens the detail panel. Selection must survive the refresh; that
 constraint drove the renderer decision and is measured in the bench.
+
+The statement half of that panel exists, toggled with `t`; see section 7.1.
+The plan half does not.
 
 The panel shows the full SQL text, the session context, the sample history for
 that request, and the execution plan.

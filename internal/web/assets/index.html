@@ -60,6 +60,15 @@
   </table>
 </div>
 
+<!-- The statement of the selected row, toggled with t. Below the grid
+     rather than beside it because SQL is tall and narrow lines make it
+     unreadable, and outside .gridScroll so the grid gives up height for it
+     rather than scrolling it out of sight. -->
+<section id="detail" class="detail" hidden aria-labelledby="detailWho">
+  <h2 id="detailWho" class="detailWho"></h2>
+  <pre id="sqlText" class="sql" tabindex="0"></pre>
+</section>
+
 <!-- The three views that are not projections of the retention window. Each
      is filled on demand while its tab is open and left alone otherwise, so
      the queries behind them, one of which walks the whole lock manager, run

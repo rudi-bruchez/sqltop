@@ -87,6 +87,17 @@ for (let i = 0; i < 120; i++) {
 
 const out = { problems, rowsSeen: ticks };
 
+// hidden must mean not drawn, not merely a property that reads true: a
+// class setting display beats the user agent's [hidden] rule on specificity,
+// and a row asked about its property answers yes while it is on the screen.
+out.hiddenIsHidden = await json(`(() => {
+  const drawn = [];
+  for (const el of document.querySelectorAll("[hidden]")) {
+    if (el.getBoundingClientRect().height > 0) drawn.push(el.id || el.className || el.tagName);
+  }
+  return drawn;
+})()`);
+
 out.identity = await json(`(() => {
   const shown = {};
   for (const row of document.querySelectorAll("#serverInfo .si")) {
@@ -404,6 +415,36 @@ out.commands.pause = {
 await ev(key("p"));
 await sleep(900);
 out.commands.resumed = { on: await ev(`paused`), seq: await ev(`document.getElementById("seq").textContent`) };
+
+// The statement panel. The text is already on the client, so this is a
+// keypress and nothing else: no request, no query.
+out.commands.detail = await json(`(() => {
+  const sc = document.querySelector(".gridScroll");
+  const rows = [...document.querySelectorAll("#gridBody tr")].filter((r) => r.children.length > 1 && !r.hidden);
+  rows[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  const gridBefore = sc.clientHeight;
+  globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: "t", bubbles: true }));
+  const pre = document.getElementById("sqlText");
+  const open = {
+    shown: !document.getElementById("detail").hidden,
+    gridBefore: gridBefore,
+    gridAfter: sc.clientHeight,
+    who: document.getElementById("detailWho").textContent,
+    lines: pre.textContent.split(String.fromCharCode(10)).length,
+    keywords: pre.querySelectorAll("span.k").length,
+    numbers: pre.querySelectorAll("span.n").length,
+    strings: pre.querySelectorAll("span.s").length,
+    comments: pre.querySelectorAll("span.c").length,
+    // The statement carries markup inside a string literal. It must be
+    // text, never an element.
+    scripts: pre.querySelectorAll("script").length,
+    text: pre.textContent,
+  };
+  globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: "t", bubbles: true }));
+  open.closed = document.getElementById("detail").hidden;
+  open.gridBack = sc.clientHeight;
+  return open;
+})()`);
 
 await ev(key("s"));
 await sleep(900);

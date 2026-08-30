@@ -196,6 +196,10 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("after switching a column back on the row pool has %d cells per row and the header has %d columns (%d rows in view)", got.Columns.PoolCells, len(got.Columns.AfterShow), got.Columns.Rows)
 	}
 
+	if len(got.HiddenIsHidden) > 0 {
+		t.Errorf("these elements carry hidden and are still drawn: %v; a class that sets display beats the user agent's [hidden] rule on specificity", got.HiddenIsHidden)
+	}
+
 	// Column geometry. A floor is a floor: a narrow column has to come out
 	// narrow, and the surplus a wide window leaves has to land on the one
 	// column with something to say rather than being shared out equally.
@@ -241,7 +245,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 
 	// A command nobody can discover is a command nobody uses, so the keys
 	// are on the page rather than only behind h.
-	if want := []string{"s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
+	if want := []string{"t", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
 		t.Errorf("the command strip shows %v, want %v", got.Views.Hints, want)
 	}
 	if got.Views.Blocking.Rows == 0 || got.Views.Blocking.Rows >= got.Views.Blocking.Total {
@@ -319,6 +323,36 @@ func TestEndToEndInABrowser(t *testing.T) {
 	if got.Commands.Resumed.Seq == got.Commands.Pause.After {
 		t.Errorf("the display is still frozen after resuming: tick %q", got.Commands.Resumed.Seq)
 	}
+	// The statement panel: t shows the selected row's statement under the
+	// grid, keeps its lines, colours its parts, and gives the height back
+	// when it closes.
+	d := got.Commands.Detail
+	if !d.Shown || d.Closed != true {
+		t.Errorf("t left the panel shown=%v and a second press closed=%v", d.Shown, d.Closed)
+	}
+	if d.GridAfter >= d.GridBefore {
+		t.Errorf("the grid was %d px tall and is %d px with the panel open; the panel has to take its height from somewhere", d.GridBefore, d.GridAfter)
+	}
+	if d.GridBack <= d.GridAfter {
+		t.Errorf("the grid did not get its height back on closing: %d px, against %d with the panel open", d.GridBack, d.GridAfter)
+	}
+	if d.Lines < 4 {
+		t.Errorf("the statement drew on %d lines; the fixture's is four, and a grid cell already shows it on one", d.Lines)
+	}
+	if d.Keywords < 3 || d.Numbers < 1 || d.Strings < 1 || d.Comments < 1 {
+		t.Errorf("highlighting found %d keywords, %d numbers, %d strings, %d comments in %q",
+			d.Keywords, d.Numbers, d.Strings, d.Comments, d.Text)
+	}
+	if d.Scripts != 0 {
+		t.Errorf("the statement's markup became %d element(s); it came off a server and belongs in the page as text", d.Scripts)
+	}
+	if !strings.Contains(d.Text, "<script>") {
+		t.Errorf("the panel shows %q; the statement's text must survive verbatim", d.Text)
+	}
+	if !strings.HasPrefix(d.Who, "spid ") {
+		t.Errorf("the panel's heading reads %q; it names the row it is showing", d.Who)
+	}
+
 	if !strings.HasPrefix(got.Commands.SnapshotMessage, "snapshot written to ") {
 		t.Errorf("s reported %q", got.Commands.SnapshotMessage)
 	}
@@ -521,8 +555,9 @@ type e2eResult struct {
 		Rows      int      `json:"rows"`
 		AfterShow []string `json:"afterShow"`
 	} `json:"columns"`
-	Cells  map[string]string `json:"cells"`
-	Widths struct {
+	HiddenIsHidden []string          `json:"hiddenIsHidden"`
+	Cells          map[string]string `json:"cells"`
+	Widths         struct {
 		Char     float64        `json:"char"`
 		Headings map[string]int `json:"headings"`
 		Rendered map[string]int `json:"rendered"`
@@ -585,6 +620,21 @@ type e2eResult struct {
 			On  bool   `json:"on"`
 			Seq string `json:"seq"`
 		} `json:"resumed"`
+		Detail struct {
+			Shown      bool   `json:"shown"`
+			GridBefore int    `json:"gridBefore"`
+			GridAfter  int    `json:"gridAfter"`
+			GridBack   int    `json:"gridBack"`
+			Closed     bool   `json:"closed"`
+			Who        string `json:"who"`
+			Lines      int    `json:"lines"`
+			Keywords   int    `json:"keywords"`
+			Numbers    int    `json:"numbers"`
+			Strings    int    `json:"strings"`
+			Comments   int    `json:"comments"`
+			Scripts    int    `json:"scripts"`
+			Text       string `json:"text"`
+		} `json:"detail"`
 		SnapshotMessage string `json:"snapshotMessage"`
 		RowsWhenSaved   int    `json:"rowsWhenSaved"`
 		Rate            string `json:"rate"`
@@ -635,7 +685,10 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 			// be true by accident.
 			CPUMs:     int64((i * 7919) % 10000),
 			ElapsedMs: int64(1000 + i),
-			SQLText:   fmt.Sprintf("SELECT %d FROM dbo.T", i),
+			// Multiline, with a comment, a number, a keyword and a string
+			// literal carrying markup: the statement panel has to keep the
+			// lines, colour the parts, and escape what came off the server.
+			SQLText: fmt.Sprintf("SELECT %d,\n       '<script>alert(1)</script>' AS x\nFROM dbo.T -- a note\nWHERE id > 100", i),
 		}
 	}
 	// One chain of three, so the blocking view has something to keep and

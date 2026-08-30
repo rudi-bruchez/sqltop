@@ -6,7 +6,16 @@ constant changes.
 
 ## Unreleased
 
-Nothing yet.
+- `t` shows the selected row's statement under the grid, on the requests and
+  blocking views: multiline as the server sent it, syntax highlighted by a
+  tokeniser in the page rather than a library, and costing no request since
+  the text is already in the browser.
+- Fixed: `hidden` did not hide. A class that sets `display` beats the user
+  agent's `[hidden]` rule on specificity, so the clear cross was drawn on
+  every empty filter box and a server information row with no value was
+  drawn empty rather than left out. Every test that asked the property
+  agreed with the code and disagreed with the screen.
+- The throughput view of section 7 moves from `t` to `v`.
 
 ## 0.3.0, 30 August 2026
 

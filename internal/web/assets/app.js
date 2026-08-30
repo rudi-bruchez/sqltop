@@ -417,6 +417,7 @@ function refresh(keepSelection) {
   view = applyView(activeView === "blocking" ? blockingRows(data) : data);
   if (keepSelection) anchor();
   layout();
+  renderDetail();
   $("rowCount").textContent = n0(view.length) + (view.length === data.length ? " requests" : " of " + n0(data.length) + " requests");
 }
 
@@ -589,6 +590,7 @@ function buildTabs(views) {
 // tabs shows. Three columns rather than two because a status strip has room
 // for a word and the dialog has room for a sentence.
 const COMMANDS = [
+  ["t", "show the selected row's statement under the grid", "text"],
   ["s", "save the current state to snapshots/ beside the binary", "save"],
   ["p", "pause and resume the display", "pause"],
   ["f", "cycle the refresh period", "rate"],
@@ -703,6 +705,7 @@ function setView(id) {
   activeView = id;
   markTabs();
   document.querySelector(".gridScroll").hidden = !isGrid(id);
+  $("detail").hidden = !isGrid(id) || !detailOpen;
   for (const v of ["sessions", "transactions", "logs"]) $("panel-" + v).hidden = v !== id;
   buildColumnPanel();
   applyColumns();
@@ -959,6 +962,108 @@ function saveSnapshot() {
     .catch((e) => say("could not write the snapshot: " + e.message));
 }
 
+// A T-SQL tokeniser rather than a highlighting library. This page carries no
+// dependencies and is served inline in full on every load; the smallest such
+// library is larger than everything else here put together, and this has six
+// things to tell apart.
+//
+// The list is for readability, not for correctness: a keyword missing from
+// it renders as plain text, which is what a name renders as anyway.
+const SQL_KEYWORDS = new Set((
+  "select from where group by having order asc desc into values set output " +
+  "insert update delete merge truncate " +
+  "join inner left right full outer cross apply on " +
+  "union all except intersect distinct top offset fetch next rows only percent " +
+  "with as case when then else end " +
+  "and or not in exists between like is null " +
+  "declare begin commit rollback transaction tran save " +
+  "create alter drop table view index procedure function trigger schema database " +
+  "if while return break continue goto exec execute " +
+  "over partition row_number rank dense_rank ntile " +
+  "cast convert try_cast try_convert count sum avg min max " +
+  "isnull coalesce nullif datediff dateadd getdate sysdatetime " +
+  "use option maxdop recompile nolock readuncommitted rowlock updlock holdlock readpast " +
+  "primary key foreign references constraint default identity unique check " +
+  "int bigint smallint tinyint bit decimal numeric float real money " +
+  "char varchar nchar nvarchar text date datetime datetime2 time uniqueidentifier"
+).split(" "));
+
+// One pass, one regular expression. The string and comment forms are written
+// so they cannot backtrack: '[^']*(?:''[^']*)*' rather than '(?:[^']|'')*',
+// which is quadratic on a long literal.
+const SQL_TOKEN = /--[^\n]*|\/\*[\s\S]*?\*\/|'[^']*(?:''[^']*)*'|"[^"]*(?:""[^"]*)*"|\[[^\]]*\]|@@?[A-Za-z_]\w*|\d+(?:\.\d+)?|[A-Za-z_]\w*/g;
+
+// sqlNodes builds nodes, never markup: textContent escapes by construction,
+// which is the right default for a statement that came off a server nobody
+// here controls, and it keeps this out of the render-path guard that stops
+// the grid rebuilding rows through innerHTML.
+function sqlNodes(sql) {
+  const frag = document.createDocumentFragment();
+  let last = 0;
+  for (const m of sql.matchAll(SQL_TOKEN)) {
+    if (m.index > last) frag.appendChild(document.createTextNode(sql.slice(last, m.index)));
+    const t = m[0];
+    const c = t[0];
+    let cls = "";
+    if (c === "-" || c === "/") cls = "c";
+    else if (c === "'" || c === '"') cls = "s";
+    else if (c === "[") cls = "i";
+    else if (c === "@") cls = "v";
+    else if (c >= "0" && c <= "9") cls = "n";
+    else if (SQL_KEYWORDS.has(t.toLowerCase())) cls = "k";
+    if (cls) {
+      const el = document.createElement("span");
+      el.className = cls;
+      el.textContent = t;
+      frag.appendChild(el);
+    } else {
+      frag.appendChild(document.createTextNode(t));
+    }
+    last = m.index + t.length;
+  }
+  if (last < sql.length) frag.appendChild(document.createTextNode(sql.slice(last)));
+  return frag;
+}
+
+// The statement panel. The text is already here: the server sends a
+// session's SQL once and the reference table holds it, so opening this
+// costs no request and no query.
+let detailOpen = false;
+let detailShown = null;
+
+function toggleDetail() {
+  if (!isGrid(activeView)) {
+    say("the statement panel follows the requests and blocking views");
+    return;
+  }
+  detailOpen = !detailOpen;
+  $("detail").hidden = !detailOpen;
+  detailShown = null;
+  renderDetail();
+  // The grid gives up its height to the panel, so it has to be told.
+  layout();
+}
+
+// renderDetail runs on every tick while the panel is open, and does nothing
+// on the ticks where the statement has not changed. It has to run on ticks
+// at all because a session moves from one statement to the next without the
+// selection changing, and a panel still showing the previous one would be
+// the same lie as a stale figure on a tile.
+function renderDetail() {
+  if (!detailOpen) return;
+  const r = selectedKey === null ? null : view.find((x) => rowKey(x) === selectedKey);
+  const sql = r ? ref(val(r, "ref")).sql : "";
+  const label = r
+    ? "spid " + val(r, "spid") + "  " + (val(r, "db") || "") + "  " + n0(val(r, "el")) + " ms"
+    : "select a row to see its statement";
+  if ($("detailWho").textContent !== label) $("detailWho").textContent = label;
+  if (detailShown === sql) return;
+  detailShown = sql;
+  const pre = $("sqlText");
+  pre.textContent = "";
+  if (sql) pre.appendChild(sqlNodes(sql));
+}
+
 function toggleHelp() {
   const d = $("helpDialog");
   if (d.open) d.close();
@@ -968,6 +1073,7 @@ function toggleHelp() {
 // One entry per command, keyed the way the keyboard reports it. The keys
 // here and the keys in COMMANDS are checked against each other by a test.
 const KEYS = {
+  t: toggleDetail,
   s: saveSnapshot,
   p: togglePause,
   f: cycleFrequency,
@@ -1069,6 +1175,7 @@ function acquireRow() {
   tr.addEventListener("click", () => {
     selectedKey = tr._key;
     for (const e of pool) e.tr.classList.toggle("sel", e.tr._key === selectedKey);
+    renderDetail();
   });
   const entry = { tr, tds, key: null, prev: {} };
   pool.push(entry);

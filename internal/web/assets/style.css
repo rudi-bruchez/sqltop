@@ -12,6 +12,13 @@
 
 * { box-sizing: border-box; }
 
+/* [hidden] is a state and has to beat the layout rules below. The user
+   agent's own [hidden] { display: none } is a single attribute selector, so
+   any class that sets display wins on specificity: .si and .detail were both
+   being drawn while their hidden property read true, and every test that
+   asked the property agreed with the code and disagreed with the screen. */
+[hidden] { display: none !important; }
+
 /* One viewport-high column: the grid takes whatever the header, the server
    information, the dashboard and the status bar leave it, and gets it back
    when the dashboard is collapsed. The grid used to be a fixed 78vh, which
@@ -359,3 +366,43 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
 .listTable td.numCell { text-align: right; font-variant-numeric: tabular-nums; }
 .listTable td.empty, .listError { color: #7a828e; padding: 10px 8px; }
 .listHeading { font-size: 12px; font-weight: 600; margin: 16px 0 6px; color: #9aa1ad; }
+
+/* The statement panel. flex: none with a max-height, so it takes what it
+   needs up to a third of the window and the grid keeps the rest; the grid's
+   own flex: 1 1 auto is what gives the height back when this closes. */
+.detail {
+  flex: none;
+  max-height: 33vh;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: #171a20;
+}
+.detailWho {
+  flex: none;
+  margin: 0;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+  background: #1c2027;
+  border-bottom: 1px solid var(--line);
+}
+.sql {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  font: 12px/1.5 ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  /* pre-wrap, not pre: a generated statement can be one line of four
+     thousand characters, and a horizontal scrollbar is a worse answer than
+     a wrapped line. */
+  white-space: pre-wrap;
+  tab-size: 4;
+}
+.sql .k { color: #6fb3d2; font-weight: 600; }  /* keyword */
+.sql .s { color: #8fbf7f; }                    /* string literal */
+.sql .n { color: #d08770; }                    /* number */
+.sql .c { color: #6b7280; font-style: italic; } /* comment */
+.sql .v { color: #c9a0dc; }                    /* @variable */
+.sql .i { color: #d8dee9; }                    /* [bracketed identifier] */
