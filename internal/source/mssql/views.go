@@ -40,7 +40,7 @@ OUTER APPLY (
     WHERE stx.session_id = s.session_id
 ) AS t
 WHERE s.is_user_process = 1
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // Sessions lists every open user session. Cheap: one row per connection,
 // and the OUTER APPLY reads two views that hold one row per open
@@ -86,7 +86,7 @@ LEFT JOIN (
     GROUP BY transaction_id
 ) AS dbt ON dbt.transaction_id = tx.transaction_id
 WHERE stx.is_user_transaction = 1
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // locksQuery aggregates rather than listing. sys.dm_tran_locks has one row
 // per lock, so a single large statement puts millions in it; grouping on
@@ -127,7 +127,7 @@ GROUP BY l.request_session_id, l.resource_database_id, l.resource_type,
               THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id) END,
          l.request_mode, l.request_status
 ORDER BY COUNT(*) DESC
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // Transactions lists the open user transactions and, alongside them, what
 // each holding session has locked. Two round trips, both on demand.
@@ -222,16 +222,19 @@ func transactionState(v int) string {
 // refreshes.
 const logSpaceQuery = `
 SELECT d.name, d.recovery_model_desc, d.log_reuse_wait_desc, d.state_desc,
-       ISNULL(MAX(CASE WHEN pc.counter_name = N'Log File(s) Size (KB)' THEN pc.cntr_value END), 0),
-       ISNULL(MAX(CASE WHEN pc.counter_name = N'Log File(s) Used Size (KB)' THEN pc.cntr_value END), 0),
-       ISNULL(MAX(CASE WHEN pc.counter_name = N'Percent Log Used' THEN pc.cntr_value END), 0)
+       ISNULL(pc.size_kb, 0), ISNULL(pc.used_kb, 0), ISNULL(pc.percent_used, 0)
 FROM sys.databases AS d
-LEFT JOIN sys.dm_os_performance_counters AS pc
-       ON pc.instance_name = d.name
-      AND pc.object_name LIKE N'%Databases%'
-      AND pc.counter_name IN (N'Log File(s) Size (KB)', N'Log File(s) Used Size (KB)', N'Percent Log Used')
-GROUP BY d.name, d.recovery_model_desc, d.log_reuse_wait_desc, d.state_desc
-OPTION (RECOMPILE, MAXDOP 1)`
+LEFT JOIN (
+    SELECT instance_name,
+           MAX(CASE WHEN counter_name = N'Log File(s) Size (KB)' THEN cntr_value END) AS size_kb,
+           MAX(CASE WHEN counter_name = N'Log File(s) Used Size (KB)' THEN cntr_value END) AS used_kb,
+           MAX(CASE WHEN counter_name = N'Percent Log Used' THEN cntr_value END) AS percent_used
+    FROM sys.dm_os_performance_counters
+    WHERE object_name LIKE N'%Databases%'
+      AND counter_name IN (N'Log File(s) Size (KB)', N'Log File(s) Used Size (KB)', N'Percent Log Used')
+    GROUP BY instance_name
+) AS pc ON pc.instance_name = d.name
+OPTION (MAXDOP 1)`
 
 // LogSpace lists every database's transaction log: how big it is, how much
 // of it is active, and what is stopping the rest being reused.

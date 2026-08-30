@@ -112,7 +112,11 @@ func NewBudget(limitMsPerSecond int, base config.Tiers) *Budget {
 // the sliding window the throttle decides from.
 //
 // Debt: c.LogicalReads is read from the server on every counters tick (see
-// mssql.Source.Cost) and never looked at, here or anywhere else. Spec
+// mssql.Source.Cost) and never looked at, here or anywhere else. It is now
+// also reliably zero: the reads it used to carry were the query compiler
+// reading catalog metadata, and OPTION (RECOMPILE) came off every query
+// once that was measured (docs/PERFORMANCE.md). The dynamic management
+// views are memory resident, so the queries themselves read no pages. Spec
 // section 10 defines the observation budget in server CPU milliseconds
 // only, which is what this whole type throttles on, so there was never a
 // second budget for it to feed. The way out, if a second cost dimension is

@@ -10,6 +10,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	mssql "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/integratedauth/krb5"
 
+	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
@@ -86,10 +88,76 @@ func New() *Source {
 // server it is watching. NOCOUNT because the row counts are noise on the wire.
 const sessionInit = `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SET NOCOUNT ON;`
 
-const spidQuery = `SELECT @@SPID OPTION (RECOMPILE, MAXDOP 1)`
+const spidQuery = `SELECT @@SPID OPTION (MAXDOP 1)`
+
+// AppName is what this tool calls itself on the connection, and therefore
+// what shows in program_name, in sys.dm_exec_sessions, in an Extended Events
+// session and in whatever the DBA is already using to watch their own
+// server. The version is in it on purpose: the first question about any
+// unexpected load is which build produced it, and "go-mssqldb" answers
+// neither half of that.
+//
+// It is not what the tool filters its own requests with. The grid does that
+// with @@SPID inside the query, which is exact, survives a reconnection
+// changing the session id, and does not hide a colleague's sqltop watching
+// the same instance from the other side of the building. Hiding that would
+// be hiding a real session that is really costing the server something,
+// which is the opposite of what this tool is for; anyone who wants it gone
+// has a program filter on the grid.
+var AppName = "sqltop " + buildinfo.Version
+
+// withAppName adds the application name to a DSN that does not already set
+// one. An explicit one always wins: somebody who named their connection did
+// it for a reason, most likely a firewall rule or a Resource Governor
+// classifier that reads it.
+//
+// Both DSN shapes go-mssqldb accepts have to be handled: the URL form
+// (sqlserver://host?database=x) and the ADO form (server=x;user id=y). In
+// both cases the parameter is appended to the string rather than the string
+// being rebuilt, because a DSN carries a password and round-tripping one
+// through url.Parse and url.String re-encodes the userinfo. The result
+// decodes to the same password, so it works, but a function that silently
+// rewrites a credential is one nobody should have to reason about; a test
+// caught this doing exactly that to p%40ss%3Bword.
+//
+// A DSN of neither shape is handed back unchanged rather than guessed at.
+// Failing to name the connection is a cosmetic loss and corrupting it is
+// not.
+func withAppName(dsn string) string {
+	if hasAppName(dsn) {
+		return dsn
+	}
+	if strings.HasPrefix(strings.ToLower(dsn), "sqlserver://") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		return dsn + sep + "app+name=" + url.QueryEscape(AppName)
+	}
+	if strings.Contains(dsn, "=") {
+		sep := ";"
+		if strings.HasSuffix(strings.TrimSpace(dsn), ";") {
+			sep = ""
+		}
+		return dsn + sep + "app name=" + AppName
+	}
+	return dsn
+}
+
+// hasAppName reports whether the DSN already names the application, under
+// either of the two spellings the driver accepts.
+func hasAppName(dsn string) bool {
+	lower := strings.ToLower(dsn)
+	for _, k := range []string{"app name", "app+name", "app%20name", "application name"} {
+		if strings.Contains(lower, k) {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *Source) Open(ctx context.Context, dsn string) error {
-	connector, err := mssql.NewConnector(dsn)
+	connector, err := mssql.NewConnector(withAppName(dsn))
 	if err != nil {
 		return fmt.Errorf("mssql: open: %w", err)
 	}
@@ -321,7 +389,7 @@ SELECT
     CAST(SERVERPROPERTY('Edition')         AS nvarchar(256)),
     CAST(SERVERPROPERTY('ProductVersion')  AS nvarchar(64)),
     CAST(SERVERPROPERTY('EngineEdition')   AS int)
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabilities, error) {
 	var info model.ServerInfo
@@ -396,7 +464,7 @@ const readCommittedSnapshotQuery = `
 SELECT CASE WHEN EXISTS (
     SELECT 1 FROM sys.databases WHERE is_read_committed_snapshot_on = 1
 ) THEN 1 ELSE 0 END
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // readCommittedSnapshotAnywhere gates the longest-running-transaction
 // figure: Transactions:Longest Transaction Running Time is only populated
@@ -426,7 +494,7 @@ func (s *Source) readCommittedSnapshotAnywhere(ctx context.Context) bool {
 const managedMarkerQuery = `
 SELECT CASE WHEN DB_ID('rdsadmin') IS NULL THEN 0 ELSE 1 END,
        CASE WHEN DB_ID('cloudsqladmin') IS NULL THEN 0 ELSE 1 END
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // deployment names where this engine runs, with the certainty each source
 // deserves. EngineEdition is the engine describing itself and is taken as
@@ -481,7 +549,7 @@ func (s *Source) deployment(ctx context.Context, engineEdition int) model.Deploy
 // probe query to avoid a probe query.
 const startTimeQuery = `
 SELECT sqlserver_start_time FROM sys.dm_os_sys_info
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // startTime returns the instance start time, or the zero time when it
 // cannot be read. Zero is a real answer here, not a silent failure: the
@@ -517,7 +585,7 @@ func majorVersion(product string) int {
 // canQueryTemplate is can's shape, named so the query-hint sweep in
 // mssql_test.go can see it without duplicating it: %s is the DM object,
 // substituted with fmt.Sprintf rather than concatenation.
-const canQueryTemplate = "SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS x FROM %s) AS probe OPTION (RECOMPILE, MAXDOP 1)"
+const canQueryTemplate = "SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS x FROM %s) AS probe OPTION (MAXDOP 1)"
 
 // instanceWideViewGrantQuery answers, on a real instance or a managed
 // instance, whether this login holds the right that gates
@@ -530,7 +598,7 @@ const instanceWideViewGrantQuery = `
 SELECT CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1
               OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1
          THEN 1 ELSE 0 END
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // probe asks the server what actually works rather than inferring rights from
 // the version. A login can hold VIEW SERVER STATE on paper and be denied one
@@ -661,7 +729,7 @@ const costQuery = `
 SELECT cpu_time, logical_reads
 FROM sys.dm_exec_sessions
 WHERE session_id = @@SPID
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 func (s *Source) Cost(ctx context.Context) (model.Cost, error) {
 	var c model.Cost

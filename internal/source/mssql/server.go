@@ -44,7 +44,7 @@ SELECT RTRIM(LTRIM(object_name)), RTRIM(LTRIM(counter_name)), cntr_value
 FROM sys.dm_os_performance_counters
 WHERE counter_name IN (` + strings.Join(names, ",") + `)
   AND (instance_name IS NULL OR instance_name IN (N'', N'_Total'))
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 }
 
 // SampleServer feeds the dashboard on the slower tiers. Called before
@@ -200,7 +200,7 @@ SELECT
     SUM(version_store_reserved_page_count) * 8.0 / 1024.0,
     SUM(unallocated_extent_page_count) * 8.0 / 1024.0
 FROM tempdb.sys.dm_db_file_space_usage
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // versionStoreQuery is its own view and its own capability, not part of
 // spaceQuery above: sys.dm_tran_version_store_space_usage is cheap by
@@ -212,7 +212,7 @@ OPTION (RECOMPILE, MAXDOP 1)`
 // instead of three.
 const versionStoreQuery = `
 SELECT ISNULL(SUM(reserved_space_kb), 0) FROM sys.dm_tran_version_store_space_usage
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 func (s *Source) readSpace(ctx context.Context, at time.Time, into map[string]model.Figure) error {
 	_, caps := s.snapshot()
@@ -329,7 +329,7 @@ CROSS JOIN (
            ISNULL(SUM(CASE WHEN type = N'MEMORYCLERK_SQLQERESERVATIONS' THEN pages_kb END), 0) AS query_memory_kb
     FROM sys.dm_os_memory_clerks
 ) AS m
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // readOSViews fills the scheduler and memory-clerk figures. Every key is
 // written unavailable first, so one failing view leaves its own tiles
@@ -390,7 +390,7 @@ FROM (
       AND record LIKE '%<SystemHealth>%'
 ) AS x
 ORDER BY timestamp DESC
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 func (s *Source) readCPUHistory(ctx context.Context, into map[string]model.Figure) error {
 	// The keys always exist so one tile can be unavailable without its

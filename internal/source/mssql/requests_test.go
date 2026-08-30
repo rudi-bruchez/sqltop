@@ -42,7 +42,7 @@ func TestBuiltQueryGates(t *testing.T) {
 			if got := strings.Contains(q, tempdb); got != c.wantTempd {
 				t.Errorf("tempdb join present = %v, want %v", got, c.wantTempd)
 			}
-			if !strings.HasSuffix(strings.TrimSpace(q), "OPTION (RECOMPILE, MAXDOP 1)") {
+			if !strings.HasSuffix(strings.TrimSpace(q), "OPTION (MAXDOP 1)") {
 				t.Error("every shape has to keep the hint, or a degraded server is the one that pollutes the plan cache")
 			}
 			if n := strings.Count(q, ","); n == 0 {

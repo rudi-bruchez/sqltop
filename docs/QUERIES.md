@@ -10,7 +10,7 @@ go test ./internal/source/mssql -run TestQueriesDocIsCurrent -update
 and a test fails when it falls out of date. To change a query, change it in
 the Go source and regenerate.
 
-Every statement here is read-only, carries `OPTION (RECOMPILE, MAXDOP 1)`
+Every statement here is read-only, carries `OPTION (MAXDOP 1)`
 and runs on a session set to read uncommitted. Those three properties are
 checked by tests, not by convention: RECOMPILE keeps these plans out of the
 monitored server's cache, MAXDOP 1 keeps a monitoring query from taking
@@ -28,7 +28,7 @@ Runs once, when the pinned connection is established.
 Learns the session id the tool is using, so its own rows can be told apart from everyone else's.
 
 ```sql
-SELECT @@SPID OPTION (RECOMPILE, MAXDOP 1)
+SELECT @@SPID OPTION (MAXDOP 1)
 ```
 
 ## identifyQuery
@@ -44,7 +44,7 @@ SELECT
     CAST(SERVERPROPERTY('Edition')         AS nvarchar(256)),
     CAST(SERVERPROPERTY('ProductVersion')  AS nvarchar(64)),
     CAST(SERVERPROPERTY('EngineEdition')   AS int)
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## managedMarkerQuery
@@ -56,7 +56,7 @@ Asks whether the marker databases Amazon RDS and Google Cloud SQL install are pr
 ```sql
 SELECT CASE WHEN DB_ID('rdsadmin') IS NULL THEN 0 ELSE 1 END,
        CASE WHEN DB_ID('cloudsqladmin') IS NULL THEN 0 ELSE 1 END
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## startTimeQuery
@@ -67,7 +67,7 @@ The instance start time, which the dashboard counts up from as the uptime. A log
 
 ```sql
 SELECT sqlserver_start_time FROM sys.dm_os_sys_info
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## readCommittedSnapshotQuery
@@ -80,7 +80,7 @@ Gates the longest-running-transaction figure, which the engine only populates un
 SELECT CASE WHEN EXISTS (
     SELECT 1 FROM sys.databases WHERE is_read_committed_snapshot_on = 1
 ) THEN 1 ELSE 0 END
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## instanceWideViewGrantQuery
@@ -93,7 +93,7 @@ Decides whether this login can see the whole instance or only itself.
 SELECT CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1
               OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1
          THEN 1 ELSE 0 END
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## canQueryTemplate
@@ -103,7 +103,7 @@ Runs at connection, once per capability probed.
 Asks whether a given view can be read at all, by reading one row from it. %s is substituted with the view name from a fixed list in probe, never with anything a user supplies.
 
 ```sql
-SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS x FROM %s) AS probe OPTION (RECOMPILE, MAXDOP 1)
+SELECT COUNT(*) FROM (SELECT TOP (1) 1 AS x FROM %s) AS probe OPTION (MAXDOP 1)
 ```
 
 ## requestsQuery (full capabilities)
@@ -173,7 +173,7 @@ FROM (
         FROM sys.dm_db_task_space_usage AS u
         WHERE u.session_id = r.session_id
     ) AS tsu
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## requestsQuery (no dop column, no tempdb right)
@@ -238,7 +238,7 @@ FROM (
 ) AS r
     OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
     
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## countersQuery
@@ -252,7 +252,7 @@ SELECT RTRIM(LTRIM(object_name)), RTRIM(LTRIM(counter_name)), cntr_value
 FROM sys.dm_os_performance_counters
 WHERE counter_name IN (N'Page life expectancy',N'Buffer cache hit ratio',N'Buffer cache hit ratio base',N'Page reads/sec',N'Page writes/sec',N'Lazy writes/sec',N'Batch Requests/sec',N'SQL Compilations/sec',N'SQL Re-Compilations/sec',N'Full Scans/sec',N'Transactions',N'Longest Transaction Running Time',N'Target Server Memory (KB)',N'Total Server Memory (KB)',N'Memory Grants Pending',N'Memory Grants Outstanding')
   AND (instance_name IS NULL OR instance_name IN (N'', N'_Total'))
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## osViewsQuery
@@ -279,7 +279,7 @@ CROSS JOIN (
            ISNULL(SUM(CASE WHEN type = N'MEMORYCLERK_SQLQERESERVATIONS' THEN pages_kb END), 0) AS query_memory_kb
     FROM sys.dm_os_memory_clerks
 ) AS m
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## spaceQuery
@@ -295,7 +295,7 @@ SELECT
     SUM(version_store_reserved_page_count) * 8.0 / 1024.0,
     SUM(unallocated_extent_page_count) * 8.0 / 1024.0
 FROM tempdb.sys.dm_db_file_space_usage
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## versionStoreQuery
@@ -306,7 +306,7 @@ The transaction version store, which is a different measurement from the version
 
 ```sql
 SELECT ISNULL(SUM(reserved_space_kb), 0) FROM sys.dm_tran_version_store_space_usage
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## cpuHistoryQuery
@@ -326,7 +326,7 @@ FROM (
       AND record LIKE '%<SystemHealth>%'
 ) AS x
 ORDER BY timestamp DESC
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## sessionsQuery
@@ -352,7 +352,7 @@ OUTER APPLY (
     WHERE stx.session_id = s.session_id
 ) AS t
 WHERE s.is_user_process = 1
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## transactionsQuery
@@ -380,7 +380,7 @@ LEFT JOIN (
     GROUP BY transaction_id
 ) AS dbt ON dbt.transaction_id = tx.transaction_id
 WHERE stx.is_user_transaction = 1
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## locksQuery
@@ -406,7 +406,7 @@ GROUP BY l.request_session_id, l.resource_database_id, l.resource_type,
               THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id) END,
          l.request_mode, l.request_status
 ORDER BY COUNT(*) DESC
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 
 ## logSpaceQuery
@@ -417,16 +417,19 @@ Every database's log: size, active portion, percent used, recovery model, and wh
 
 ```sql
 SELECT d.name, d.recovery_model_desc, d.log_reuse_wait_desc, d.state_desc,
-       ISNULL(MAX(CASE WHEN pc.counter_name = N'Log File(s) Size (KB)' THEN pc.cntr_value END), 0),
-       ISNULL(MAX(CASE WHEN pc.counter_name = N'Log File(s) Used Size (KB)' THEN pc.cntr_value END), 0),
-       ISNULL(MAX(CASE WHEN pc.counter_name = N'Percent Log Used' THEN pc.cntr_value END), 0)
+       ISNULL(pc.size_kb, 0), ISNULL(pc.used_kb, 0), ISNULL(pc.percent_used, 0)
 FROM sys.databases AS d
-LEFT JOIN sys.dm_os_performance_counters AS pc
-       ON pc.instance_name = d.name
-      AND pc.object_name LIKE N'%Databases%'
-      AND pc.counter_name IN (N'Log File(s) Size (KB)', N'Log File(s) Used Size (KB)', N'Percent Log Used')
-GROUP BY d.name, d.recovery_model_desc, d.log_reuse_wait_desc, d.state_desc
-OPTION (RECOMPILE, MAXDOP 1)
+LEFT JOIN (
+    SELECT instance_name,
+           MAX(CASE WHEN counter_name = N'Log File(s) Size (KB)' THEN cntr_value END) AS size_kb,
+           MAX(CASE WHEN counter_name = N'Log File(s) Used Size (KB)' THEN cntr_value END) AS used_kb,
+           MAX(CASE WHEN counter_name = N'Percent Log Used' THEN cntr_value END) AS percent_used
+    FROM sys.dm_os_performance_counters
+    WHERE object_name LIKE N'%Databases%'
+      AND counter_name IN (N'Log File(s) Size (KB)', N'Log File(s) Used Size (KB)', N'Percent Log Used')
+    GROUP BY instance_name
+) AS pc ON pc.instance_name = d.name
+OPTION (MAXDOP 1)
 ```
 
 ## costQuery
@@ -439,6 +442,6 @@ The tool's own server CPU and logical reads, read from its own session. This is 
 SELECT cpu_time, logical_reads
 FROM sys.dm_exec_sessions
 WHERE session_id = @@SPID
-OPTION (RECOMPILE, MAXDOP 1)
+OPTION (MAXDOP 1)
 ```
 

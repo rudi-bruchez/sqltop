@@ -683,10 +683,16 @@ function blockingRows(rows) {
   return rows.filter((r) => val(r, "by") || blockers.has(val(r, "spid")));
 }
 
-// pollView asks for the active list view and schedules the next ask. It
-// follows the sampling period rather than a fixed one, with a floor: these
-// queries are heavier than the grid's and nobody reads a lock list five
-// times a second.
+// The shortest gap between two asks of each list view, in milliseconds.
+// Measured, not guessed: docs/PERFORMANCE.md records 0.1 ms of server CPU
+// per call for the sessions query, 1.5 ms for the log list and 40 ms for
+// the locks, against an observation budget of 50 ms per second. The lock
+// scan is the only figure that grows with the server, and polling it at the
+// grid's one second would spend most of the tool's allowance on one tab.
+const POLL_FLOOR = { sessions: 2000, transactions: 5000, logs: 10000 };
+
+// pollView asks for the active list view and schedules the next ask, at
+// whichever is slower, the sampling period or that view's own floor.
 let pollTimer = 0;
 function pollView() {
   clearTimeout(pollTimer);
@@ -697,7 +703,7 @@ function pollView() {
     .then((j) => renderList(v, j))
     .catch((e) => showListError(v, e.message))
     .finally(() => {
-      if (activeView === v && !paused) pollTimer = setTimeout(pollView, Math.max(periodMs || 1000, 2000));
+      if (activeView === v && !paused) pollTimer = setTimeout(pollView, Math.max(periodMs || 1000, POLL_FLOOR[v] || 5000));
     });
 }
 

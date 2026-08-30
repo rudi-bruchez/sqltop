@@ -860,6 +860,31 @@ has cost the instance, in server CPU milliseconds, with no network in the
 figure. That number is displayed: an instrument that claims to bound its own
 cost should show it.
 
+Every query carries `OPTION (MAXDOP 1)`, which keeps a monitoring query from
+taking parallel workers on the server it is watching. None carries
+`RECOMPILE`, and that is a change from earlier releases. It was measured at
+7.6 ms of server CPU per call on the grid query against 0.4 ms without, and
+12.6 ms per second against 1.8 ms across the three tier queries together, all
+of it compilation. What it bought was ten fewer cached plans on a server that
+holds thousands, and the cardinality argument that usually justifies it does
+not apply to a parameterless statement over views that carry no statistics.
+`docs/PERFORMANCE.md` has the table and the check that one cached plan holds
+under a sixteenfold change in row count.
+
+The connection names itself. `Application Name` is set to `sqltop` and the
+version, so what appears in `program_name`, in an Extended Events session and
+in whatever the DBA already uses to watch their own server says which tool
+and which build produced the load. An explicit name in the DSN always wins:
+somebody who named their connection did it for a firewall rule or a Resource
+Governor classifier that reads exactly that string.
+
+That name is not what the tool filters itself out of the grid with. The grid
+does that with `@@SPID` inside the query, which is exact, survives a
+reconnection changing the session id, and does not hide a colleague's sqltop
+watching the same instance. Hiding that would be hiding a real session that
+is really costing the server something, which is the opposite of the point;
+anyone who wants it gone has a filter on the program column.
+
 Throttling is ordered, not proportional. When the budget is exceeded over a
 sliding ten second window, tiers degrade from the least valuable upward: first
 tier C doubles its period, then tier B, and tier A last, since the request grid
@@ -878,7 +903,14 @@ default and is configurable in the JSON file, section 8.3.
 | B | 1 s | The filtered performance counter query, `sys.dm_os_sys_info` |
 | C | 5 s | tempdb file space, version store, memory clerks, scheduler detail |
 | D | 1 min | Ring buffer CPU history, which the engine only produces once a minute |
-| On demand | - | SQL text of a selected request, execution plan, live plan progress |
+| On demand | - | SQL text of a selected request, execution plan, live plan progress, and the session, transaction and log views of section 7.2 |
+
+The on-demand views have their own floor between two asks, because they are
+not all equally cheap. Measured: 0.1 ms of server CPU per call for the
+sessions query, 1.5 ms for the log list, and 40 ms for the lock aggregate,
+which is the only one that grows with the server. The floors are two, five
+and ten seconds respectively, so the most expensive tab spends 8 ms per
+second of a 50 ms budget rather than most of it.
 
 Never in the loop. `sys.dm_exec_query_plan`, `sys.dm_exec_text_query_plan` and
 `sys.dm_exec_query_statistics_xml` are on-demand only.

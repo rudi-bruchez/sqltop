@@ -165,7 +165,7 @@ FROM (
 ) AS r
     OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
     %s
-OPTION (RECOMPILE, MAXDOP 1)`
+OPTION (MAXDOP 1)`
 
 // buildRequestsQuery renders requestsQueryTemplate for one server. Two
 // things in the fixed query text do not hold everywhere:

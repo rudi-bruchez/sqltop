@@ -29,6 +29,57 @@ it does not deserve.
 
 ## Server side, Go
 
+### The query hint that was 87 % of the tool's cost
+
+Every query this tool sends carried `OPTION (RECOMPILE, MAXDOP 1)`, and the
+`RECOMPILE` half was there to keep the plan out of the monitored server's
+cache. It was never measured. It is now, against the 2022 container under an
+eight thread load, forty calls per figure after warming the plan, the cost
+read from the tool's own session's `cpu_time`:
+
+| Query | With `RECOMPILE` | Without | Cut |
+|---|---|---|---|
+| `requestsQuery`, the grid, once a second | 7.6 ms | 0.4 ms | 95 % |
+| `countersQuery`, once a second | 2.5 ms | 1.3 ms | 48 % |
+| `osViewsQuery`, once a second | 2.5 ms | 0.2 ms | 92 % |
+| `sessionsQuery`, on demand | 3.2 ms | 0.1 ms | 97 % |
+| `transactionsQuery`, on demand | 3.2 ms | 0.02 ms | 99 % |
+| `logSpaceQuery`, on demand | 18.1 ms | 1.5 ms | 92 % |
+| `locksQuery`, on demand | 51.5 ms | 40.8 ms | 21 % |
+
+Steady state, the three tier queries together: 12.6 ms of server CPU per
+second before, 1.8 ms after. The observation budget is 50 ms per second, so
+the tool went from a quarter of its own allowance to a twenty-fifth of it.
+
+All of that was compilation. `SELECT name, recovery_model_desc,
+log_reuse_wait_desc, state_desc FROM sys.databases` costs 11.15 ms with the
+hint and 0.07 ms without, on five databases; nothing about executing that
+statement takes eleven milliseconds. `locksQuery` is the exception that
+proves it, and the reason its saving is the smallest: its cost is the walk
+of the lock manager, which no hint changes.
+
+What the hint bought was ten fewer cached plans on a server that holds
+thousands. The argument that usually justifies `RECOMPILE` on a monitoring
+query, that a plan compiled at one cardinality is wrong at another, does not
+apply here: these statements take no parameters, and the dynamic management
+views carry no statistics, so a fresh compile produces the same plan from
+the same fixed guesses every time. Checked rather than assumed, by driving
+the grid query on one cached plan under an eight thread and then a
+forty-eight thread load: the CPU per call tracked the row count and nothing
+else, 0.4 ms against 6.3 ms for roughly sixteen times the rows.
+
+One thing fell out of it. `model.Cost.LogicalReads` is now reliably zero.
+The reads it used to carry were the compiler reading catalog metadata; the
+views themselves are memory resident and the queries read no pages at all.
+An integration test asserting that twenty samples cost some logical reads
+failed on the change, correctly, and now asserts on CPU.
+
+`MAXDOP 1` stays. It is what keeps a monitoring query from taking parallel
+workers on the server it is watching, it is per statement, and it costs
+nothing. `TestEveryQueryCarriesTheHints` now requires it and forbids
+`RECOMPILE`, so putting the hint back on one statement means changing that
+test and redoing this measurement, which is the point.
+
 ### The requests query
 
 The tempdb per-task figure arrives through an `OUTER APPLY`. Filtering on its
@@ -214,6 +265,30 @@ window is fifteen minutes, nine hundred points at one tick a second, and a
 sparkline a hundred pixels wide draws that as a smear.
 
 ## Measured and rejected
+
+### Preparing the statements
+
+Once `RECOMPILE` came off, the obvious next question was whether the
+statements should be prepared, so the text crosses the wire once and every
+later call sends a handle through `sp_execute` instead of three kilobytes of
+SQL.
+
+Measured on the same connection the tool actually uses, so the cost lands in
+the same session `Cost` differentiates, forty calls each:
+
+| Query | Ad hoc | Prepared |
+|---|---|---|
+| `requestsQuery` | 0.10 and 0.42 ms | 0.70 and 0.15 ms |
+| `countersQuery` | 1.35 and 1.30 ms | 1.50 and 1.25 ms |
+| `osViewsQuery` | 0.30 and 0.17 ms | 0.15 and 0.12 ms |
+
+Two runs each, and the two columns are inside each other's noise. There is
+nothing to win: the plan is already in the cache under its statement text,
+and finding it there costs a hash lookup. What preparing would buy is the
+three kilobytes of query text per call, which on a loopback or a local
+network is not a figure anybody can feel, against handles that live on the
+connection and would have to be invalidated and rebuilt every time the
+pinned connection is repaired. Rejected.
 
 ### Sorting and filtering in Go
 

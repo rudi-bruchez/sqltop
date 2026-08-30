@@ -155,16 +155,38 @@ func queryCatalogue() []catalogueEntry {
 	}
 }
 
-// TestEveryQueryCarriesTheHints guards the three requirements that are easy
-// to forget the day someone adds a query: read uncommitted comes from the
-// session, but RECOMPILE keeps the plan out of the cache and MAXDOP 1 keeps
-// a monitoring query from taking parallel workers on the server it is
-// watching. Both are per statement, and SQL Server allows only one OPTION
-// clause per query, so they have to travel together.
+// TestEveryQueryCarriesTheHints guards two requirements that are easy to
+// forget the day someone adds a query. Read uncommitted comes from the
+// session, but MAXDOP 1 is per statement, and it keeps a monitoring query
+// from taking parallel workers on the server it is watching.
+//
+// RECOMPILE used to be the other half of this rule and is now forbidden
+// rather than required. It was there to keep the plan out of the cache, and
+// it was measured: docs/PERFORMANCE.md carries the table, but the short
+// version is 7.6 ms of server CPU per call on the grid against 0.4 ms
+// without it, 18 ms against 1.5 ms on the log query, and 3 ms against
+// nothing at all on the two transaction queries. Every one of those
+// milliseconds was compilation, and together they were 87 % of what this
+// tool cost the server it was watching.
+//
+// What it bought was ten fewer cached plans on a server that holds
+// thousands. The cardinality argument that usually justifies it does not
+// apply: these statements take no parameters, and the dynamic management
+// views carry no statistics, so a fresh compile produces the same plan from
+// the same fixed guesses every time. Verified by driving the grid query
+// under an eight thread and then a forty-eight thread load on one cached
+// plan; the CPU per call tracked the row count and nothing else.
+//
+// So a query carrying it now fails. The day somebody has a reason to put it
+// back on one statement, this is the test to change and that is the
+// measurement to redo.
 func TestEveryQueryCarriesTheHints(t *testing.T) {
 	for _, e := range queryCatalogue() {
-		if !strings.Contains(e.sql, "OPTION (RECOMPILE, MAXDOP 1)") {
-			t.Errorf("%s is missing OPTION (RECOMPILE, MAXDOP 1)", e.name)
+		if !strings.Contains(e.sql, "OPTION (MAXDOP 1)") {
+			t.Errorf("%s is missing OPTION (MAXDOP 1)", e.name)
+		}
+		if strings.Contains(strings.ToUpper(e.sql), "RECOMPILE") {
+			t.Errorf("%s carries RECOMPILE, which was measured at 87 %% of this tool's cost on the monitored server and buys nothing these parameterless statements need; see docs/PERFORMANCE.md", e.name)
 		}
 		if n := strings.Count(strings.ToUpper(e.sql), "OPTION ("); n != 1 {
 			t.Errorf("%s has %d OPTION clauses, SQL Server allows one", e.name, n)
@@ -299,7 +321,7 @@ rewritten from the code by
 and a test fails when it falls out of date. To change a query, change it in
 the Go source and regenerate.
 
-Every statement here is read-only, carries ` + "`OPTION (RECOMPILE, MAXDOP 1)`" + `
+Every statement here is read-only, carries ` + "`OPTION (MAXDOP 1)`" + `
 and runs on a session set to read uncommitted. Those three properties are
 checked by tests, not by convention: RECOMPILE keeps these plans out of the
 monitored server's cache, MAXDOP 1 keeps a monitoring query from taking

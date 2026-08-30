@@ -70,7 +70,7 @@ func TestSessionIsReadUncommitted(t *testing.T) {
 		SELECT CASE transaction_isolation_level
 		    WHEN 1 THEN 'read uncommitted' ELSE 'other' END
 		FROM sys.dm_exec_sessions WHERE session_id = @@SPID
-		OPTION (RECOMPILE, MAXDOP 1)`).Scan(&level)
+		OPTION (MAXDOP 1)`).Scan(&level)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestCostIsCumulativeAndNonZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 200; i++ {
 		if _, err := s.SampleRequests(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -304,9 +304,18 @@ func TestCostIsCumulativeAndNonZero(t *testing.T) {
 	if second.CPUMs < first.CPUMs {
 		t.Fatalf("cost went backwards, %d then %d: it must be cumulative for the collector to differentiate it", first.CPUMs, second.CPUMs)
 	}
-	if second.LogicalReads <= first.LogicalReads {
-		t.Error("twenty samples should have cost some logical reads; a flat zero means we are reading the wrong session")
+	if second.CPUMs <= first.CPUMs {
+		t.Errorf("two hundred samples cost no server CPU at all, %d then %d; a flat reading means we are reading the wrong session", first.CPUMs, second.CPUMs)
 	}
+
+	// Logical reads are deliberately not asserted on. They used to be, and
+	// this test failed the day OPTION (RECOMPILE) came off every query: the
+	// reads it was seeing were the compiler reading catalog metadata, not
+	// the queries reading data. The dynamic management views are memory
+	// resident and the grid query now does no logical reads whatsoever,
+	// which is the point rather than a regression. It also means
+	// model.Cost.LogicalReads, already documented as collected and
+	// unconsumed, is now reliably zero as well.
 }
 
 // TestQueryAfterSessionKilledRepairsThePinnedConnection is what
@@ -339,7 +348,7 @@ func TestQueryAfterSessionKilledRepairsThePinnedConnection(t *testing.T) {
 	// KILL is asynchronous: the session is marked to die, not necessarily
 	// dead by the time ExecContext above returns. Poll rather than assume
 	// the first query after it already sees the break.
-	const probe = "SELECT 1 OPTION (RECOMPILE, MAXDOP 1)"
+	const probe = "SELECT 1 OPTION (MAXDOP 1)"
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var n int
@@ -470,7 +479,7 @@ func TestIsolationSurvivesASessionReset(t *testing.T) {
 	// KILL is asynchronous: poll until a query on the pinned connection
 	// actually observes the break and repairLocked drops it, exactly as in
 	// TestQueryAfterSessionKilledRepairsThePinnedConnection.
-	const probe = "SELECT 1 OPTION (RECOMPILE, MAXDOP 1)"
+	const probe = "SELECT 1 OPTION (MAXDOP 1)"
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var n int
@@ -493,7 +502,7 @@ func TestIsolationSurvivesASessionReset(t *testing.T) {
 	var level int
 	if err := s.queryRow(ctx,
 		`SELECT transaction_isolation_level FROM sys.dm_exec_sessions
-		 WHERE session_id = @@SPID OPTION (RECOMPILE, MAXDOP 1)`, &level); err != nil {
+		 WHERE session_id = @@SPID OPTION (MAXDOP 1)`, &level); err != nil {
 		t.Fatal(err)
 	}
 	if level != 1 {
@@ -666,7 +675,7 @@ func TestSampleRequestsFilterInvariant(t *testing.T) {
 		SELECT r.session_id, ISNULL(s.is_user_process, 1), ISNULL(r.blocking_session_id, 0), ISNULL(r.dop, 0)
 		FROM sys.dm_exec_requests AS r LEFT JOIN sys.dm_exec_sessions AS s ON s.session_id = r.session_id
 		WHERE r.session_id <> @@SPID
-		OPTION (RECOMPILE, MAXDOP 1)`)
+		OPTION (MAXDOP 1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
