@@ -626,6 +626,65 @@ out.widths = await json(`(() => {
   return out;
 })()`);
 
+// c, the session capture. The panel is the whole of this feature's answer,
+// so what is measured is what a person sees: does the heading say anything,
+// did the table lay out, and can the key be found without being told.
+await ev(`(() => {
+  const rows = [...document.querySelectorAll("#gridBody tr")].filter((r) => r.children.length > 1 && !r.hidden);
+  rows[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+})()`);
+await ev(key("c"));
+await sleep(3000);
+{
+  const o = await json(`(() => {
+    const body = document.getElementById("detailList");
+    const headRow = body.querySelector("thead tr");
+    const heads = headRow ? [...headRow.children] : [];
+    return {
+      captureHead: document.getElementById("detailWho").textContent,
+      captureHeadings: heads.map((th) => th.textContent),
+      captureFirstColWidth: heads.length ? heads[0].getBoundingClientRect().width : 0,
+      captureListHeight: body.getBoundingClientRect().height,
+      captureNotice: document.getElementById("notice").textContent,
+      captureRows: body.querySelectorAll("tbody tr").length,
+    };
+  })()`);
+  Object.assign(out, o);
+}
+
+// The help is where a key is discovered. Read from the dialog itself, not
+// from the list it is built from, because being in the document and being
+// on the screen are not the same thing.
+await ev(key("h"));
+out.helpMentionsCapture = await ev(`document.getElementById("helpDialog").textContent.includes("capture")`);
+await ev(key("h"));
+
+// A captured statement actually drawn. The panel above never holds one,
+// because this fixture's source cannot capture, and a cell registry written
+// as bare functions rather than as entries carrying text lays out exactly
+// like a right one until the first row arrives.
+try {
+  out.captureDrawn = await json(`(() => {
+    const body = document.getElementById("detailList");
+    body.textContent = "";
+    body.appendChild(listTable("capture", [{
+      at: new Date().toISOString(), kind: "batch", database: "alpha",
+      duration_us: 412, cpu_us: 300, logical_reads: 17, writes: 0, row_count: 3,
+      result: "OK", object: "", application: "sqltop e2e", user: "svc",
+      text: "SELECT 1 FROM dbo.T",
+    }]));
+    const heads = [...body.querySelector("thead tr").children];
+    const tr = body.querySelector("tbody tr");
+    return {
+      firstColWidth: heads[0].getBoundingClientRect().width,
+      rowLines: new Set([...tr.cells].map((td) => Math.round(td.getBoundingClientRect().top))).size,
+      cells: [...tr.cells].map((td) => td.textContent),
+    };
+  })()`);
+} catch (e) {
+  out.captureDrawn = { firstColWidth: 0, rowLines: 0, cells: [], error: String(e) };
+}
+
 console.log(JSON.stringify(out));
 ws.close();
 Deno.exit(0);
