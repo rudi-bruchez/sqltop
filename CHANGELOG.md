@@ -6,6 +6,13 @@ constant changes.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.0, 30 August 2026
+
+The detail panel of section 9, and the first release meant to be read by
+somebody who did not write it.
+
 - `t` shows the selected row's statement under the grid, on the requests and
   blocking views: multiline as the server sent it, syntax highlighted by a
   tokeniser in the page rather than a library, and costing no request since

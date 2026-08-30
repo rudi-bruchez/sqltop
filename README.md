@@ -3,12 +3,13 @@
 A `top` for SQL servers: real-time monitoring of active requests, with a short
 rolling history so a query can be reviewed after it has finished.
 
-Status: 0.3 released. The collector works; the request grid is live with
+Status: 0.4 released. The collector works; the request grid is live with
 sorting, per-column filtering and columns you can hide and reorder; the server
 dashboard is in; and there are views for blocking chains, open sessions, open
 transactions with the objects they have locked, and every database's
-transaction log. The waits, repetitive-query, throughput and programs views,
-the plan panel and the kill flow are still to come.
+transaction log; and selecting a row shows its statement or follows its plan
+as it runs, and writes that plan to a file. The waits, repetitive-query,
+throughput and programs views and the kill flow are still to come.
 
 The rendering strategy for the main screen was settled by measurement against
 four candidates, using a local harness that is not tracked here. So was the
