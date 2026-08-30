@@ -3,11 +3,18 @@
 A `top` for SQL servers: real-time monitoring of active requests, with a short
 rolling history so a query can be reviewed after it has finished.
 
-Status: 0.2 released. The collector works, the request grid is live and the
-server dashboard is in. The other views, the plan panel and the kill flow are
-still to come, as are column sorting and filtering. The
-rendering strategy for the main screen was settled by measurement against four
-candidates, using a local harness that is not tracked here.
+Status: 0.3 released. The collector works; the request grid is live with
+sorting, per-column filtering and columns you can hide and reorder; the server
+dashboard is in; and there are views for blocking chains, open sessions, open
+transactions with the objects they have locked, and every database's
+transaction log. The waits, repetitive-query, throughput and programs views,
+the plan panel and the kill flow are still to come.
+
+The rendering strategy for the main screen was settled by measurement against
+four candidates, using a local harness that is not tracked here. So was the
+decision to sort and filter in the browser rather than in the query, and the
+removal of a query hint that turned out to be most of what this tool cost the
+server it watches. `docs/PERFORMANCE.md` has the numbers.
 
 ## Running it
 
@@ -60,12 +67,25 @@ cd sqlstress && go run . -duration 2m
 ## Configuration
 
 `sqltop --write-config` writes a complete `sqltop.yaml` beside the binary,
-with every dashboard tile listed and switched on, so a tile can be turned off
-without knowing its name. `sqltop --show-config` prints what the tool
-actually resolved and from which file.
+with every dashboard tile and every grid column of every view listed and
+switched on, so a tile or a column can be turned off without knowing its name.
+`sqltop --show-config` prints what the tool actually resolved and from which
+file.
 
 The interface opens in the default browser at startup. `--no-browser` stops
 that, which is what you want over SSH.
+
+## Keys
+
+| Key | Does |
+|---|---|
+| `r` `b` `u` `x` `l` | Requests, blocking, sessions, transactions, transaction logs |
+| `↑` `↓` | Move the selection through the grid |
+| `t` | Show the selected row's statement under the grid |
+| `s` | Save the visible state to `snapshots/` beside the binary |
+| `p` | Pause and resume the display |
+| `f` | Step the sampling period through 1, 2, 5, 10 and 30 seconds |
+| `h` | The same list, on screen |
 
 ## Versions
 
