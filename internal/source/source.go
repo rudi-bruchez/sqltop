@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
@@ -52,4 +53,49 @@ type Source interface {
 	// polling loop.
 	QueryText(ctx context.Context, ref model.RequestRef) (string, error)
 	Plan(ctx context.Context, ref model.RequestRef, live bool) (model.Plan, error)
+}
+
+// CaptureHandle identifies one running capture. Opaque above this package.
+type CaptureHandle struct {
+	Name      string
+	SessionID int64
+	Started   time.Time
+}
+
+// Capturer is optional and deliberately not part of Source. Spec section 4.1:
+// PostgreSQL and MySQL have no equivalent of a ring buffer target, and an
+// abstraction assuming one would be wrong on two engines out of three.
+//
+// The only interface in this tool that writes to the monitored server, and
+// nothing calls it unless the operator passed the flag that permits that.
+type Capturer interface {
+	// CanCapture reports whether a capture is possible here, and says why
+	// not when it is not. A greyed key with no explanation is the failure
+	// this project has already fixed twice in the dashboard.
+	CanCapture(ctx context.Context) (bool, string, error)
+
+	// SweepCaptures drops the event sessions under this tool's prefix that
+	// are dead by construction, and never one that might be alive and
+	// belong to another instance of sqltop.
+	SweepCaptures(ctx context.Context) (dropped int, err error)
+
+	// RunningCaptures reports the other captures alive on this instance, so
+	// a second watcher of one session knows it is doubling the cost.
+	RunningCaptures(ctx context.Context) ([]model.CaptureNote, error)
+
+	// WatchedSession answers the only question the capture manager cannot
+	// answer for itself: is the session it started on still that session.
+	// The login time moves when a pooled connection is reset, and ok is
+	// false when the session is gone.
+	WatchedSession(ctx context.Context, spid int64) (login time.Time, ok bool, err error)
+
+	StartCapture(ctx context.Context, spid int64) (CaptureHandle, error)
+
+	// PollCapture returns the statements past mark, and what was lost. The
+	// caller replaces its mark with the returned Seen and never with Total:
+	// on a truncated read those differ, and Total would step over what the
+	// document could not carry.
+	PollCapture(ctx context.Context, h CaptureHandle, mark int64) ([]model.CapturedStatement, model.CaptureProgress, error)
+
+	StopCapture(ctx context.Context, h CaptureHandle) error
 }
