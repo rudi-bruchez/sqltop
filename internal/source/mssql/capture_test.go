@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rudi-bruchez/sqltop/internal/model"
+	"github.com/rudi-bruchez/sqltop/internal/source"
 )
 
 func TestCaptureDDLNeverStallsTheWorkload(t *testing.T) {
@@ -251,5 +254,215 @@ func TestCaptureIsUnavailableWithoutTheFlag(t *testing.T) {
 	}
 	if got := countSessions(t, db); got != before {
 		t.Errorf("event session count moved from %d to %d without the flag", before, got)
+	}
+}
+
+func TestCaptureSeesABatchAndAnRPC(t *testing.T) {
+	s := open(t)
+	s.captureAllowed = true
+	ctx := context.Background()
+
+	// A second, independent connection: the Source's pool is capped at one
+	// and that one is pinned.
+	db := captureDB(t)
+	watched, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watched.Close()
+	var spid int64
+	if err := watched.QueryRowContext(ctx, "SELECT @@SPID").Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := s.StartCapture(ctx, spid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.StopCapture(ctx, h)
+
+	if _, err := watched.ExecContext(ctx, "SELECT 'sqltop_capture_probe_batch'"); err != nil {
+		t.Fatal(err)
+	}
+	// A parameterised statement reaches the server as an RPC on sp_executesql.
+	var n int
+	if err := watched.QueryRowContext(ctx, "SELECT @p1", 42).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+
+	// MAX_DISPATCH_LATENCY is two seconds, so poll until they arrive rather
+	// than sleeping once and hoping.
+	var got []model.CapturedStatement
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _, err := s.PollCapture(ctx, h, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = st
+		if len(got) >= 2 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	var batch, rpc *model.CapturedStatement
+	for i := range got {
+		if strings.Contains(got[i].Text, "sqltop_capture_probe_batch") {
+			batch = &got[i]
+		}
+		if got[i].Kind == "rpc" {
+			rpc = &got[i]
+		}
+	}
+	if batch == nil {
+		t.Fatalf("the batch never arrived; got %d statements", len(got))
+	}
+	if batch.DurationUs <= 0 {
+		t.Errorf("duration is %d microseconds, which is not a duration", batch.DurationUs)
+	}
+	if batch.Database == "" {
+		t.Error("the database_name action did not arrive")
+	}
+	if batch.Result != "OK" {
+		t.Errorf("result is %q, want OK; the numeric code is not the result", batch.Result)
+	}
+	if rpc == nil {
+		t.Fatal("the parameterised statement did not arrive as an rpc")
+	}
+}
+
+func TestCaptureIgnoresOtherSessions(t *testing.T) {
+	// The whole cost argument for this feature rests on the predicate being
+	// scoped to one session, so it gets a negative test.
+	s := open(t)
+	s.captureAllowed = true
+	ctx := context.Background()
+	db := captureDB(t)
+	watched, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watched.Close()
+	var spid int64
+	if err := watched.QueryRowContext(ctx, "SELECT @@SPID").Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := s.StartCapture(ctx, spid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.StopCapture(ctx, h)
+
+	other, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := other.ExecContext(ctx, "SELECT 'sqltop_capture_probe_other_session'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watched.ExecContext(ctx, "SELECT 'sqltop_capture_probe_watched'"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * time.Second)
+
+	got, _, err := s.PollCapture(ctx, h, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenWatched := false
+	for _, st := range got {
+		if strings.Contains(st.Text, "probe_other_session") {
+			t.Fatal("the predicate is not scoped to one session")
+		}
+		if strings.Contains(st.Text, "probe_watched") {
+			seenWatched = true
+		}
+	}
+	if !seenWatched {
+		t.Fatal("the watched session's own statement never arrived, so the absence above proves nothing")
+	}
+}
+
+func TestStopRemovesTheSession(t *testing.T) {
+	s := open(t)
+	s.captureAllowed = true
+	ctx := context.Background()
+	db := captureDB(t)
+	h, err := s.StartCapture(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Exec(fmt.Sprintf(stopCaptureQueryTemplate, h.Name)) })
+	if !sessionExists(t, db, h.Name) {
+		t.Fatal("StartCapture left no session on the server")
+	}
+	if err := s.StopCapture(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	if sessionExists(t, db, h.Name) {
+		t.Error("the event session survived StopCapture; it would outlive the process")
+	}
+}
+
+func TestStopRefusesANameThatIsNotOurs(t *testing.T) {
+	s := open(t)
+	s.captureAllowed = true
+	err := s.StopCapture(context.Background(), source.CaptureHandle{Name: "system_health"})
+	if err == nil {
+		t.Fatal("StopCapture dropped a session outside the prefix; this login could drop system_health")
+	}
+}
+
+func TestPollRefusesANameThatIsNotOurs(t *testing.T) {
+	s := open(t)
+	s.captureAllowed = true
+	_, _, err := s.PollCapture(context.Background(), source.CaptureHandle{Name: "system_health"}, 0)
+	if err == nil {
+		t.Fatal("PollCapture read a session outside the prefix")
+	}
+}
+
+func TestPollReportsMissedEventsUnderLoad(t *testing.T) {
+	// The buffer holds a thousand. Driving more than that between two polls
+	// must produce an exact count, not merely a noticed gap.
+	s := open(t)
+	s.captureAllowed = true
+	ctx := context.Background()
+	db := captureDB(t)
+	watched, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watched.Close()
+	var spid int64
+	if err := watched.QueryRowContext(ctx, "SELECT @@SPID").Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := s.StartCapture(ctx, spid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.StopCapture(ctx, h)
+
+	for i := 0; i < 2500; i++ {
+		if _, err := watched.ExecContext(ctx, fmt.Sprintf("SELECT %d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(4 * time.Second)
+
+	_, prog, err := s.PollCapture(ctx, h, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prog.Missed == 0 {
+		t.Fatalf("2500 statements through a 1000 event buffer reported no loss; progress %+v", prog)
+	}
+	if prog.Total < 2500 {
+		t.Errorf("Total is %d, want at least the 2500 driven", prog.Total)
 	}
 }

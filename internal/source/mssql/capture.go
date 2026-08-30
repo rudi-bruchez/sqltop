@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
+	"github.com/rudi-bruchez/sqltop/internal/source"
 )
 
 // capturePrefix names every event session this tool creates, and is what
@@ -248,4 +249,71 @@ func (s *Source) WatchedSession(ctx context.Context, spid int64) (time.Time, boo
 		return time.Time{}, false, err
 	}
 	return login, true, nil
+}
+
+var _ source.Capturer = (*Source)(nil)
+
+// StartCapture creates the session and starts it. It sweeps first so a
+// crashed predecessor is cleaned rather than accumulated beside.
+func (s *Source) StartCapture(ctx context.Context, spid int64) (source.CaptureHandle, error) {
+	if !s.captureAllowed {
+		return source.CaptureHandle{}, errors.New("mssql: capture is off")
+	}
+	if _, err := s.SweepCaptures(ctx); err != nil {
+		return source.CaptureHandle{}, err
+	}
+	name, err := captureSessionName(spid)
+	if err != nil {
+		return source.CaptureHandle{}, err
+	}
+	create := fmt.Sprintf(createCaptureQueryTemplate, name, spid, spid)
+	if err := s.exec(ctx, create); err != nil {
+		return source.CaptureHandle{}, err
+	}
+	start := fmt.Sprintf(startCaptureQueryTemplate, name)
+	if err := s.exec(ctx, start); err != nil {
+		// A session created but not started must not be left behind.
+		// Relying on the sweep for a failure we are standing in front of is
+		// how recovery paths stop being tested.
+		drop := fmt.Sprintf(stopCaptureQueryTemplate, name)
+		s.exec(ctx, drop)
+		return source.CaptureHandle{}, err
+	}
+	return source.CaptureHandle{Name: name, SessionID: spid, Started: time.Now()}, nil
+}
+
+// PollCapture reads the ring buffer whole and lets parseRingBuffer place what
+// it holds against mark. Progress carries the caller's mark unchanged on
+// every path that returns nothing, so a failed read never advances it.
+func (s *Source) PollCapture(ctx context.Context, h source.CaptureHandle, mark int64) ([]model.CapturedStatement, model.CaptureProgress, error) {
+	if !strings.HasPrefix(h.Name, capturePrefix) {
+		return nil, model.CaptureProgress{Seen: mark}, fmt.Errorf("mssql: refusing to read %q, which is not one of ours", h.Name)
+	}
+	var doc sql.NullString
+	var dropped int64
+	q := fmt.Sprintf(drainCaptureQueryTemplate, h.Name)
+	switch err := s.queryRow(ctx, q, &doc, &dropped); {
+	case errors.Is(err, sql.ErrNoRows):
+		// The session is gone from under us. The caller decides what that
+		// means; here it is nothing to read.
+		return nil, model.CaptureProgress{Seen: mark}, nil
+	case err != nil:
+		return nil, model.CaptureProgress{Seen: mark}, err
+	}
+	out, prog, err := parseRingBuffer(doc.String, mark)
+	if err != nil {
+		return nil, model.CaptureProgress{Seen: mark}, err
+	}
+	prog.Dropped = dropped
+	return out, prog, nil
+}
+
+// StopCapture drops the session. Dropping a stopped session is what removes
+// the definition too, so there is nothing else to undo.
+func (s *Source) StopCapture(ctx context.Context, h source.CaptureHandle) error {
+	if !strings.HasPrefix(h.Name, capturePrefix) {
+		return fmt.Errorf("mssql: refusing to drop %q, which is not one of ours", h.Name)
+	}
+	q := fmt.Sprintf(stopCaptureQueryTemplate, h.Name)
+	return s.exec(ctx, q)
 }
