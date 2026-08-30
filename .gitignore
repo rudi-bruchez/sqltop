@@ -32,3 +32,9 @@ go.work.sum
 .vscode/
 
 bench/
+
+# Compiled binaries. Named rather than globbed: the build output sits at the
+# repository root and shares its name with the module, so a pattern broad
+# enough to catch it would also catch a directory someone adds later.
+/sqltop
+/sqlstress/sqlstress
