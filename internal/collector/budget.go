@@ -247,6 +247,33 @@ func (b *Budget) Period(tier model.Tier) time.Duration {
 	return base
 }
 
+// SetBase changes a tier's base period while the tool is running: spec
+// section 7's f command. It moves the value the throttle multiplies, never
+// the throttle's own decision, so a period chosen by hand is still halved
+// when the budget is exceeded rather than overriding the one control that
+// protects the monitored server.
+//
+// escalateCooldown is recomputed because it is derived from the space
+// period; leaving it behind would silently outlast the delay it was
+// derived from, which is the mistake its own comment records.
+func (b *Budget) SetBase(tier model.Tier, d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch tier {
+	case model.TierRequests:
+		b.base.Requests = config.Duration(d)
+	case model.TierCounters:
+		b.base.Counters = config.Duration(d)
+	case model.TierSpace:
+		b.base.Space = config.Duration(d)
+	case model.TierCPUHistory:
+		b.base.CPUHistory = config.Duration(d)
+	default:
+		panic(fmt.Sprintf("collector: unknown tier %v", tier))
+	}
+	b.escalateCooldown = budgetWindow + 2*b.base.Space.Std()
+}
+
 // baseFor and degradedFrom together are the one place spec section 10's
 // degradation order (tier C, then tier B, then tier A) and its exception
 // (tier D is never throttled) are expressed. Both panic on a tier outside

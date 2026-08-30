@@ -62,8 +62,20 @@
   <span id="rowCount">0 requests</span>
   <span id="seq"></span>
   <span id="cost"></span>
+  <span id="notice" class="notice" role="status" aria-live="polite"></span>
+  <span id="rate"></span>
+  <span id="pauseMark" class="pauseMark" hidden>paused</span>
   <button type="button" id="colsBtn" class="barBtn">columns</button>
+  <button type="button" id="helpBtn" class="barBtn">?</button>
 </footer>
+
+<dialog id="helpDialog" class="panel">
+  <form method="dialog">
+    <h2>commands</h2>
+    <dl id="helpList" class="helpList"></dl>
+    <menu><button value="close">close</button></menu>
+  </form>
+</dialog>
 
 <!-- Visibility only. The order is changed by dragging a heading, which is
      the gesture people try first, and a list that reshuffled itself under

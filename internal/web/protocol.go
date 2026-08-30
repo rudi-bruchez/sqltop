@@ -318,6 +318,11 @@ type StatusPayload struct {
 	// inside the throttle message, which only renders once the tool is
 	// already throttled.
 	CostMsPerSecond float64 `json:"costMsPerSecond"`
+	// PeriodMs is how often the request tier is currently sampled, throttle
+	// included. The interface reads it to show the real refresh rate and to
+	// know where on its ladder the f command should step next, so the two
+	// cannot disagree about a period the budget moved on its own.
+	PeriodMs int64 `json:"periodMs,omitempty"`
 }
 
 // startedAtMillis converts the instance start time for the wire, mapping
@@ -353,6 +358,7 @@ func newStatusPayload(st collector.Status) StatusPayload {
 		StartedAt:       startedAtMillis(st.Info.StartedAt),
 		Caps:            capNames(st.Caps),
 		CostMsPerSecond: st.CostMsPerSecond,
+		PeriodMs:        st.Period.Milliseconds(),
 	}
 }
 

@@ -72,7 +72,13 @@ func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Se
 		ln.Close()
 		return nil, fmt.Errorf("web: token: %w", err)
 	}
-	return &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln}, nil
+	// Built with the defaults rather than with a zero Config: every path
+	// that reads the configuration (the dashboard, the grid columns, the
+	// two endpoints that validate against it) then has one shape to handle
+	// instead of two, and a test server behaves like a real one that
+	// happened to find no file.
+	srv := &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln}
+	return srv.WithConfig(config.Default()), nil
 }
 
 // URL is what the tool prints and opens on startup. The token travels in the
@@ -108,27 +114,19 @@ func (s *Server) Close() error {
 	return s.listener.Close()
 }
 
-// dashboard is what a new client is told to draw. A server that was never
-// given a configuration falls back to the whole catalogue, so a run on
-// built-in defaults shows everything rather than nothing.
+// dashboard and gridColumns are what a new client is told to draw. Both are
+// resolved once by WithConfig, which NewServer always calls, so there is no
+// unconfigured case to fall back from.
 func (s *Server) dashboard() []DashGroup {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.dash != nil {
-		return s.dash
-	}
-	return resolveDashboard(config.DefaultLayout().Dashboard)
+	return s.dash
 }
 
-// gridColumns is what a new client draws. Same fallback as dashboard: no
-// configuration means the catalogue's own defaults.
 func (s *Server) gridColumns() []GridCol {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.grid != nil {
-		return s.grid
-	}
-	return resolveGrid("requests", config.Default().Columns("requests"))
+	return s.grid
 }
 
 // route pairs a path with the handler that serves it.
@@ -153,6 +151,8 @@ func (s *Server) routes() ([]route, error) {
 		{"/api/status", http.HandlerFunc(s.status)},
 		{"/api/stream", http.HandlerFunc(s.stream)},
 		{"/api/layout", http.HandlerFunc(s.layout)},
+		{"/api/period", http.HandlerFunc(s.period)},
+		{"/api/snapshot", http.HandlerFunc(s.snapshot)},
 	}, nil
 }
 

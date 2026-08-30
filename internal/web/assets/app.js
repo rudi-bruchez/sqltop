@@ -465,6 +465,22 @@ function buildColumnPanel() {
     });
   }
 }
+
+// The commands of spec section 7, in one list: the help dialog is generated
+// from it and the key handler dispatches from it, so a command cannot exist
+// in one and not the other. app_commands_test.go checks that this list and
+// the handler's own table cover each other.
+const COMMANDS = [
+  ["s", "save the current state to snapshots/ beside the binary"],
+  ["p", "pause and resume the display"],
+  ["f", "cycle the refresh period"],
+  ["h", "this list"],
+];
+
+function buildHelp() {
+  $("helpList").innerHTML = COMMANDS.map(([k, what]) =>
+    `<dt>${esc(k)}</dt><dd>${esc(what)}</dd>`).join("");
+}
 //
 // setup-region: end
 
@@ -533,22 +549,121 @@ function moveColumn(from, to) {
   applyColumns();
 }
 
+// post is the one place this page writes to the server. Every endpoint
+// answers JSON and refuses anything but POST, so a failure is a body worth
+// showing rather than a status code to guess from.
+function post(path, body, type) {
+  return fetch(path + "?t=" + encodeURIComponent(token), {
+    method: "POST",
+    headers: { "Content-Type": type },
+    body: body,
+  }).then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(new Error(t.trim())))));
+}
+
+// Command feedback goes to its own element. It used to share #message with
+// the collector, which rewrites that line on every tick from the server's
+// own status, so "snapshot written to ..." survived for one tick at most and
+// usually for none.
+let noticeTimer = 0;
+function say(text) {
+  $("notice").textContent = text;
+  clearTimeout(noticeTimer);
+  if (text) noticeTimer = setTimeout(() => { $("notice").textContent = ""; }, 8000);
+}
+
 // saveLayout writes the current selection and order back to sqltop.yaml,
 // through the server, which owns that file. Spec section 8.2: a layout
 // survives a change of browser and can be handed to a colleague, which
 // local storage cannot do.
 function saveLayout() {
-  fetch("/api/layout?t=" + encodeURIComponent(token), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      view: "requests",
-      columns: colOrder.map((f) => ({ field: f, show: colShown.has(f), width: colWidth.get(f) || 0 })),
-    }),
-  }).then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(new Error(t)))))
-    .then((r) => { $("message").textContent = "layout saved to " + r.path; })
-    .catch((e) => { $("message").textContent = "could not save the layout: " + e.message; });
+  const columns = colOrder.map((f) => ({ field: f, show: colShown.has(f), width: colWidth.get(f) || 0 }));
+  post("/api/layout", JSON.stringify({ view: "requests", columns }), "application/json")
+    .then((r) => say("layout saved to " + r.path))
+    .catch((e) => say("could not save the layout: " + e.message));
 }
+
+// Paused freezes what is on screen. The stream is left running and its
+// references are still absorbed, so resuming does not find rows whose SQL
+// text was sent while nobody was listening: the server sends a reference
+// once and never again while the session is alive.
+let paused = false;
+function togglePause() {
+  paused = !paused;
+  $("pauseMark").hidden = !paused;
+  if (!paused) say("");
+  else say("display paused, press p to resume");
+}
+
+// The ladder the f command steps through. Fixed rather than typed in:
+// pressing one key is the whole point, and these are the periods anybody
+// actually wants.
+const RATES = [1000, 2000, 5000, 10000, 30000];
+let rateIdx = -1;
+let periodMs = 0;
+
+// cycleFrequency changes how often the tool samples the server, not how
+// often the page redraws: the sampling rate is what costs the monitored
+// instance anything, and slowing down on a struggling server is the whole
+// reason to have this key.
+function cycleFrequency() {
+  if (rateIdx < 0) {
+    rateIdx = RATES.findIndex((r) => r > periodMs);
+    if (rateIdx < 0) rateIdx = 0;
+  } else {
+    rateIdx = (rateIdx + 1) % RATES.length;
+  }
+  post("/api/period", JSON.stringify({ period: RATES[rateIdx] + "ms" }), "application/json")
+    .then((r) => say("sampling every " + r.period))
+    .catch((e) => say("could not change the refresh period: " + e.message));
+}
+
+// snapshotHTML writes the state out as one standalone document. The grid is
+// virtualised, so the live DOM holds about forty rows of however many the
+// view has; saving the document would save the scroll position rather than
+// the state, hence the full table below. The header, the identity row and
+// the dashboard are taken from the page as they stand, which is what makes
+// the file look like what was on screen.
+function snapshotHTML() {
+  const stamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const active = [...filters].map(([f, t]) => f + " " + t).join(", ") || "none";
+  const sorted = sortField ? sortField + (sortDir === 1 ? " ascending" : " descending") : "none";
+  return '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' +
+    `<title>sqltop ${esc($("instance").textContent)} ${esc(stamp)}</title>` +
+    `<style>${document.querySelector("style").textContent}` +
+    // A snapshot is a document, not an application: it scrolls with the
+    // page instead of inside a pane sized to a window that is not there.
+    "body{height:auto;display:block}#grid{width:100%}</style></head><body>" +
+    `<header><h1>sqltop</h1><div class="conn"><span>${esc($("instance").textContent)}</span></div>` +
+    `<div class="build">${esc($("build").textContent)}</div></header>` +
+    $("serverInfo").outerHTML +
+    `<p class="message">snapshot ${esc(stamp)}, filters: ${esc(active)}, sort: ${esc(sorted)}, ` +
+    `${view.length} of ${data.length} requests</p>` +
+    `<div class="dashBody">${$("dashBody").innerHTML}</div>` +
+    `<table id="grid"><thead><tr>${COLUMNS.map((c) => `<th>${esc(c.title)}</th>`).join("")}</tr></thead><tbody>` +
+    view.map((r) => "<tr>" + COLUMNS.map((c) => `<td>${cellHTML(c, r)}</td>`).join("") + "</tr>").join("") +
+    "</tbody></table></body></html>";
+}
+
+function saveSnapshot() {
+  post("/api/snapshot", snapshotHTML(), "text/html")
+    .then((r) => say("snapshot written to " + r.path))
+    .catch((e) => say("could not write the snapshot: " + e.message));
+}
+
+function toggleHelp() {
+  const d = $("helpDialog");
+  if (d.open) d.close();
+  else d.showModal();
+}
+
+// One entry per command, keyed the way the keyboard reports it. The keys
+// here and the keys in COMMANDS are checked against each other by a test.
+const KEYS = {
+  s: saveSnapshot,
+  p: togglePause,
+  f: cycleFrequency,
+  h: toggleHelp,
+};
 
 // setFilter is the single place a filter box changes. Typing, Escape and the
 // clear button all go through it, so the value, the highlight, the clear
@@ -738,6 +853,12 @@ function applyStatus(st, seq) {
   // Spec section 10: an instrument that claims to bound its own cost shows
   // it at all times, not only once it has already throttled itself.
   $("cost").textContent = "cost: " + Math.round(st.costMsPerSecond || 0) + " ms/s";
+  // The rate the tool is actually sampling at, which is not always the one
+  // that was asked for: the budget halves it when the tool costs the server
+  // too much, and a status bar that showed the request would be wrong
+  // exactly when it mattered.
+  periodMs = st.periodMs || 0;
+  $("rate").textContent = periodMs ? "every " + (periodMs >= 1000 ? periodMs / 1000 + " s" : periodMs + " ms") : "";
 }
 
 const es = new EventSource("/api/stream?t=" + encodeURIComponent(token));
@@ -748,6 +869,13 @@ es.addEventListener("snapshot", (e) => {
   if (p.cols) setCols(p.cols);
   if (p.grid) setGrid(p.grid);
   if (p.dash) buildDashboard(p.dash);
+  if (paused) {
+    // Absorbed even while frozen: a reference is sent once for the life of
+    // a session, so dropping one here would leave a row permanently
+    // without its SQL text after resuming.
+    if (p.refs) for (const [k, v] of Object.entries(p.refs)) refs.set(k, v);
+    return;
+  }
   data = p.rows || [];
   caps = new Set((p.status && p.status.caps) || []);
 
@@ -803,6 +931,21 @@ function remember(el, key) {
 remember($("dashboard"), "sqltop.dashboard.open");
 $("colsBtn").addEventListener("click", () => $("colDialog").showModal());
 $("colSave").addEventListener("click", saveLayout);
+$("helpBtn").addEventListener("click", toggleHelp);
+buildHelp();
+
+// Single keypresses, in the spirit of top and of the PowerShell prototype.
+// Ignored while the focus is in a filter box, or the letters would be
+// commands instead of text; modifiers are left to the browser.
+globalThis.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  const fn = KEYS[e.key];
+  if (!fn) return;
+  e.preventDefault();
+  fn();
+});
 // Counts locally: it keeps moving while the connection is down, which is
 // honest, the instance is still up and this tool just cannot see it.
 setInterval(updateUptime, 1000);

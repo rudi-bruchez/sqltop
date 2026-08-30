@@ -247,7 +247,6 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 .na { color: var(--dim); font-style: italic; }
 
 .barBtn {
-  margin-left: auto;
   background: #1c1f26;
   color: inherit;
   border: 1px solid #2a2e37;
@@ -257,6 +256,8 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
   cursor: pointer;
 }
 .barBtn:hover { background: #262a33; }
+/* Pushes both buttons to the right end of the bar. */
+#colsBtn { margin-left: auto; }
 
 /* The column being dragged onto, so the drop is not a guess. */
 th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
@@ -291,3 +292,16 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
   overflow-y: auto;
 }
 .colItem { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.pauseMark {
+  background: #d08770;
+  color: #14161a;
+  border-radius: 3px;
+  padding: 0 6px;
+  font-weight: 600;
+}
+.helpList { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; }
+.helpList dt { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #6fb3d2; }
+.helpList dd { margin: 0; }
+
+.notice { color: #8fbf7f; }

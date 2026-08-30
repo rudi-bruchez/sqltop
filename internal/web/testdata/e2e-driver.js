@@ -278,6 +278,47 @@ out.columns = await json(`(() => {
            rows: view.length, afterShow: order() };
 })()`);
 
+// The single-keypress commands of spec section 7, pressed the way a person
+// presses them: a keydown on the window, not a call to the function behind
+// it, so the dispatch and the guard against typing in a filter box are both
+// under test.
+const key = (k) => `globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true }))`;
+out.commands = {};
+
+await ev(key("h"));
+out.commands.help = await json(`({ open: document.getElementById("helpDialog").open, entries: document.querySelectorAll("#helpList dt").length })`);
+await ev(key("h"));
+out.commands.helpClosed = await ev(`!document.getElementById("helpDialog").open`);
+
+// A letter typed into a filter box is a letter, not a command.
+await ev(`document.getElementById("f-database").focus()`);
+await ev(`document.getElementById("f-database").dispatchEvent(new KeyboardEvent("keydown", { key: "p", bubbles: true }))`);
+out.commands.pausedByTyping = await ev(`paused`);
+await ev(`document.getElementById("f-database").blur()`);
+
+await ev(key("p"));
+const frozenAt = await ev(`document.getElementById("seq").textContent`);
+await sleep(900);
+out.commands.pause = {
+  on: await ev(`paused`),
+  marked: await ev(`!document.getElementById("pauseMark").hidden`),
+  before: frozenAt,
+  after: await ev(`document.getElementById("seq").textContent`),
+};
+await ev(key("p"));
+await sleep(900);
+out.commands.resumed = { on: await ev(`paused`), seq: await ev(`document.getElementById("seq").textContent`) };
+
+await ev(key("s"));
+await sleep(900);
+out.commands.snapshotMessage = await ev(`document.getElementById("notice").textContent`);
+out.commands.rowsWhenSaved = await ev(`view.length`);
+
+// Last, because it slows the stream down for everything after it.
+await ev(key("f"));
+await sleep(2500);
+out.commands.rate = await ev(`document.getElementById("rate").textContent`);
+
 console.log(JSON.stringify(out));
 ws.close();
 Deno.exit(0);

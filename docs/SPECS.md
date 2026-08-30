@@ -372,10 +372,55 @@ PowerShell prototype. Shortcuts are shown in the tab labels.
 | Waits | `w` | Two sub-modes toggled with `c`: current waits per request, and cumulative wait statistics differentiated over the window | `sys.dm_os_waiting_tasks`, `sys.dm_os_wait_stats` |
 | Repetitive queries | `q` | Aggregation of the retention window by `query_hash`: executions seen, distinct sessions, total CPU, average and maximum elapsed, one sample text. This is what catches the query that is individually fast and collectively ruinous | Derived from stored samples |
 | Throughput | `t` | Request counts and rates over the window: active requests, batch requests/sec, compilations, recompilations, by database and by command | Derived, plus `SQL Statistics` |
-| Programs | `p` | Aggregation by program name and login | Derived |
+| Programs | `a` | Aggregation by program name and login. `a` for applications: `p` is pause | Derived |
 
 Views are projections of one shared retention window. Switching views does not
 re-query the server.
+
+### 7.1 Commands
+
+Four keys that are not views. They are single presses, like `top`, and they
+are ignored while the focus is in a filter box, or the letters would be
+commands instead of text.
+
+| Key | Does |
+|---|---|
+| `s` | Saves the state to `snapshots/server-yyyy-mm-dd-hhmmss.html` beside the binary |
+| `p` | Pauses and resumes the display |
+| `f` | Steps the refresh period through 1, 2, 5, 10 and 30 seconds |
+| `h` | Shows the list of commands |
+
+The list is generated from one table in the page, which the key handler also
+dispatches from, so a command cannot be bound without being listed or listed
+without being bound.
+
+On `s`. The grid is virtualised: the document holds about forty rows of
+however many the view has, so saving the document would save the scroll
+position rather than the state. The page therefore writes the table out in
+full and posts one standalone document, styles inlined and no script, which
+the server writes to disk. The name resolves to the second, so two presses
+inside one second would collide; the second gets a numeric suffix rather
+than overwriting a file somebody asked for. Composing it in the browser
+rather than rendering it again in Go is deliberate: what the command saves
+is what is on screen, filters, sort and dashboard included, and a second
+renderer in Go would be a second implementation of the whole interface kept
+in step with the first by hope.
+
+On `p`. The stream is left running and its reference table is still
+absorbed while frozen, because the server sends a session's SQL text once
+and never again while that session is alive; dropping those would leave rows
+permanently blank after resuming.
+
+On `f`. It changes the sampling rate, not the rate at which the browser
+redraws. Sampling is the number the monitored instance pays for, and slowing
+down on a struggling server is the whole reason to have the key. It is a
+runtime choice and is not written to the configuration file: a rate picked
+for the next ten minutes is not a preference. The value passes the same
+floor and ceiling a period typed into the file does, through the same code.
+The status bar shows the period the tool is actually running at rather than
+the one that was asked for, because the budget halves it when the tool costs
+the server too much, and a status bar that showed the request would be wrong
+exactly when it mattered.
 
 ## 8. Request grid
 

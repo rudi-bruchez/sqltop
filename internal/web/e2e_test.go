@@ -46,7 +46,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Skip("deno not installed; the DevTools protocol needs a WebSocket and Go's standard library has none")
 	}
 
-	srv, stop := browserTestServer(t)
+	srv, snapDir, stop := browserTestServer(t)
 	defer stop()
 
 	// Not t.TempDir: chromium goes on writing into its profile while it
@@ -195,6 +195,41 @@ func TestEndToEndInABrowser(t *testing.T) {
 	if got.Columns.PoolCells != len(got.Columns.AfterShow) {
 		t.Errorf("after switching a column back on the row pool has %d cells per row and the header has %d columns (%d rows in view)", got.Columns.PoolCells, len(got.Columns.AfterShow), got.Columns.Rows)
 	}
+
+	// The single-keypress commands of spec section 7.
+	if !got.Commands.Help.Open || got.Commands.Help.Entries == 0 {
+		t.Errorf("h left the help dialog open=%v with %d entries", got.Commands.Help.Open, got.Commands.Help.Entries)
+	}
+	if !got.Commands.HelpClosed {
+		t.Error("h a second time did not close the help dialog")
+	}
+	if got.Commands.PausedByTyping {
+		t.Error("typing p into a filter box paused the display; the letters have to reach the box")
+	}
+	if !got.Commands.Pause.On || !got.Commands.Pause.Marked {
+		t.Errorf("p left paused=%v with the marker shown=%v", got.Commands.Pause.On, got.Commands.Pause.Marked)
+	}
+	if got.Commands.Pause.Before != got.Commands.Pause.After {
+		t.Errorf("the display went on updating while paused: tick %q became %q", got.Commands.Pause.Before, got.Commands.Pause.After)
+	}
+	if got.Commands.Resumed.On {
+		t.Error("p a second time did not resume")
+	}
+	if got.Commands.Resumed.Seq == got.Commands.Pause.After {
+		t.Errorf("the display is still frozen after resuming: tick %q", got.Commands.Resumed.Seq)
+	}
+	if !strings.HasPrefix(got.Commands.SnapshotMessage, "snapshot written to ") {
+		t.Errorf("s reported %q", got.Commands.SnapshotMessage)
+	}
+	if !strings.Contains(got.Commands.Rate, "1 s") {
+		t.Errorf("after f the status bar shows the rate as %q, want the 1 s the ladder steps to first", got.Commands.Rate)
+	}
+
+	// The saved file is the state, not the scroll position: the grid is
+	// virtualised, so the document holds about forty rows of however many
+	// the view has, and a snapshot of the DOM would silently be a snapshot
+	// of what happened to be on screen.
+	checkSnapshotFile(t, snapDir, got.Commands.RowsWhenSaved)
 
 	// The honesty rule, end to end, on three figures that reach the page by
 	// three different routes.
@@ -385,6 +420,27 @@ type e2eResult struct {
 		Rows      int      `json:"rows"`
 		AfterShow []string `json:"afterShow"`
 	} `json:"columns"`
+	Commands struct {
+		Help struct {
+			Open    bool `json:"open"`
+			Entries int  `json:"entries"`
+		} `json:"help"`
+		HelpClosed     bool `json:"helpClosed"`
+		PausedByTyping bool `json:"pausedByTyping"`
+		Pause          struct {
+			On     bool   `json:"on"`
+			Marked bool   `json:"marked"`
+			Before string `json:"before"`
+			After  string `json:"after"`
+		} `json:"pause"`
+		Resumed struct {
+			On  bool   `json:"on"`
+			Seq string `json:"seq"`
+		} `json:"resumed"`
+		SnapshotMessage string `json:"snapshotMessage"`
+		RowsWhenSaved   int    `json:"rowsWhenSaved"`
+		Rate            string `json:"rate"`
+	} `json:"commands"`
 	Identity    map[string]string `json:"identity"`
 	ClearButton struct {
 		HiddenWhenEmpty   bool `json:"hiddenWhenEmpty"`
@@ -412,7 +468,7 @@ type e2eResult struct {
 // fill more than one screen, spread over several databases and a wide range
 // of CPU so sorting and filtering have something to bite on, and three
 // dashboard figures chosen to exercise the three states a tile can be in.
-func browserTestServer(t *testing.T) (*Server, func()) {
+func browserTestServer(t *testing.T) (*Server, string, func()) {
 	t.Helper()
 
 	dbs := []string{"alpha", "beta", "gamma", "delta"}
@@ -482,12 +538,54 @@ func browserTestServer(t *testing.T) (*Server, func()) {
 	cfg := config.Default()
 	cfg.Layouts = map[string]config.Layout{"default": layout}
 	srv = srv.WithConfig(cfg)
+
+	// The s command writes beside the executable, which during a test is
+	// wherever go test put the binary. Point it at a temporary directory
+	// instead, and hand the path back so the assertions can read the file.
+	snaps := filepath.Join(t.TempDir(), "snapshots")
+	snapshotsInto(t, snaps)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	go c.Run(ctx)
 	go func() { _ = srv.Serve(ctx) }()
-	return srv, func() {
+	return srv, snaps, func() {
 		cancel()
 		_ = srv.Close()
+	}
+}
+
+// checkSnapshotFile reads what the s command wrote and asserts it is a
+// standalone document holding every row the view had, not the handful the
+// virtualised grid kept in the DOM.
+func checkSnapshotFile(t *testing.T, dir string, wantRows int) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("the s command created no snapshots directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("the snapshots directory holds %d files, want 1", len(entries))
+	}
+	if !snapshotName.MatchString(entries[0].Name()) {
+		t.Errorf("the snapshot is named %q, not server-yyyy-mm-dd-hhmmss.html", entries[0].Name())
+	}
+	b, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	if !strings.HasPrefix(body, "<!DOCTYPE html>") {
+		t.Errorf("the snapshot does not start with a doctype: %.60q", body)
+	}
+	if !strings.Contains(body, "<style>") {
+		t.Error("the snapshot carries no stylesheet, so it would open as an unstyled dump")
+	}
+	if strings.Contains(body, "<script") {
+		t.Error("the snapshot carries a script; a saved state is a document, not a running application")
+	}
+	// One <tr> per row, plus the header row.
+	if n := strings.Count(body, "<tr>"); n != wantRows+1 {
+		t.Errorf("the snapshot holds %d rows and the view had %d; the virtualised grid keeps about forty in the DOM, which is what a document-level save would have caught", n-1, wantRows)
 	}
 }
 

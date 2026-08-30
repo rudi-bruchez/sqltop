@@ -43,6 +43,10 @@ type Status struct {
 	// too high to be useful as an instrument. Carried here unconditionally,
 	// not only while throttled, so the status bar can show it at all times.
 	CostMsPerSecond float64
+	// Period is the interval the request tier is currently sampled at,
+	// throttle included: the f command changes the base and the budget can
+	// still double it, so the two are not the same number.
+	Period time.Duration
 }
 
 // Collector drives one Source: one goroutine per tier, each on its own
@@ -312,6 +316,13 @@ func (c *Collector) Period(tier model.Tier) time.Duration {
 	return c.bud.Period(tier)
 }
 
+// SetPeriod changes a tier's base period. The tier goroutines re-read their
+// period on every iteration, so a change takes effect on the next tick
+// without anything having to be restarted or signalled.
+func (c *Collector) SetPeriod(tier model.Tier, d time.Duration) {
+	c.bud.SetBase(tier, d)
+}
+
 func (c *Collector) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -334,10 +345,14 @@ func (c *Collector) Status() Status {
 		// connection, which is what identifyErr actually measures. Found
 		// by an external reviewer looking at the dashboard rather than at
 		// the grid it was written for.
-		Connected:       c.identifyErr == "",
-		Message:         c.messageLocked(),
-		Info:            c.info,
-		Caps:            c.caps,
+		Connected: c.identifyErr == "",
+		Message:   c.messageLocked(),
+		Info:      c.info,
+		Caps:      c.caps,
+		// Period is the request tier's current interval, throttle
+		// included, so the status bar can state the refresh rate the tool
+		// is actually running at rather than the one that was asked for.
+		Period:          c.bud.Period(model.TierRequests),
 		CostMsPerSecond: used,
 	}
 }
