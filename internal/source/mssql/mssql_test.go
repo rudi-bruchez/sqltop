@@ -3,10 +3,16 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
 	"github.com/rudi-bruchez/sqltop/internal/source"
@@ -75,6 +81,188 @@ func TestIdentifyReportsVersionAndCapabilities(t *testing.T) {
 	}
 	if !caps.Has(model.CapInstanceWideView) {
 		t.Error("a container instance is not Azure SQL Database, so the instance-wide view must be advertised")
+	}
+}
+
+// TestIsCapabilityAbsentReportsConnectionFailuresFirst covers the one
+// branch neither of the two integration tests below reaches: the sentinel
+// errors a broken pinned connection reports directly, ahead of even asking
+// whether err is an mssql.ServerError. No database needed - these are real
+// standard-library sentinel values, not a mock of engine behaviour, so this
+// stays within "test the pure parts" rather than testing that a SQL string
+// equals a SQL string.
+func TestIsCapabilityAbsentReportsConnectionFailuresFirst(t *testing.T) {
+	for _, err := range []error{driver.ErrBadConn, sql.ErrConnDone} {
+		if isCapabilityAbsent(err) {
+			t.Errorf("isCapabilityAbsent(%v) = true, want false: a broken connection is not a capability answer at all", err)
+		}
+	}
+}
+
+// TestIsCapabilityAbsentDoesNotMisclassifyAFatalServerError is the other
+// half of isCapabilityAbsent's coverage, and the half that actually pins
+// down the ordering the function's own doc comment worries about.
+// TestIsCapabilityAbsentClassifiesRealPermissionDenials below proves the
+// function's true path works, but every error it sees there is a plain,
+// non-fatal mssql.Error - it would pass identically with the two type
+// assertions swapped, because a permission-denied error was never wrapped
+// in mssql.ServerError to begin with. This test forces the shape that
+// swap actually breaks: a severity 20 RAISERROR WITH LOG is fatal enough
+// that go-mssqldb reports it as mssql.ServerError, which wraps an
+// mssql.Error - verified against this container: errors.As matches both
+// mssql.ServerError and mssql.Error on the very same error value. Checking
+// mssql.Error first, the swap this guards against, would call that
+// "capability absent" instead of "the connection just failed", which is
+// exactly the silent under-reporting-with-a-nil-error failure the review
+// finding described.
+func TestIsCapabilityAbsentDoesNotMisclassifyAFatalServerError(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	var n int
+	err := s.queryRow(ctx, "RAISERROR('sqltop test: forced fatal error', 20, 1) WITH LOG", &n)
+	if err == nil {
+		t.Fatal("a severity 20 RAISERROR WITH LOG produced no error; this test's premise needs sysadmin, which the container's sa login always has")
+	}
+
+	var srvErr mssql.ServerError
+	if !errors.As(err, &srvErr) {
+		t.Fatalf("err = %v (%T), want an mssql.ServerError - the test's own premise did not hold on this server", err, err)
+	}
+	var capErr mssql.Error
+	if !errors.As(err, &capErr) {
+		t.Fatal("err does not also match mssql.Error; the whole point of this test, that ServerError wraps Error, does not hold here")
+	}
+
+	if isCapabilityAbsent(err) {
+		t.Fatalf("isCapabilityAbsent(%v) = true, want false: a fatal server error that severed the connection must not be classified the same as an ordinary capability denial", err)
+	}
+}
+
+// lowPrivLogin is created and dropped by openLowPrivileged. Named so a run
+// that panics or is killed mid-test does not need guessing to clean up by
+// hand; the helper itself also drops any login left behind by a previous
+// run before creating its own.
+const (
+	lowPrivLogin    = "sqltop_lowpriv_test"
+	lowPrivPassword = "Sqltop_lowpriv_2026!"
+)
+
+// openLowPrivileged connects with a purpose-built SQL login holding no
+// right beyond the CONNECT SQL every login gets through public: no VIEW
+// SERVER STATE, no VIEW SERVER PERFORMANCE STATE, membership in no role.
+// It exists because the container's own sa login, which every other test
+// in this file connects as, holds every right there is - proving only that
+// probe's granted path works, never its denied one, which is what
+// isCapabilityAbsent exists to classify correctly. Spec section 3.1's own
+// permission table is what this login is built to fall short of.
+//
+// The login is provisioned from a second, admin connection using the same
+// credentials SQLTOP_TEST_DSN already carries, and dropped by t.Cleanup
+// once the test using it is done, in the reverse order those two things
+// happened: the login first, then the admin connection it needed to do
+// that with.
+func openLowPrivileged(t *testing.T) *Source {
+	t.Helper()
+	adminDSN := os.Getenv("SQLTOP_TEST_DSN")
+	if adminDSN == "" {
+		if os.Getenv("SQLTOP_REQUIRE_DB") != "" {
+			t.Fatal("SQLTOP_TEST_DSN is unset and SQLTOP_REQUIRE_DB is set; run: eval \"$(scripts/testdb.sh)\"")
+		}
+		t.Skip("SQLTOP_TEST_DSN is unset; run: eval \"$(scripts/testdb.sh)\"")
+	}
+
+	admin, err := sql.Open("sqlserver", adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// DROP first: a previous run that panicked or was killed mid-test can
+	// leave the login behind, and CREATE LOGIN on a name that already
+	// exists errors rather than replacing it.
+	dropLowPriv := fmt.Sprintf("IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = '%s') DROP LOGIN [%s]", lowPrivLogin, lowPrivLogin)
+	if _, err := admin.ExecContext(ctx, dropLowPriv); err != nil {
+		admin.Close()
+		t.Fatalf("dropping any previous %s: %v", lowPrivLogin, err)
+	}
+	createLowPriv := fmt.Sprintf("CREATE LOGIN [%s] WITH PASSWORD = '%s', CHECK_POLICY = OFF", lowPrivLogin, lowPrivPassword)
+	if _, err := admin.ExecContext(ctx, createLowPriv); err != nil {
+		admin.Close()
+		t.Fatalf("creating %s: %v", lowPrivLogin, err)
+	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := admin.ExecContext(cctx, dropLowPriv); err != nil {
+			t.Errorf("cleanup: dropping %s: %v", lowPrivLogin, err)
+		}
+		admin.Close()
+	})
+
+	dsnURL, err := url.Parse(adminDSN)
+	if err != nil {
+		t.Fatalf("parsing SQLTOP_TEST_DSN: %v", err)
+	}
+	dsnURL.User = url.UserPassword(lowPrivLogin, lowPrivPassword)
+
+	s := New()
+	if err := s.Open(ctx, dsnURL.String()); err != nil {
+		t.Fatalf("Open with %s: %v", lowPrivLogin, err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// TestIsCapabilityAbsentClassifiesRealPermissionDenials is the fix for a
+// review finding: isCapabilityAbsent carried a nine-line comment explaining
+// exactly how getting its two type-assertion checks in the wrong order
+// would misclassify a broken connection as an ordinary capability-absent
+// answer, and yet had 0 % coverage - every test in this package before it
+// connected as sa, which holds every right there is, so probe's can()
+// calls never once returned an error and isCapabilityAbsent was never
+// actually invoked. This is the honest way to exercise it: a login with no
+// rights beyond CONNECT SQL, hitting the server's own permission denials
+// (msg 297 and 300, verified by hand against this container) rather than a
+// mock.
+func TestIsCapabilityAbsentClassifiesRealPermissionDenials(t *testing.T) {
+	s := openLowPrivileged(t)
+	ctx := context.Background()
+
+	info, caps, err := s.Identify(ctx)
+	if err != nil {
+		t.Fatalf("Identify with a login holding no VIEW SERVER STATE right: %v, want no error - a denied capability must be absorbed into caps, not propagated as a connection failure", err)
+	}
+	if info.ProductVersion == "" {
+		t.Fatal("info.ProductVersion is empty; SERVERPROPERTY needs no special right and must still work even with every DMV denied")
+	}
+
+	// Every one of these is gated by a right this login does not hold, and
+	// every probe for it hit a genuine permission-denied error rather than
+	// a broken connection. isCapabilityAbsent is what tells those two
+	// apart; the bug the nine-line comment describes would have this login
+	// come back with the whole capability set silently under-reported for
+	// the wrong reason (a misclassified connection failure) rather than
+	// the right one (an actual, correctly diagnosed, denial) - connected
+	// true and no message either way, which is exactly why the coverage
+	// gap mattered: nothing here would look different from the outside.
+	for _, c := range []struct {
+		cap  model.Capability
+		name string
+	}{
+		{model.CapInstanceWideView, "CapInstanceWideView"},
+		{model.CapSchedulerLoad, "CapSchedulerLoad"},
+		{model.CapWaitStatsCumulative, "CapWaitStatsCumulative"},
+		{model.CapTempdbPerTask, "CapTempdbPerTask"},
+		{model.CapVersionStoreUsage, "CapVersionStoreUsage"},
+		{model.CapRingBufferCPU, "CapRingBufferCPU"},
+		{model.CapLivePlanProgress, "CapLivePlanProgress"},
+	} {
+		if caps.Has(c.cap) {
+			t.Errorf("%s granted to a login with no rights beyond CONNECT SQL", c.name)
+		}
 	}
 }
 
