@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -372,5 +373,61 @@ func TestStreamPeriodFollowsTheThrottleMidConnection(t *testing.T) {
 	gap := t2.Sub(t1)
 	if gap < want/2 {
 		t.Fatalf("gap after escalation = %v, want roughly %v (doubled): the stream must re-read the collector's throttled period on every tick, not the period observed when the connection opened", gap, want)
+	}
+}
+
+// TestStreamCadenceFollowsThePeriodEndpoint closes the loop the f command
+// walks: a keypress posts to /api/period, the endpoint moves the request
+// tier's base, and the stream, which re-reads that period on every tick,
+// starts pushing at the new rate on the connection that is already open.
+// Each of those three steps had a test and the whole path did not, which is
+// exactly the shape somebody doubts when the interface looks wrong.
+func TestStreamCadenceFollowsThePeriodEndpoint(t *testing.T) {
+	s := newTestServer(t)
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/stream?t="+s.token, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	readOneSnapshot(t, sc) // the send on connect
+
+	before := s.col.Period(model.TierRequests)
+	slower := before * 6
+	body := fmt.Sprintf(`{"period":%q}`, slower)
+	pr, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/period?t="+s.token, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pres, err := http.DefaultClient.Do(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pres.Body.Close()
+	if pres.StatusCode != http.StatusOK {
+		t.Fatalf("period returned %d", pres.StatusCode)
+	}
+
+	// The tick already in flight was armed at the old period, so one is
+	// allowed to arrive early; the two after it must not.
+	readOneSnapshot(t, sc)
+	t0 := time.Now()
+	readOneSnapshot(t, sc)
+	gap := time.Since(t0)
+	if gap < slower/2 {
+		t.Errorf("the stream is still pushing every %v after the period was set to %v; the f command would look like it did nothing", gap, slower)
+	}
+
+	// And the status the client reads has to agree, or the footer says one
+	// rate while the data arrives at another.
+	if got := readOneSnapshot(t, sc).Status.PeriodMs; got != slower.Milliseconds() {
+		t.Errorf("the snapshot reports a period of %d ms, want %d", got, slower.Milliseconds())
 	}
 }
