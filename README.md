@@ -92,5 +92,6 @@ material, not project documentation.
 | `scripts/` | Test container, demonstration database, version bump |
 | `docs/SPECS.md` | The specification, which is the authority |
 | `docs/QUERIES.md` | Every query the tool sends, generated from the code by a test |
+| `docs/PERFORMANCE.md` | What was optimised, what was measured, and what was measured and rejected |
 | `docs/plans/` | Implementation plans and the decisions taken while executing them |
 | `docs/` | Research notes, in their original French |

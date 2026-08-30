@@ -5,7 +5,12 @@
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const n0 = (v) => Math.round(v).toLocaleString("en-US");
+// One reused Intl.NumberFormat, not Number.prototype.toLocaleString, which
+// builds a formatter on every call. Profiled at 800 rows this was 115 ms of
+// the 1.4 s of JavaScript in a 45 second run, second only to layout itself
+// and about half the cost of a refresh.
+const nfInt = new Intl.NumberFormat("en-US");
+const n0 = (v) => nfInt.format(Math.round(v));
 const n2 = (v) => Number(v).toFixed(2);
 const NA = '<span class="num na">n/a</span>';
 
