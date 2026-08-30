@@ -151,25 +151,29 @@ const tiles = new Map();
 // showing: the period is not fixed, the budget slows the collector down.
 const span = [];
 
+// Every column carries three things: how to render it, how to read its raw
+// value for sorting and filtering, and whether that value is a number.
+// Rendering and comparing are separate on purpose: "1,234" sorts as text
+// between "1,2" and "1,3", and n/a is not a small number.
 const COLUMNS = [
-  { field: "spid", title: "spid", width: 60, html: (r) => `<span class="num">${val(r, "spid")}</span>` },
-  { field: "st", title: "status", width: 90 },
-  { field: "db", title: "database", width: 110 },
-  { field: "login", title: "login", width: 100, html: (r) => esc(ref(val(r, "ref")).login) },
-  { field: "host", title: "host", width: 95, html: (r) => esc(ref(val(r, "ref")).host) },
-  { field: "prg", title: "program", width: 200, html: (r) => esc(ref(val(r, "ref")).prg) },
-  { field: "cmd", title: "command", width: 110 },
-  { field: "w", title: "wait type", width: 150, html: (r) => waitBadge(val(r, "w")) },
-  { field: "wms", title: "wait ms", width: 85, html: (r) => `<span class="num">${n0(val(r, "wms"))}</span>` },
-  { field: "el", title: "elapsed ms", width: 100, html: (r) => `<span class="num">${n0(val(r, "el"))}</span>` },
-  { field: "cpu", title: "cpu ms", width: 90, html: (r) => `<span class="num">${n0(val(r, "cpu"))}</span>` },
-  { field: "rd", title: "reads", width: 95, html: (r) => `<span class="num">${n0(val(r, "rd"))}</span>` },
-  { field: "wr", title: "writes", width: 90, html: (r) => `<span class="num">${n0(val(r, "wr"))}</span>` },
-  { field: "tdb", title: "tempdb MB", width: 100, html: (r) => (hasCap("tempdbPerTask") ? `<span class="num">${n2(val(r, "tdb"))}</span>` : NA) },
-  { field: "gr", title: "grant MB", width: 95, html: (r) => `<span class="num">${n2(val(r, "gr"))}</span>` },
-  { field: "dop", title: "dop", width: 55, html: (r) => (hasCap("requestDOP") ? `<span class="num">${val(r, "dop")}</span>` : NA) },
-  { field: "by", title: "blocked by", width: 95, html: (r) => (val(r, "by") ? `<span class="blocked">${val(r, "by")}</span>` : "") },
-  { field: "sql", title: "SQL text", width: 520, html: (r) => `<span class="sqlcell" style="padding-left:${val(r, "d") * 14}px">${esc(ref(val(r, "ref")).sql)}</span>` },
+  { field: "spid", title: "spid", width: 60, num: true, get: (r) => val(r, "spid"), html: (r) => `<span class="num">${val(r, "spid")}</span>` },
+  { field: "st", title: "status", width: 90, get: (r) => val(r, "st") },
+  { field: "db", title: "database", width: 110, get: (r) => val(r, "db") },
+  { field: "login", title: "login", width: 100, get: (r) => ref(val(r, "ref")).login, html: (r) => esc(ref(val(r, "ref")).login) },
+  { field: "host", title: "host", width: 95, get: (r) => ref(val(r, "ref")).host, html: (r) => esc(ref(val(r, "ref")).host) },
+  { field: "prg", title: "program", width: 200, get: (r) => ref(val(r, "ref")).prg, html: (r) => esc(ref(val(r, "ref")).prg) },
+  { field: "cmd", title: "command", width: 110, get: (r) => val(r, "cmd") },
+  { field: "w", title: "wait type", width: 150, get: (r) => val(r, "w"), html: (r) => waitBadge(val(r, "w")) },
+  { field: "wms", title: "wait ms", width: 85, num: true, get: (r) => val(r, "wms"), html: (r) => `<span class="num">${n0(val(r, "wms"))}</span>` },
+  { field: "el", title: "elapsed ms", width: 100, num: true, get: (r) => val(r, "el"), html: (r) => `<span class="num">${n0(val(r, "el"))}</span>` },
+  { field: "cpu", title: "cpu ms", width: 90, num: true, get: (r) => val(r, "cpu"), html: (r) => `<span class="num">${n0(val(r, "cpu"))}</span>` },
+  { field: "rd", title: "reads", width: 95, num: true, get: (r) => val(r, "rd"), html: (r) => `<span class="num">${n0(val(r, "rd"))}</span>` },
+  { field: "wr", title: "writes", width: 90, num: true, get: (r) => val(r, "wr"), html: (r) => `<span class="num">${n0(val(r, "wr"))}</span>` },
+  { field: "tdb", title: "tempdb MB", width: 100, num: true, get: (r) => val(r, "tdb"), html: (r) => (hasCap("tempdbPerTask") ? `<span class="num">${n2(val(r, "tdb"))}</span>` : NA) },
+  { field: "gr", title: "grant MB", width: 95, num: true, get: (r) => val(r, "gr"), html: (r) => `<span class="num">${n2(val(r, "gr"))}</span>` },
+  { field: "dop", title: "dop", width: 55, num: true, get: (r) => val(r, "dop"), html: (r) => (hasCap("requestDOP") ? `<span class="num">${val(r, "dop")}</span>` : NA) },
+  { field: "by", title: "blocked by", width: 95, num: true, get: (r) => val(r, "by"), html: (r) => (val(r, "by") ? `<span class="blocked">${val(r, "by")}</span>` : "") },
+  { field: "sql", title: "SQL text", width: 520, get: (r) => ref(val(r, "ref")).sql, html: (r) => `<span class="sqlcell" style="padding-left:${val(r, "d") * 14}px">${esc(ref(val(r, "ref")).sql)}</span>` },
 ];
 
 function waitBadge(w) {
@@ -185,9 +189,168 @@ function cellHTML(col, row) {
   return col.html ? col.html(row) : esc(val(row, col.field) ?? "");
 }
 
+// Sort and filter, spec section 8.1. Both run in the browser on data already
+// in the retention window, which section 10.1 settled by measuring every
+// client-side candidate against a server-side twin: the pairs do not
+// separate, and doing it in Go would cost a filter per viewer, a filter over
+// the history rather than over what was ever collected, and the ability to
+// tell a row that ended from a row that stopped matching.
+//
+// Debt: this state belongs in the named layout the server owns, spec section
+// 8.2, together with the folded groups above. Layouts do not exist yet.
+let sortField = null;
+let sortDir = 0; // 1 ascending, -1 descending, 0 unsorted
+const filters = new Map(); // field -> the raw text the user typed
+
+// filter-logic: begin
+//
+// parseFilter and matches are pure: no DOM, no state, no closure over
+// anything. web/filter_logic_test.go lifts this region out between these two
+// markers and runs it through deno against a table of cases, so the five
+// operators of section 8.1 are checked rather than tried once in a browser.
+// Moving either marker breaks that test loudly.
+//
+// parseFilter turns one typed box into one of the five operators of section
+// 8.1. The operator is inferred from what was typed rather than chosen from
+// a dropdown per column, because eighteen dropdowns is a lot of interface
+// for a grid, and > < = are what a person types anyway.
+//
+//	>1000       greater than, numeric
+//	<50         less than, numeric
+//	=SELECT     equals, exact but case-insensitive
+//	CRM,Ventes  in, any of the comma-separated values
+//	UPDATE      contains, the default
+function parseFilter(text) {
+  const t = text.trim();
+  if (t === "") return null;
+  for (const op of [">", "<", "="]) {
+    if (t.startsWith(op)) {
+      const rest = t.slice(op.length).trim();
+      if (rest === "") return null;
+      const n = Number(rest);
+      return { op: op, text: rest.toLowerCase(), num: Number.isFinite(n) ? n : null };
+    }
+  }
+  if (t.includes(",")) {
+    const parts = t.split(",").map((x) => x.trim().toLowerCase()).filter((x) => x !== "");
+    return parts.length ? { op: "in", values: parts } : null;
+  }
+  return { op: "contains", text: t.toLowerCase() };
+}
+
+// matches applies one parsed filter to one raw value. Text comparison is
+// case-insensitive throughout: a DBA hunting a runaway query is not also
+// spelling a database name in the right case.
+function matches(f, raw) {
+  if (f.op === ">" || f.op === "<") {
+    // A numeric comparison against a column that holds text is not an
+    // error worth reporting, it simply matches nothing.
+    if (f.num === null) return false;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return false;
+    return f.op === ">" ? v > f.num : v < f.num;
+  }
+  const sv = String(raw ?? "").toLowerCase();
+  if (f.op === "=") return sv === f.text;
+  if (f.op === "in") return f.values.includes(sv);
+  return sv.includes(f.text);
+}
+
+//
+// filter-logic: end
+
+// applyView filters then sorts. Filters on different columns combine with
+// AND; several values on one column through `in` combine with OR, which is
+// what `in` means. Section 8.1 says there is no interface for expressing
+// anything else, deliberately.
+function applyView(rows) {
+  let out = rows;
+
+  const active = [];
+  for (const [field, text] of filters) {
+    const f = parseFilter(text);
+    if (!f) continue;
+    const col = COLUMNS.find((c) => c.field === field);
+    if (col) active.push({ f: f, get: col.get });
+  }
+  if (active.length) {
+    out = out.filter((r) => active.every((a) => matches(a.f, a.get(r))));
+  }
+
+  if (sortField && sortDir) {
+    const col = COLUMNS.find((c) => c.field === sortField);
+    if (col) {
+      // A copy, because `data` is the array the snapshot handler owns and
+      // sorting in place would reorder it under the next tick's diff.
+      out = out.slice().sort((a, b) => {
+        const x = col.get(a), y = col.get(b);
+        if (col.num) return (Number(x) - Number(y)) * sortDir;
+        return String(x ?? "").localeCompare(String(y ?? ""), "en", { sensitivity: "base" }) * sortDir;
+      });
+    }
+  }
+  return out;
+}
+
+// setSort cycles a column: unsorted, ascending, descending, unsorted. A
+// third click clearing the sort matters because the unsorted order is the
+// server's, which is the blocking chain order the grid is built around.
+function setSort(field) {
+  if (sortField !== field) {
+    sortField = field;
+    sortDir = 1;
+  } else if (sortDir === 1) {
+    sortDir = -1;
+  } else {
+    sortField = null;
+    sortDir = 0;
+  }
+  markSort();
+  refresh();
+}
+
+function markSort() {
+  for (const c of COLUMNS) {
+    const el = $("sort-" + c.field);
+    if (!el) continue;
+    const mark = c.field === sortField ? (sortDir === 1 ? " \u25b2" : " \u25bc") : "";
+    if (el.textContent !== mark) el.textContent = mark;
+  }
+}
+
+// refresh recomputes the view and redraws. Called on a tick, and whenever
+// the sort or a filter changes, which is why it is separate from the
+// snapshot handler.
+//
+// keepSelection is what section 8.1 asks for: changing a filter re-anchors
+// on the selected row when it survives, and goes to the top when it does
+// not. The bench measured five lost scroll positions out of 122 ticks when
+// 800 rows became 110 while scrolled toward the bottom, which is the
+// content becoming shorter than the offset and the browser clamping it.
+function refresh(keepSelection) {
+  view = applyView(data);
+  if (keepSelection) anchor();
+  layout();
+  $("rowCount").textContent = n0(view.length) + (view.length === data.length ? " requests" : " of " + n0(data.length) + " requests");
+}
+
+function anchor() {
+  const sc = document.querySelector(".gridScroll");
+  if (!sc) return;
+  const i = selectedKey === null ? -1 : view.findIndex((r) => rowKey(r) === selectedKey);
+  if (i < 0) {
+    sc.scrollTop = 0;
+    return;
+  }
+  // Put it a third of the way down rather than at the very top, so the rows
+  // around it, which is the reason it was selected, stay on screen.
+  sc.scrollTop = Math.max(0, i * ROW_H - sc.clientHeight / 3);
+}
+
 const ROW_H = 22;   // must match the height fixed in style.css
 const OVERSCAN = 8; // rows rendered off screen, for clean scrolling
-let data = [];
+let data = [];   // what the server sent this tick
+let view = [];   // what the grid draws: data, filtered and sorted
 let selectedKey = null;
 const pool = []; // {tr, tds, key, prev}
 let spacerTop = null, spacerBottom = null;
@@ -199,7 +362,36 @@ let spacerTop = null, spacerBottom = null;
 // markers verbatim and takes the last of each, so there must be exactly one
 // region: read that test before touching them.
 function head() {
-  $("gridHead").innerHTML = COLUMNS.map((c) => `<th scope="col" style="min-width:${c.width}px">${esc(c.title)}</th>`).join("");
+  $("gridHead").innerHTML = COLUMNS.map((c) =>
+    `<th scope="col" style="min-width:${c.width}px"><button type="button" class="sortBtn" data-f="${esc(c.field)}" ` +
+    `title="sort by ${esc(c.title)}">${esc(c.title)}<span class="sortMark" id="sort-${esc(c.field)}"></span></button></th>`).join("");
+
+  // A second header row of filter boxes. One box per column, and the
+  // operator is read from what is typed: see parseFilter.
+  $("gridFilter").innerHTML = COLUMNS.map((c) =>
+    `<th><input class="filterBox" data-f="${esc(c.field)}" id="f-${esc(c.field)}" ` +
+    `aria-label="filter ${esc(c.title)}" placeholder="${c.num ? ">1000" : "filter"}"></th>`).join("");
+
+  for (const el of document.querySelectorAll(".sortBtn")) {
+    el.addEventListener("click", () => setSort(el.dataset.f));
+  }
+  for (const el of document.querySelectorAll(".filterBox")) {
+    el.addEventListener("input", () => {
+      if (el.value.trim() === "") filters.delete(el.dataset.f);
+      else filters.set(el.dataset.f, el.value);
+      el.classList.toggle("on", filters.has(el.dataset.f));
+      refresh(true);
+    });
+    // Escape clears the box it is in, which is the gesture people try.
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && el.value !== "") {
+        el.value = "";
+        filters.delete(el.dataset.f);
+        el.classList.remove("on");
+        refresh(true);
+      }
+    });
+  }
 }
 
 // Lays the tiles out once and remembers the two nodes each one updates.
@@ -318,7 +510,7 @@ function layout() {
   if (!sc) return;
   ensureSpacers();
 
-  const total = data.length;
+  const total = view.length;
   const visible = Math.ceil(sc.clientHeight / ROW_H) + OVERSCAN * 2;
   let first = Math.max(0, Math.floor(sc.scrollTop / ROW_H) - OVERSCAN);
   // Clamp to the last page the row count actually has. A storm clearing to
@@ -335,7 +527,7 @@ function layout() {
 
   for (let i = 0; i < count; i++) {
     const entry = pool[i];
-    const r = data[first + i];
+    const r = view[first + i];
     const key = rowKey(r);
     entry.tr.hidden = false;
     if (entry.key !== key) { entry.key = key; entry.prev = {}; entry.tr._key = key; }
@@ -385,7 +577,6 @@ function applyStatus(st, seq) {
   updateUptime();
   $("infoRequests").textContent = n0(data.length);
   $("message").textContent = st.message || "";
-  $("rowCount").textContent = data.length + " requests";
   $("seq").textContent = "tick " + seq;
   // Spec section 10: an instrument that claims to bound its own cost shows
   // it at all times, not only once it has already throttled itself.
@@ -407,7 +598,7 @@ es.addEventListener("snapshot", (e) => {
   for (const k of refs.keys()) if (!alive.has(k)) refs.delete(k);
   if (p.refs) for (const [k, v] of Object.entries(p.refs)) refs.set(k, v);
 
-  layout();
+  refresh();
   applyStatus(p.status || {}, p.seq);
 
   // Section 6 lists active requests as counted from the grid data, free.

@@ -173,6 +173,39 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
   border-top: 1px solid var(--line);
 }
 
+/* The filter row sticks below the header row rather than under the top of
+   the scroll box, hence the offset: it is the height of one header row. */
+#gridFilter th { top: 27px; padding: 2px 3px; z-index: 1; }
+
+.sortBtn {
+  all: unset;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+}
+.sortBtn:hover { color: var(--fg); }
+.sortBtn:focus-visible { outline: 1px solid var(--accent); }
+.sortMark { color: var(--accent); }
+
+.filterBox {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: #1b1f26;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 4px;
+}
+.filterBox::placeholder { color: #555c68; }
+.filterBox:focus { outline: none; border-color: var(--accent); }
+/* An active filter is visible without reading it, so a grid that looks
+   empty is never a mystery. */
+.filterBox.on { border-color: var(--accent); background: #1d2630; }
+
 /* Formatters used by the grid cells. */
 .badge {
   display: inline-block;
