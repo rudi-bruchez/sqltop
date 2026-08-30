@@ -369,27 +369,27 @@ function head() {
   // A second header row of filter boxes. One box per column, and the
   // operator is read from what is typed: see parseFilter.
   $("gridFilter").innerHTML = COLUMNS.map((c) =>
-    `<th><input class="filterBox" data-f="${esc(c.field)}" id="f-${esc(c.field)}" ` +
-    `aria-label="filter ${esc(c.title)}" placeholder="${c.num ? ">1000" : "filter"}"></th>`).join("");
+    `<th><span class="filterWrap"><input class="filterBox" data-f="${esc(c.field)}" id="f-${esc(c.field)}" ` +
+    `aria-label="filter ${esc(c.title)}" placeholder="${c.num ? ">1000" : "filter"}">` +
+    `<button type="button" class="filterClear" data-f="${esc(c.field)}" id="x-${esc(c.field)}" ` +
+    `aria-label="clear the ${esc(c.title)} filter" title="clear" hidden>\u00d7</button></span></th>`).join("");
 
   for (const el of document.querySelectorAll(".sortBtn")) {
     el.addEventListener("click", () => setSort(el.dataset.f));
   }
   for (const el of document.querySelectorAll(".filterBox")) {
-    el.addEventListener("input", () => {
-      if (el.value.trim() === "") filters.delete(el.dataset.f);
-      else filters.set(el.dataset.f, el.value);
-      el.classList.toggle("on", filters.has(el.dataset.f));
-      refresh(true);
-    });
+    el.addEventListener("input", () => setFilter(el, el.value));
     // Escape clears the box it is in, which is the gesture people try.
     el.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && el.value !== "") {
-        el.value = "";
-        filters.delete(el.dataset.f);
-        el.classList.remove("on");
-        refresh(true);
-      }
+      if (e.key === "Escape" && el.value !== "") setFilter(el, "");
+    });
+  }
+  // A cross inside the box, shown only while there is something to clear.
+  for (const x of document.querySelectorAll(".filterClear")) {
+    x.addEventListener("click", () => {
+      const el = $("f-" + x.dataset.f);
+      setFilter(el, "");
+      el.focus();
     });
   }
 }
@@ -413,6 +413,21 @@ function buildDashboard() {
 }
 //
 // setup-region: end
+
+// setFilter is the single place a filter box changes. Typing, Escape and the
+// clear button all go through it, so the value, the highlight, the clear
+// button's visibility and the filters map cannot drift apart.
+function setFilter(el, value) {
+  const field = el.dataset.f;
+  el.value = value;
+  if (value.trim() === "") filters.delete(field);
+  else filters.set(field, value);
+  const on = filters.has(field);
+  el.classList.toggle("on", on);
+  const x = $("x-" + field);
+  if (x) x.hidden = !on;
+  refresh(true);
+}
 
 // The y scale is the series' own min to max, not an absolute one: a cache
 // hit ratio on a 0-100 axis is a flat line at the top of every server ever
@@ -570,7 +585,12 @@ function applyStatus(st, seq) {
   $("connState").textContent = live ? "connected" : "disconnected";
   if (st.sqltop) $("build").textContent = st.sqltop;
   $("instance").textContent = st.instance || "connecting...";
-  $("version").textContent = st.version || "";
+  // The full product version, next to the edition where section 6 puts it.
+  // It used to sit dimmed beside the instance name, which is where nobody
+  // looked for it. No marketing name derived from it: 12.0.x is either SQL
+  // Server 2014 or one of the Azure engines, and this side of the wire
+  // cannot tell which.
+  infoRow("siVersion", "infoVersion", st.version || "");
   infoRow("siHost", "infoHost", st.host || "");
   infoRow("siEdition", "infoEdition", st.edition || "");
   startedAt = st.startedAt || 0;

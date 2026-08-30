@@ -155,6 +155,35 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("buffer_pool_mb = %+v; the source never sends it and the tile shows a number", got.Honesty.Absent)
 	}
 
+	// Spec section 6's first row: instance, host, edition, version, uptime.
+	// The version was there before and sat dimmed next to the instance
+	// name, which is where nobody looked for it.
+	for _, want := range []string{"host", "edition", "version", "uptime"} {
+		if got.Identity[want] == "" {
+			t.Errorf("the server information row shows no %s; it has %v", want, got.Identity)
+		}
+	}
+	if v := got.Identity["version"]; v != "" && !strings.Contains(v, ".") {
+		t.Errorf("version reads %q; the full product version is what identifies a build", v)
+	}
+
+	// The cross inside a filter box: absent until there is something to
+	// clear, and clearing through it leaves the same state as clearing by
+	// hand rather than a half-cleared one.
+	if !got.ClearButton.HiddenWhenEmpty {
+		t.Error("the clear cross is visible on an empty filter box")
+	}
+	if !got.ClearButton.ShownWhenFiltered {
+		t.Error("the clear cross stays hidden while a filter is set, so there is no way to clear it but backspace")
+	}
+	if got.ClearedByButton.BoxValue != "" || got.ClearedByButton.BoxMarked || !got.ClearedByButton.ButtonHidden {
+		t.Errorf("clearing through the cross left value=%q marked=%v buttonHidden=%v; the box, its highlight and the cross have to agree",
+			got.ClearedByButton.BoxValue, got.ClearedByButton.BoxMarked, got.ClearedByButton.ButtonHidden)
+	}
+	if got.ClearedByButton.Rows != got.ClearedByButton.Total {
+		t.Errorf("clearing through the cross left %d of %d rows; it has to actually drop the filter", got.ClearedByButton.Rows, got.ClearedByButton.Total)
+	}
+
 	// The honesty rule needs a figure that goes away after having had a
 	// value: a tile that quietly kept its last reading is invisible to any
 	// single observation, because a stale number still looks like a number.
@@ -286,6 +315,18 @@ type e2eResult struct {
 		Marked       bool   `json:"marked"`
 		Visible      bool   `json:"visible"`
 	} `json:"anchorKeeps"`
+	Identity    map[string]string `json:"identity"`
+	ClearButton struct {
+		HiddenWhenEmpty   bool `json:"hiddenWhenEmpty"`
+		ShownWhenFiltered bool `json:"shownWhenFiltered"`
+	} `json:"clearButton"`
+	ClearedByButton struct {
+		BoxValue     string `json:"boxValue"`
+		BoxMarked    bool   `json:"boxMarked"`
+		ButtonHidden bool   `json:"buttonHidden"`
+		Rows         int    `json:"rows"`
+		Total        int    `json:"total"`
+	} `json:"clearedByButton"`
 	Flipping struct {
 		WithValue        int      `json:"withValue"`
 		Greyed           int      `json:"greyed"`

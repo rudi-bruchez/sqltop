@@ -188,6 +188,27 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 .sortBtn:focus-visible { outline: 1px solid var(--accent); }
 .sortMark { color: var(--accent); }
 
+/* The clear button sits inside the box rather than beside it, so a column
+   does not get wider the moment it is filtered. */
+.filterWrap { position: relative; display: block; }
+.filterClear {
+  all: unset;
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 2px;
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 13px;
+}
+.filterClear:hover { color: var(--fg); background: #2b323c; }
+.filterClear:focus-visible { outline: 1px solid var(--accent); }
+
 .filterBox {
   width: 100%;
   min-width: 0;
@@ -200,6 +221,7 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
   font-size: 11px;
   padding: 1px 4px;
 }
+.filterBox.on { padding-right: 17px; }
 .filterBox::placeholder { color: #555c68; }
 .filterBox:focus { outline: none; border-color: var(--accent); }
 /* An active filter is visible without reading it, so a grid that looks

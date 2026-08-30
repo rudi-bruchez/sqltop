@@ -87,6 +87,15 @@ for (let i = 0; i < 120; i++) {
 
 const out = { problems, rowsSeen: ticks };
 
+out.identity = await json(`(() => {
+  const shown = {};
+  for (const row of document.querySelectorAll("#serverInfo .si")) {
+    if (row.hidden) continue;
+    shown[row.querySelector("dt").textContent.trim()] = row.querySelector("dd").textContent.trim();
+  }
+  return shown;
+})()`);
+
 out.page = await json(`({
   linkTags: document.querySelectorAll("link[rel=stylesheet]").length,
   scriptSrc: document.querySelectorAll("script[src]").length,
@@ -166,7 +175,16 @@ const setFilter = (field, text) => ev(`(() => {
   return "ok";
 })()`);
 
+// The clear button appears only when there is something to clear, and
+// clearing through it must leave the same state as clearing by hand.
+out.clearButton = await json(`(() => {
+  const x = document.getElementById("x-db");
+  return { hiddenWhenEmpty: x.hidden };
+})()`);
+
 await setFilter("db", "alpha");
+out.clearButton.shownWhenFiltered = await ev(`!document.getElementById("x-db").hidden`);
+
 out.filterOne = await json(`({ rows: view.length, total: data.length,
   allMatch: view.every((r) => val(r, "db").toLowerCase().includes("alpha")),
   boxMarked: document.getElementById("f-db").classList.contains("on"),
@@ -177,7 +195,15 @@ out.filterAnd = await json(`({ rows: view.length,
   allMatch: view.every((r) => val(r, "db").toLowerCase().includes("alpha") && val(r, "cpu") > 5000) })`);
 
 await setFilter("cpu", "");
-await setFilter("db", "");
+// The db filter goes through the cross rather than through the keyboard,
+// so the button is exercised as a user would use it.
+out.clearedByButton = await json(`(() => {
+  document.getElementById("x-db").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  const el = document.getElementById("f-db");
+  return { boxValue: el.value, boxMarked: el.classList.contains("on"),
+           buttonHidden: document.getElementById("x-db").hidden,
+           rows: view.length, total: data.length };
+})()`);
 out.filterCleared = await json(`({ rows: view.length, total: data.length })`);
 
 // The anchoring rule of section 8.1, both branches, in one evaluation so
