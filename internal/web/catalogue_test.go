@@ -151,3 +151,42 @@ func cellKeys(t *testing.T, src, name string) map[string]bool {
 	}
 	return out
 }
+
+// TestEveryViewWithAKeyHasSomewhereToDraw closes the last way the catalogue
+// and the page can drift. A view the catalogue gives a key gets a tab, and
+// clicking that tab either shows the grid or shows a panel named after it.
+// A view with neither would give a tab that leads to a null element and a
+// TypeError, which is the one failure mode in this page that takes the whole
+// interface down rather than degrading.
+func TestEveryViewWithAKeyHasSomewhereToDraw(t *testing.T) {
+	js, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The views app.js draws in the shared virtualised grid, read out of
+	// isGrid rather than repeated here.
+	grid := map[string]bool{}
+	for _, m := range regexp.MustCompile(`v === "([a-z_]+)"`).FindAllStringSubmatch(
+		between(string(js), "const isGrid =", ";"), -1) {
+		grid[m[1]] = true
+	}
+	if len(grid) == 0 {
+		t.Fatal("could not read isGrid out of app.js; the shape this is parsed from has changed")
+	}
+
+	for _, v := range model.ViewCatalogue {
+		if v.Key == "" {
+			continue // part of another view, so it has no tab to lead anywhere
+		}
+		if grid[v.ID] {
+			continue
+		}
+		if !strings.Contains(string(html), `id="panel-`+v.ID+`"`) {
+			t.Errorf("view %q has key %q, so it gets a tab, and index.html has neither a grid entry nor a panel-%s to draw it in", v.ID, v.Key, v.ID)
+		}
+	}
+}
