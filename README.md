@@ -3,9 +3,9 @@
 A `top` for SQL servers: real-time monitoring of active requests, with a short
 rolling history so a query can be reviewed after it has finished.
 
-Status: 0.1 released, 0.2 in progress. The collector works, the request grid is
-live and the server dashboard is in. The other views, the plan panel and the
-kill flow are still to come, as are column sorting and filtering. The
+Status: 0.2 released. The collector works, the request grid is live and the
+server dashboard is in. The other views, the plan panel and the kill flow are
+still to come, as are column sorting and filtering. The
 rendering strategy for the main screen was settled by measurement against four
 candidates, using a local harness that is not tracked here.
 

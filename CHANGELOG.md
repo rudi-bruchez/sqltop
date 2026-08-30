@@ -6,8 +6,13 @@ constant changes.
 
 ## Unreleased
 
-0.2 in progress. The server dashboard is in; the other views, the plan panel
-and the kill flow are not.
+Nothing yet. Still to come: the other views, the plan panel, the kill flow,
+column sorting and filtering, and the instance switcher.
+
+## 0.2.0, 30 August 2026
+
+The server dashboard, and a body of performance work on both sides of the
+wire. The other views, the plan panel and the kill flow are still to come.
 
 - The dashboard of `docs/SPECS.md` section 6, above the grid: instance, host,
   edition, version and uptime read once at connection, then thirty figures in
@@ -20,8 +25,21 @@ and the kill flow are not.
   and never once assigned.
 - `docs/QUERIES.md`, every query the tool sends, extracted from the code by a
   test rather than copied, so it cannot drift. The catalogue behind it also
-  checks that each query carries its hints and that none of them writes to
-  the monitored server.
+  walks the call sites, checks that each query carries its hints, and checks
+  that none of them writes to the monitored server.
+- Grid rows travel as positional arrays with the column order sent once per
+  connection, which took a snapshot at 800 rows from 239 kB to 153. One
+  reused number formatter in the browser took a refresh from 5.2 ms to 3.7.
+- Sorting and filtering were measured before being designed, against a
+  server-side twin of every client-side candidate. They belong in the
+  browser; `docs/SPECS.md` section 10.1 has the nine-mode table.
+- `docs/PERFORMANCE.md`, which records what was optimised, what was measured,
+  and what was measured and rejected.
+
+Reviewed externally by two other coding agents. What they found and what was
+done about it is in the commit log; the short version is one real defect in
+the new wire format's own guarantee, two pieces of debt that had been written
+down and left, and three papercuts.
 
 ## 0.1.0, 30 August 2026
 
