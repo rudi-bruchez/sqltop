@@ -226,9 +226,11 @@ browser still has to repaint reordered rows.
 
 Nine modes, 122 ticks each, every client-side candidate against a server-side
 twin delivering the identical row order already sorted and filtered in Go.
-The pairs do not separate, and twice the server twin is the slower of the
-two. Sorting 800 rows in JavaScript costs 0.2 ms. The full table is in spec
-section 10.1.
+The pairs do not separate. Measured a third time once the feature actually
+existed, against the shipped sort and filter rather than the bench's
+simulation of one, every client mode landed at or below the
+no-sort-no-filter baseline: the work costs less than the measurement can
+see. The full table is in spec section 10.1.
 
 Client-side also keeps the properties worth keeping: a filter per viewer
 rather than per server, a filter over the retention window rather than one

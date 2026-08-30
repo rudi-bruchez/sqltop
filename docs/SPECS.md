@@ -821,29 +821,33 @@ session id, which barely reorders between ticks, and CPU, which moves by a
 different amount on every row every tick and genuinely scrambles the order.
 
 Chrome 151, Linux x86_64, 800 rows, 1 Hz, 5 % churn, 1600 by 1000 viewport,
-122 ticks per mode, against the shipped renderer rather than a copy of it:
+122 ticks per mode, against the shipped renderer and, since sorting and
+filtering now exist, against the shipped sort and filter rather than a
+simulation of them. `apply` therefore covers filtering and sorting as well as
+layout.
 
-| Mode | apply p50 | apply p95 | sort/filter p50 | frame p95 | Time frozen | Scroll lost | Selection lost |
-|---|---|---|---|---|---|---|---|
-| No sort, no filter | 3.7 ms | 6.0 ms | - | 16.7 ms | 0 % | 0 | 0 |
-| Client sort, stable key | 3.3 ms | 5.6 ms | 0.0 ms | 16.7 ms | 0 % | 0 | 0 |
-| Server sort, stable key | 2.7 ms | 5.5 ms | - | 16.7 ms | 0 % | 0 | 0 |
-| Client sort, volatile key | 3.7 ms | 6.3 ms | 0.2 ms | 16.7 ms | 0 % | 0 | 0 |
-| Server sort, volatile key | 3.1 ms | 6.3 ms | - | 16.7 ms | 0 % | 0 | 0 |
-| Client filter | 3.9 ms | 6.9 ms | 0.0 ms | 16.7 ms | 0 % | 5 | 0 |
-| Server filter | 4.3 ms | 6.1 ms | - | 16.7 ms | 0 % | 0 | 0 |
-| Client filter and volatile sort | 3.6 ms | 5.9 ms | 0.1 ms | 16.7 ms | 0 % | 0 | 0 |
-| Server filter and volatile sort | 4.3 ms | 6.1 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Mode | apply p50 | apply p95 | frame p95 | Time frozen | Scroll lost | Selection lost |
+|---|---|---|---|---|---|---|
+| No sort, no filter | 3.6 ms | 4.8 ms | 16.7 ms | 0 % | 0 | 0 |
+| Client sort, stable key | 3.2 ms | 6.0 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server sort, stable key | 2.9 ms | 5.4 ms | 16.7 ms | 0 % | 0 | 0 |
+| Client sort, volatile key | 3.0 ms | 5.0 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server sort, volatile key | 3.2 ms | 5.7 ms | 16.8 ms | 0 % | 0 | 0 |
+| Client filter | 2.6 ms | 5.0 ms | 16.7 ms | 0 % | 3 | 0 |
+| Server filter | 3.2 ms | 5.1 ms | 16.7 ms | 0 % | 1 | 0 |
+| Client filter and volatile sort | 2.7 ms | 5.5 ms | 16.7 ms | 0 % | 1 | 0 |
+| Server filter and volatile sort | 2.8 ms | 4.8 ms | 16.7 ms | 0 % | 0 | 0 |
 
 Three things settle it.
 
-The pairs do not separate. Every mode sits between 2.7 and 4.3 ms against a
+The pairs do not separate. Every mode sits between 2.6 and 3.6 ms against a
 16 ms budget, and the spread inside a client/server pair is smaller than the
 spread between repeats of the same mode. The direction is the argument, not
 the size: if doing the work in Go helped, the server twin would be
-consistently faster, and it is faster on two of the four pairs and slower on
-the other two, which is what noise looks like. Sorting 800 rows in
-JavaScript costs 0.2 ms.
+consistently faster, and it is faster on one of the four pairs and slower on
+the other three, which is what noise looks like. Every client mode is at or
+below the no-sort-no-filter baseline, which is the clearest statement of the
+result available: the work costs less than the measurement can see.
 
 The frame time does not move at all. 16.7 ms on every mode is one frame at
 60 Hz: the page is hitting the display's own cadence and dropping nothing,
@@ -864,16 +868,25 @@ rather than deciding what was ever collected, and rows that leave the grid
 because they ended rather than because they stopped matching, which the
 protocol cannot otherwise tell apart.
 
-One real finding to carry into the implementation: filtering 800 rows down to
-110 while scrolled toward the bottom cost five scroll positions out of 122
-ticks, and none of the other eight modes lost any. That is the list shrinking
-under the viewport, not the filter running in the wrong place, and it needs
-an answer when the filter ships rather than another measurement.
+The scroll losses are down but not gone, and the residue says what it is.
+Before the re-anchoring rule above existed, filtering cost five lost
+positions out of 122 ticks and every other mode lost none. With it, the
+filtering modes lose one to three, and the server filtering mode, where the
+page does no filtering at all, loses one as well. That residue is therefore
+not the filter: it is a list of 110 rows getting shorter and longer with
+ordinary session churn while the viewport sits near its end, which is what
+any shrinking list does in a browser. The re-anchoring rule covers the case
+it was written for, a filter changing, and this one is left alone
+deliberately rather than fixed by pinning a scroll position that the user
+did not ask to have pinned.
 
-These figures were taken after the number formatter was fixed. The same nine
-modes measured beforehand ran 5.2 to 6.4 ms, uniformly about 1.4 ms slower,
-with the same conclusion: the whole table moved together, which is what a
-change in a function every mode calls should do.
+Three sets of figures now exist for this table and the conclusion has not
+moved through any of them. The first was taken before the number formatter
+was fixed and ran 5.2 to 6.4 ms. The second, after that fix, ran 2.7 to 4.3.
+This one measures the shipped sort and filter rather than a simulation and
+runs 2.6 to 3.6. Each time the whole table moved together, which is what a
+change in something every mode uses should do, and each time the client and
+server twins stayed inside each other's noise.
 
 ## 11. Versioning
 
