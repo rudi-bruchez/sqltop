@@ -6,6 +6,10 @@ constant changes.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.3.0, 30 August 2026
+
 Four more views, the columns made configurable everywhere, the single-key
 commands, and a query hint removed after it turned out to be most of what
 this tool cost the server it watches.
