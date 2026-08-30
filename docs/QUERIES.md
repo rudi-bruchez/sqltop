@@ -329,6 +329,106 @@ ORDER BY timestamp DESC
 OPTION (RECOMPILE, MAXDOP 1)
 ```
 
+## sessionsQuery
+
+Runs on demand, while the sessions view is open.
+
+Every open user session: who is connected, for how long, how long since their last request ended, and the age of their oldest open transaction. Cheap: one row per connection, and the OUTER APPLY reads views that hold one row per open transaction rather than one per lock. The durations are computed on the server's own clock, because a tool on another machine with a clock minutes out would otherwise report a transaction running for negative four minutes.
+
+```sql
+SELECT s.session_id,
+       ISNULL(s.login_name, N''), ISNULL(s.host_name, N''), ISNULL(s.program_name, N''),
+       ISNULL(s.status, N''), ISNULL(DB_NAME(s.database_id), N''),
+       ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
+       ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0),
+       s.cpu_time, s.reads, s.writes, s.memory_usage,
+       s.open_transaction_count,
+       ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)
+FROM sys.dm_exec_sessions AS s
+OUTER APPLY (
+    SELECT MIN(tx.transaction_begin_time) AS oldest_begin
+    FROM sys.dm_tran_session_transactions AS stx
+    INNER JOIN sys.dm_tran_active_transactions AS tx ON tx.transaction_id = stx.transaction_id
+    WHERE stx.session_id = s.session_id
+) AS t
+WHERE s.is_user_process = 1
+OPTION (RECOMPILE, MAXDOP 1)
+```
+
+## transactionsQuery
+
+Runs on demand, while the transactions view is open.
+
+Every open user transaction, with its age, its state and how much log it has written. A transaction spanning several databases is one row, with a count, rather than one row per database pretending to be several transactions.
+
+```sql
+SELECT tx.transaction_id, stx.session_id,
+       ISNULL(tx.name, N''),
+       ISNULL(DATEDIFF(second, tx.transaction_begin_time, SYSDATETIME()), 0),
+       tx.transaction_type, tx.transaction_state,
+       ISNULL(DB_NAME(dbt.database_id), N''), ISNULL(dbt.db_count, 0),
+       ISNULL(dbt.log_bytes, 0), ISNULL(dbt.log_records, 0)
+FROM sys.dm_tran_active_transactions AS tx
+INNER JOIN sys.dm_tran_session_transactions AS stx ON stx.transaction_id = tx.transaction_id
+LEFT JOIN (
+    SELECT transaction_id,
+           MIN(database_id) AS database_id,
+           COUNT(*) AS db_count,
+           SUM(database_transaction_log_bytes_used) AS log_bytes,
+           SUM(database_transaction_log_record_count) AS log_records
+    FROM sys.dm_tran_database_transactions
+    GROUP BY transaction_id
+) AS dbt ON dbt.transaction_id = tx.transaction_id
+WHERE stx.is_user_transaction = 1
+OPTION (RECOMPILE, MAXDOP 1)
+```
+
+## locksQuery
+
+Runs on demand, while the transactions view is open, alongside transactionsQuery.
+
+What each session holding a transaction has locked, aggregated by database, resource type, object, mode and status. Never one row per lock: a single statement can hold millions and the question is which object, not which row of which page. This is the most expensive query in the tool after the grid, because it walks the lock manager, which is why it is on demand and never on a tier. Only OBJECT locks are named; OBJECT_NAME takes a database id so it resolves across databases without a context switch, while a page or key lock names a partition and turning that into a name means a query inside each database.
+
+```sql
+SELECT TOP (2000)
+       l.request_session_id,
+       ISNULL(DB_NAME(l.resource_database_id), N''),
+       RTRIM(l.resource_type),
+       ISNULL(CASE WHEN l.resource_type = 'OBJECT'
+                   THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id) END, N''),
+       RTRIM(l.request_mode), RTRIM(l.request_status), COUNT(*)
+FROM sys.dm_tran_locks AS l
+WHERE l.request_session_id > 0
+  AND EXISTS (SELECT 1 FROM sys.dm_tran_session_transactions AS stx
+              WHERE stx.session_id = l.request_session_id AND stx.is_user_transaction = 1)
+GROUP BY l.request_session_id, l.resource_database_id, l.resource_type,
+         CASE WHEN l.resource_type = 'OBJECT'
+              THEN OBJECT_NAME(l.resource_associated_entity_id, l.resource_database_id) END,
+         l.request_mode, l.request_status
+ORDER BY COUNT(*) DESC
+OPTION (RECOMPILE, MAXDOP 1)
+```
+
+## logSpaceQuery
+
+Runs on demand, while the transaction log view is open.
+
+Every database's log: size, active portion, percent used, recovery model, and what is stopping the log being reused. Read from the performance counters rather than from sys.dm_db_log_space_usage, which returns one row for the current database only and would mean a context switch per database.
+
+```sql
+SELECT d.name, d.recovery_model_desc, d.log_reuse_wait_desc, d.state_desc,
+       ISNULL(MAX(CASE WHEN pc.counter_name = N'Log File(s) Size (KB)' THEN pc.cntr_value END), 0),
+       ISNULL(MAX(CASE WHEN pc.counter_name = N'Log File(s) Used Size (KB)' THEN pc.cntr_value END), 0),
+       ISNULL(MAX(CASE WHEN pc.counter_name = N'Percent Log Used' THEN pc.cntr_value END), 0)
+FROM sys.databases AS d
+LEFT JOIN sys.dm_os_performance_counters AS pc
+       ON pc.instance_name = d.name
+      AND pc.object_name LIKE N'%Databases%'
+      AND pc.counter_name IN (N'Log File(s) Size (KB)', N'Log File(s) Used Size (KB)', N'Percent Log Used')
+GROUP BY d.name, d.recovery_model_desc, d.log_reuse_wait_desc, d.state_desc
+OPTION (RECOMPILE, MAXDOP 1)
+```
+
 ## costQuery
 
 Runs every tick, on whatever tier ran last.

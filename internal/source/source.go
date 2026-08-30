@@ -32,6 +32,15 @@ type Source interface {
 	// cumulative. The collector differentiates it. Spec section 10.
 	Cost(ctx context.Context) (model.Cost, error)
 
+	// Sessions, Transactions and LogSpace feed the views of spec section 7
+	// that are not projections of the retention window. They are on demand,
+	// like QueryText and Plan below and for the same reason: the lock
+	// aggregate walks the whole lock manager, and paying for that on a
+	// timer nobody is watching is exactly what section 2 rules out.
+	Sessions(ctx context.Context) ([]model.SessionSample, error)
+	Transactions(ctx context.Context) ([]model.TransactionSample, []model.LockSample, error)
+	LogSpace(ctx context.Context) ([]model.LogSpaceSample, error)
+
 	// QueryText and Plan are on demand only and must never be called from a
 	// polling loop.
 	QueryText(ctx context.Context, ref model.RequestRef) (string, error)

@@ -323,6 +323,23 @@ func (c *Collector) SetPeriod(tier model.Tier, d time.Duration) {
 	c.bud.SetBase(tier, d)
 }
 
+// Sessions, Transactions and LogSpace forward to the source. They are the
+// on-demand views of spec section 7: no tier, no period, no place in the
+// throttle ladder, because they only run while somebody is looking at them.
+// Their cost still lands in the budget all the same, since they go over the
+// same pinned connection whose cpu_time the budget differentiates.
+func (c *Collector) Sessions(ctx context.Context) ([]model.SessionSample, error) {
+	return c.src.Sessions(ctx)
+}
+
+func (c *Collector) Transactions(ctx context.Context) ([]model.TransactionSample, []model.LockSample, error) {
+	return c.src.Transactions(ctx)
+}
+
+func (c *Collector) LogSpace(ctx context.Context) ([]model.LogSpaceSample, error) {
+	return c.src.LogSpace(ctx)
+}
+
 func (c *Collector) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

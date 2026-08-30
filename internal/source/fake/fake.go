@@ -29,6 +29,13 @@ type Source struct {
 	// that is always available cannot either.
 	AlternateFigure string
 
+	// What the on-demand views of spec section 7 hand back. Nil by
+	// default: most tests are about the grid.
+	SessionRows []model.SessionSample
+	TranRows    []model.TransactionSample
+	LockRows    []model.LockSample
+	LogRows     []model.LogSpaceSample
+
 	cost    model.Cost
 	flipped bool
 }
@@ -101,4 +108,24 @@ func (s *Source) QueryText(context.Context, model.RequestRef) (string, error) {
 
 func (s *Source) Plan(_ context.Context, _ model.RequestRef, live bool) (model.Plan, error) {
 	return model.Plan{Format: "showplan-xml", Payload: []byte("<ShowPlanXML/>"), Live: live}, s.Err
+}
+
+// The on-demand views. A fake returns whatever a test put in it, which for
+// most tests is nothing: they exercise the grid, not the session list.
+func (s *Source) Sessions(context.Context) ([]model.SessionSample, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.SessionRows, s.Err
+}
+
+func (s *Source) Transactions(context.Context) ([]model.TransactionSample, []model.LockSample, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.TranRows, s.LockRows, s.Err
+}
+
+func (s *Source) LogSpace(context.Context) ([]model.LogSpaceSample, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LogRows, s.Err
 }

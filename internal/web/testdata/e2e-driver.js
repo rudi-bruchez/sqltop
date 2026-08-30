@@ -278,11 +278,70 @@ out.columns = await json(`(() => {
            rows: view.length, afterShow: order() };
 })()`);
 
+// The tabs of spec section 7. Each list view is filled by its own request,
+// made only while its tab is open, so this is also the check that the tab
+// actually asks for anything.
+const key = (k) => `globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true }))`;
+out.views = { tabs: await json(`[...document.querySelectorAll("#tabs button")].map((b) => b.dataset.v)`) };
+
+await ev(key("b"));
+out.views.blocking = await json(`(() => ({
+  rows: view.length,
+  total: data.length,
+  gridVisible: !document.querySelector(".gridScroll").hidden,
+  allInAChain: view.every((r) => val(r, "by") || view.some((o) => val(o, "by") === val(r, "spid"))),
+  depthShown: [...document.querySelectorAll("#gridHead th")].some((th) => th.dataset.f === "blocking_depth"),
+}))()`);
+
+await ev(key("u"));
+await sleep(700);
+out.views.sessions = await json(`(() => {
+  const p = document.getElementById("panel-sessions");
+  return {
+    visible: !p.hidden,
+    gridHidden: document.querySelector(".gridScroll").hidden,
+    headings: [...p.querySelectorAll("th")].map((th) => th.textContent),
+    rows: p.querySelectorAll("tbody tr").length,
+    firstRow: [...(p.querySelectorAll("tbody tr")[0] || { cells: [] }).cells].map((td) => td.textContent),
+  };
+})()`);
+
+await ev(key("x"));
+await sleep(700);
+out.views.transactions = await json(`(() => {
+  const p = document.getElementById("panel-transactions");
+  const tables = [...p.querySelectorAll("table")];
+  return {
+    visible: !p.hidden,
+    tables: tables.length,
+    tranRows: tables[0] ? tables[0].querySelectorAll("tbody tr").length : 0,
+    lockRows: tables[1] ? tables[1].querySelectorAll("tbody tr").length : 0,
+    lockText: tables[1] ? tables[1].textContent : "",
+  };
+})()`);
+
+await ev(key("l"));
+await sleep(700);
+out.views.logs = await json(`(() => {
+  const p = document.getElementById("panel-logs");
+  return { visible: !p.hidden, rows: p.querySelectorAll("tbody tr").length, text: p.textContent };
+})()`);
+
+// The column panel follows the tab: it is per view, and offering the grid's
+// columns while a log list is on screen would be worse than useless.
+out.views.panelFollows = await json(`(() => {
+  const before = document.getElementById("colWhich").textContent;
+  return { which: before, fields: [...document.querySelectorAll("#colList input")].map((i) => i.dataset.f) };
+})()`);
+
+await ev(key("r"));
+await sleep(400);
+out.views.backToGrid = await ev(`!document.querySelector(".gridScroll").hidden && view.length === data.length`);
+
 // The single-keypress commands of spec section 7, pressed the way a person
 // presses them: a keydown on the window, not a call to the function behind
 // it, so the dispatch and the guard against typing in a filter box are both
 // under test.
-const key = (k) => `globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true }))`;
 out.commands = {};
 
 await ev(key("h"));

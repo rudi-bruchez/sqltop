@@ -83,7 +83,7 @@ func (s *Server) layout(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	s.cfg = cfg
-	s.grid = resolveGrid("requests", cfg.Columns("requests"))
+	s.grid = resolveAllGrids(cfg)
 	writeJSON(rw, map[string]string{"path": path})
 }
 

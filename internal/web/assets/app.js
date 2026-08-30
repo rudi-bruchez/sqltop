@@ -146,7 +146,7 @@ const span = [];
 // the wire spends its bytes 800 times a second, the file is read by a
 // person. internal/web/catalogue_test.go checks these keys against
 // model.ViewCatalogue so neither half can gain a column the other lacks.
-const CELL = {
+const CELL_REQUESTS = {
   spid: { num: true, get: (r) => val(r, "spid"), html: (r) => `<span class="num">${val(r, "spid")}</span>` },
   status: { get: (r) => val(r, "st") },
   database: { get: (r) => val(r, "db") },
@@ -171,16 +171,89 @@ const CELL = {
   sql_text: { get: (r) => ref(val(r, "ref")).sql, html: (r) => `<span class="sqlcell" style="padding-left:${val(r, "d") * 14}px">${esc(ref(val(r, "ref")).sql)}</span>` },
 };
 
-// The columns actually drawn, in order. Built by applyColumns from what the
-// server resolved out of the configuration file, so nothing here decides
-// which columns exist or in what order they start.
+// The three views that are not the grid render as plain tables of tens of
+// rows at human pace, so their cells produce text rather than markup: a
+// textContent write escapes by construction, which is the right default for
+// a database name, a program name or an object name coming off a server
+// nobody here controls.
+const CELL_SESSIONS = {
+  spid: { num: true, text: (r) => n0(r.spid) },
+  login: { text: (r) => r.login },
+  host: { text: (r) => r.host },
+  program: { text: (r) => r.program },
+  status: { text: (r) => r.status },
+  database: { text: (r) => r.database },
+  connected: { num: true, text: (r) => fDur(r.connected) },
+  // Blank while a request is running: the engine reports no end time for
+  // one that has not ended, and "0s idle" would read as a measurement.
+  idle: { num: true, text: (r) => (r.idle ? fDur(r.idle) : "") },
+  open_tran: { num: true, text: (r) => n0(r.open_tran) },
+  tran_age: { num: true, text: (r) => (r.tran_age ? fDur(r.tran_age) : "") },
+  cpu_ms: { num: true, text: (r) => n0(r.cpu_ms) },
+  logical_reads: { num: true, text: (r) => n0(r.logical_reads) },
+  writes: { num: true, text: (r) => n0(r.writes) },
+  memory_mb: { num: true, text: (r) => n2(r.memory_mb) },
+};
+
+const CELL_TRANSACTIONS = {
+  xid: { num: true, text: (r) => n0(r.xid) },
+  spid: { num: true, text: (r) => n0(r.spid) },
+  name: { text: (r) => r.name },
+  age: { num: true, text: (r) => fDur(r.age) },
+  state: { text: (r) => r.state },
+  type: { text: (r) => r.type },
+  // A transaction spanning several databases says so rather than claiming
+  // whichever one sorted first.
+  database: { text: (r) => (r.databases > 1 ? r.database + " +" + (r.databases - 1) : r.database) },
+  databases: { num: true, text: (r) => n0(r.databases) },
+  log_mb: { num: true, text: (r) => n2(r.log_mb) },
+  log_records: { num: true, text: (r) => n0(r.log_records) },
+};
+
+const CELL_LOCKS = {
+  spid: { num: true, text: (r) => n0(r.spid) },
+  database: { text: (r) => r.database },
+  resource_type: { text: (r) => r.resource_type },
+  // Empty means the name could not be resolved cheaply, not that there is
+  // no object: only OBJECT locks carry one.
+  object: { text: (r) => r.object },
+  mode: { text: (r) => r.mode },
+  status: { text: (r) => r.status },
+  count: { num: true, text: (r) => n0(r.count) },
+};
+
+const CELL_LOGS = {
+  database: { text: (r) => r.database },
+  size_mb: { num: true, text: (r) => n2(r.size_mb) },
+  used_mb: { num: true, text: (r) => n2(r.used_mb) },
+  used_percent: { num: true, text: (r) => fPct1(r.used_percent) },
+  reuse_wait: { text: (r) => r.reuse_wait },
+  recovery_model: { text: (r) => r.recovery_model },
+  state: { text: (r) => r.state },
+};
+
+// Which registry draws which view. Requests and blocking are the same rows
+// read two ways, so they share one.
+const CELLS = {
+  requests: CELL_REQUESTS,
+  blocking: CELL_REQUESTS,
+  sessions: CELL_SESSIONS,
+  transactions: CELL_TRANSACTIONS,
+  locks: CELL_LOCKS,
+  logs: CELL_LOGS,
+};
+
+// The columns actually drawn in the grid, in order. Built by applyColumns
+// from what the server resolved out of the configuration file, so nothing
+// here decides which columns exist or in what order they start.
 let COLUMNS = [];
-// The whole selection, hidden columns included: the order is what gets
-// saved, so a column switched off has to keep its place in it.
-let colOrder = [];
-const colShown = new Set();
-const colWidth = new Map();
-const colTitle = new Map();
+
+// One entry per view: the whole column list in saved order, hidden ones
+// included because the order is what gets saved, plus each column's width
+// and heading.
+const layouts = new Map();
+const viewKeys = new Map();
+let activeView = "requests";
 
 function waitBadge(w) {
   if (!w) return "";
@@ -334,7 +407,7 @@ function markSort() {
 // 800 rows became 110 while scrolled toward the bottom, which is the
 // content becoming shorter than the offset and the browser clamping it.
 function refresh(keepSelection) {
-  view = applyView(data);
+  view = applyView(activeView === "blocking" ? blockingRows(data) : data);
   if (keepSelection) anchor();
   layout();
   $("rowCount").textContent = n0(view.length) + (view.length === data.length ? " requests" : " of " + n0(data.length) + " requests");
@@ -453,17 +526,32 @@ function buildDashboard(groups) {
 // does not reshuffle it, because a list that moves under the pointer while
 // you are ticking boxes is worse than one that does not match the header.
 function buildColumnPanel() {
+  const L = layouts.get(activeView);
+  const cells = CELLS[activeView] || {};
   const list = $("colList");
-  list.innerHTML = colOrder.filter((f) => CELL[f]).map((f) =>
-    `<label class="colItem"><input type="checkbox" data-f="${esc(f)}"${colShown.has(f) ? " checked" : ""}>` +
-    `<span>${esc(colTitle.get(f) || f)}</span></label>`).join("");
+  $("colWhich").textContent = activeView;
+  list.innerHTML = (L ? L.order : []).filter((f) => cells[f]).map((f) =>
+    `<label class="colItem"><input type="checkbox" data-f="${esc(f)}"${L.shown.has(f) ? " checked" : ""}>` +
+    `<span>${esc(L.title.get(f) || f)}</span></label>`).join("");
   for (const el of list.querySelectorAll("input")) {
     el.addEventListener("change", () => {
-      if (el.checked) colShown.add(el.dataset.f);
-      else colShown.delete(el.dataset.f);
+      if (el.checked) L.shown.add(el.dataset.f);
+      else L.shown.delete(el.dataset.f);
       applyColumns();
     });
   }
+}
+
+// One tab per view the server gave a key to. The list that lives inside
+// another view, the locks under transactions, has none and gets no tab.
+function buildTabs(views) {
+  $("tabs").innerHTML = views.filter((v) => v.k).map((v) =>
+    `<button type="button" data-v="${esc(v.id)}" id="tab-${esc(v.id)}">${esc(v.t)}` +
+    `<span class="tabKey">${esc(v.k)}</span></button>`).join("");
+  for (const b of $("tabs").children) {
+    b.addEventListener("click", () => setView(b.dataset.v));
+  }
+  markTabs();
 }
 
 // The commands of spec section 7, in one list: the help dialog is generated
@@ -480,40 +568,67 @@ const COMMANDS = [
 function buildHelp() {
   $("helpList").innerHTML = COMMANDS.map(([k, what]) =>
     `<dt>${esc(k)}</dt><dd>${esc(what)}</dd>`).join("");
+  // The views come from the server, so the help cannot claim a tab that is
+  // not there or miss one that is.
+  $("helpViews").innerHTML = [...viewKeys].map(([k, id]) =>
+    `<dt>${esc(k)}</dt><dd>${esc((layouts.get(id) && id) || id)}</dd>`).join("");
 }
 //
 // setup-region: end
 
-// setGrid takes the column selection the server resolved from the
-// configuration file. Sent once per connection, with the wire header.
-function setGrid(list) {
-  colOrder = list.map((c) => c.f);
-  colShown.clear();
-  colWidth.clear();
-  colTitle.clear();
-  for (const c of list) {
-    colWidth.set(c.f, c.w);
-    colTitle.set(c.f, c.t);
-    if (c.s) colShown.add(c.f);
+// setGrid takes every view and its column selection, as the server
+// resolved them from the configuration file. Sent once per connection.
+function setGrid(views) {
+  layouts.clear();
+  viewKeys.clear();
+  for (const v of views) {
+    const L = { order: [], shown: new Set(), width: new Map(), title: new Map() };
+    for (const c of v.cols || []) {
+      L.order.push(c.f);
+      L.width.set(c.f, c.w);
+      L.title.set(c.f, c.t);
+      if (c.s) L.shown.add(c.f);
+    }
+    layouts.set(v.id, L);
+    if (v.k) viewKeys.set(v.k, v.id);
   }
+  if (!layouts.has(activeView)) activeView = views.length ? views[0].id : "requests";
+  buildTabs(views);
+  buildHelp();
   buildColumnPanel();
   applyColumns();
 }
 
-// applyColumns rebuilds the header and the row pool from colOrder and
-// colShown. The pool has one cell per column, so a change of column count
-// is the one thing that cannot be absorbed by the per-cell update path and
-// has to throw the pool away.
+// columnsFor joins one view's saved layout with the registry that knows how
+// to draw its cells. A column the registry cannot draw is dropped rather
+// than rendered blank; the catalogue test makes that case impossible in a
+// shipped build, and this keeps a mismatched pair from breaking the page.
+function columnsFor(view) {
+  const L = layouts.get(view);
+  const cells = CELLS[view];
+  if (!L || !cells) return [];
+  return L.order
+    .filter((f) => L.shown.has(f) && cells[f])
+    .map((f) => Object.assign({ field: f, title: L.title.get(f) || f, width: L.width.get(f) || 100 }, cells[f]));
+}
+
+// applyColumns rebuilds the active view. For the grid that means the header
+// and the row pool: the pool has one cell per column, so a change of column
+// count is the one thing the per-cell update path cannot absorb and has to
+// throw the pool away.
 function applyColumns() {
-  COLUMNS = colOrder
-    .filter((f) => colShown.has(f) && CELL[f])
-    .map((f) => Object.assign({ field: f, title: colTitle.get(f) || f, width: colWidth.get(f) || 100 }, CELL[f]));
+  if (!isGrid(activeView)) {
+    renderActiveList();
+    return;
+  }
+  const L = layouts.get(activeView);
+  COLUMNS = columnsFor(activeView);
 
   // A filter or a sort on a column that has just been hidden would go on
-  // silently shaping the grid with nothing on screen to say so.
-  const dropped = [...filters.keys()].filter((f) => !colShown.has(f));
+  // shaping the grid with nothing on screen to say so.
+  const dropped = [...filters.keys()].filter((f) => !L.shown.has(f));
   for (const f of dropped) filters.delete(f);
-  if (sortField && !colShown.has(sortField)) {
+  if (sortField && !L.shown.has(sortField)) {
     sortField = null;
     sortDir = 0;
   }
@@ -535,17 +650,132 @@ function applyColumns() {
   refresh();
 }
 
+const isGrid = (v) => v === "requests" || v === "blocking";
+
+function markTabs() {
+  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.v === activeView);
+}
+
+// setView switches tab. The three list views are filled on demand and left
+// alone otherwise, so their queries only run while somebody is reading the
+// answer; the grid needs no request, being a projection of the retention
+// window the stream already delivers.
+function setView(id) {
+  if (!layouts.has(id) || id === activeView) return;
+  activeView = id;
+  markTabs();
+  document.querySelector(".gridScroll").hidden = !isGrid(id);
+  for (const v of ["sessions", "transactions", "logs"]) $("panel-" + v).hidden = v !== id;
+  buildColumnPanel();
+  applyColumns();
+  if (!isGrid(id)) pollView();
+}
+
+// blockingRows keeps the chains and drops everything else. The rows arrive
+// already flattened, a blocker immediately above what it blocks, so this
+// only has to decide membership and never reorders.
+function blockingRows(rows) {
+  const blockers = new Set();
+  for (const r of rows) {
+    const by = val(r, "by");
+    if (by) blockers.add(by);
+  }
+  return rows.filter((r) => val(r, "by") || blockers.has(val(r, "spid")));
+}
+
+// pollView asks for the active list view and schedules the next ask. It
+// follows the sampling period rather than a fixed one, with a floor: these
+// queries are heavier than the grid's and nobody reads a lock list five
+// times a second.
+let pollTimer = 0;
+function pollView() {
+  clearTimeout(pollTimer);
+  const v = activeView;
+  if (isGrid(v)) return;
+  fetch("/api/" + v + "?t=" + encodeURIComponent(token))
+    .then((r) => r.json().then((j) => (r.ok ? j : Promise.reject(new Error(j.error || r.statusText)))))
+    .then((j) => renderList(v, j))
+    .catch((e) => showListError(v, e.message))
+    .finally(() => {
+      if (activeView === v && !paused) pollTimer = setTimeout(pollView, Math.max(periodMs || 1000, 2000));
+    });
+}
+
+// The last payload each list view received, so switching a column on or
+// off redraws immediately instead of waiting for the next poll.
+const lastList = {};
+function renderActiveList() {
+  if (!isGrid(activeView) && lastList[activeView]) renderList(activeView, lastList[activeView]);
+}
+
+// renderList builds nodes rather than markup. These tables hold tens of
+// rows and refresh at human pace, so there is nothing to win from the
+// grid's per-cell diffing, and textContent escapes by construction.
+function renderList(view, payload) {
+  lastList[view] = payload;
+  const panel = $("panel-" + view);
+  panel.textContent = "";
+  panel.appendChild(listTable(view, payload.rows || []));
+  if (view === "transactions") {
+    const h = document.createElement("h2");
+    h.className = "listHeading";
+    h.textContent = "locks held by those transactions";
+    panel.appendChild(h);
+    panel.appendChild(listTable("locks", payload.locks || []));
+  }
+}
+
+function listTable(view, rows) {
+  const cols = columnsFor(view);
+  const t = document.createElement("table");
+  t.className = "listTable";
+  const hr = t.createTHead().insertRow();
+  for (const c of cols) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = c.title;
+    th.style.minWidth = c.width + "px";
+    hr.appendChild(th);
+  }
+  const tb = t.createTBody();
+  for (const r of rows) {
+    const tr = tb.insertRow();
+    for (const c of cols) {
+      const td = tr.insertCell();
+      td.textContent = c.text(r);
+      if (c.num) td.className = "num";
+    }
+  }
+  if (!rows.length) {
+    const td = tb.insertRow().insertCell();
+    td.colSpan = Math.max(1, cols.length);
+    td.className = "empty";
+    td.textContent = "nothing to show";
+  }
+  return t;
+}
+
+function showListError(view, message) {
+  const panel = $("panel-" + view);
+  panel.textContent = "";
+  const p = document.createElement("p");
+  p.className = "listError";
+  p.textContent = message;
+  panel.appendChild(p);
+}
+
 let dragField = null;
 
 // moveColumn drops from in front of to, in the full order rather than the
 // visible one, so a hidden column between them keeps its place.
 function moveColumn(from, to) {
   if (!from || !to || from === to) return;
-  const i = colOrder.indexOf(from);
-  const j = colOrder.indexOf(to);
+  const order = layouts.get(activeView).order;
+  const i = order.indexOf(from);
+  const j = order.indexOf(to);
   if (i < 0 || j < 0) return;
-  colOrder.splice(i, 1);
-  colOrder.splice(colOrder.indexOf(to) + (i < j ? 1 : 0), 0, from);
+  order.splice(i, 1);
+  order.splice(order.indexOf(to) + (i < j ? 1 : 0), 0, from);
   applyColumns();
 }
 
@@ -576,8 +806,9 @@ function say(text) {
 // survives a change of browser and can be handed to a colleague, which
 // local storage cannot do.
 function saveLayout() {
-  const columns = colOrder.map((f) => ({ field: f, show: colShown.has(f), width: colWidth.get(f) || 0 }));
-  post("/api/layout", JSON.stringify({ view: "requests", columns }), "application/json")
+  const L = layouts.get(activeView);
+  const columns = L.order.map((f) => ({ field: f, show: L.shown.has(f), width: L.width.get(f) || 0 }));
+  post("/api/layout", JSON.stringify({ view: activeView, columns }), "application/json")
     .then((r) => say("layout saved to " + r.path))
     .catch((e) => say("could not save the layout: " + e.message));
 }
@@ -933,6 +1164,8 @@ $("colsBtn").addEventListener("click", () => $("colDialog").showModal());
 $("colSave").addEventListener("click", saveLayout);
 $("helpBtn").addEventListener("click", toggleHelp);
 buildHelp();
+// setGrid calls it again once the server has said which views exist, so
+// the list starts with the four commands and gains the tabs on connecting.
 
 // Single keypresses, in the spirit of top and of the PowerShell prototype.
 // Ignored while the focus is in a filter box, or the letters would be
@@ -942,9 +1175,11 @@ globalThis.addEventListener("keydown", (e) => {
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
   const fn = KEYS[e.key];
-  if (!fn) return;
+  const view = viewKeys.get(e.key);
+  if (!fn && !view) return;
   e.preventDefault();
-  fn();
+  if (fn) fn();
+  else setView(view);
 });
 // Counts locally: it keeps moving while the connection is down, which is
 // honest, the instance is still up and this tool just cannot see it.

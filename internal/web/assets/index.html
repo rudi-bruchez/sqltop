@@ -47,6 +47,8 @@
   <div id="dashBody" class="dashBody"></div>
 </details>
 
+<nav id="tabs" class="tabs" aria-label="views"></nav>
+
 <div class="gridScroll">
   <table id="grid" aria-describedby="rowCount">
     <caption class="visually-hidden">Active requests on the connected instance</caption>
@@ -57,6 +59,14 @@
     <tbody id="gridBody"></tbody>
   </table>
 </div>
+
+<!-- The three views that are not projections of the retention window. Each
+     is filled on demand while its tab is open and left alone otherwise, so
+     the queries behind them, one of which walks the whole lock manager, run
+     only while somebody is reading the answer. -->
+<div class="listScroll" id="panel-sessions" hidden></div>
+<div class="listScroll" id="panel-transactions" hidden></div>
+<div class="listScroll" id="panel-logs" hidden></div>
 
 <footer id="statusBar">
   <span id="rowCount">0 requests</span>
@@ -71,6 +81,8 @@
 
 <dialog id="helpDialog" class="panel">
   <form method="dialog">
+    <h2>views</h2>
+    <dl id="helpViews" class="helpList"></dl>
     <h2>commands</h2>
     <dl id="helpList" class="helpList"></dl>
     <menu><button value="close">close</button></menu>
@@ -83,7 +95,7 @@
      does not follow. -->
 <dialog id="colDialog" class="panel">
   <form method="dialog">
-    <h2>columns</h2>
+    <h2>columns of <span id="colWhich"></span></h2>
     <div id="colList" class="colList"></div>
     <menu>
       <button type="button" id="colSave">save to sqltop.yaml</button>

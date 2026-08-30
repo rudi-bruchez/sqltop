@@ -196,6 +196,57 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("after switching a column back on the row pool has %d cells per row and the header has %d columns (%d rows in view)", got.Columns.PoolCells, len(got.Columns.AfterShow), got.Columns.Rows)
 	}
 
+	// The views of spec section 7: one tab each, and the three that are
+	// not projections of the retention window fetch their own data only
+	// while their tab is open.
+	if want := []string{"requests", "blocking", "sessions", "transactions", "logs"}; !equalStrings(got.Views.Tabs, want) {
+		t.Errorf("the tab bar shows %v, want %v", got.Views.Tabs, want)
+	}
+	if got.Views.Blocking.Rows == 0 || got.Views.Blocking.Rows >= got.Views.Blocking.Total {
+		t.Errorf("the blocking view shows %d of %d rows; it should keep the chains and drop the rest", got.Views.Blocking.Rows, got.Views.Blocking.Total)
+	}
+	if !got.Views.Blocking.AllInAChain {
+		t.Error("the blocking view is showing a row that is neither blocked nor blocking")
+	}
+	if !got.Views.Blocking.DepthShown {
+		t.Error("the blocking view does not show the depth column, which the catalogue turns on for it and off for requests")
+	}
+	if !got.Views.Sessions.Visible || !got.Views.Sessions.GridHidden {
+		t.Errorf("u left the sessions panel visible=%v with the grid hidden=%v", got.Views.Sessions.Visible, got.Views.Sessions.GridHidden)
+	}
+	if got.Views.Sessions.Rows != 2 {
+		t.Errorf("the sessions view drew %d rows from a fixture of 2: %v", got.Views.Sessions.Rows, got.Views.Sessions.FirstRow)
+	}
+	if len(got.Views.Sessions.Headings) == 0 || got.Views.Sessions.Headings[0] != "spid" {
+		t.Errorf("the sessions table's headings are %v", got.Views.Sessions.Headings)
+	}
+	// The durations are formatted, not printed raw: 900 seconds of open
+	// transaction has to read as a duration or the column is useless.
+	if !containsString(got.Views.Sessions.FirstRow, "15m 00s") {
+		t.Errorf("the first session row is %v; a 900 second transaction should read as a duration", got.Views.Sessions.FirstRow)
+	}
+	if got.Views.Transactions.Tables != 2 {
+		t.Errorf("the transactions view drew %d tables; it shows the transactions and the locks they hold", got.Views.Transactions.Tables)
+	}
+	if got.Views.Transactions.TranRows != 1 || got.Views.Transactions.LockRows != 2 {
+		t.Errorf("the transactions view drew %d transactions and %d lock groups, want 1 and 2", got.Views.Transactions.TranRows, got.Views.Transactions.LockRows)
+	}
+	if !strings.Contains(got.Views.Transactions.LockText, "Orders") {
+		t.Error("the lock table does not name the locked object, which is the question that view answers")
+	}
+	if !got.Views.Logs.Visible || got.Views.Logs.Rows != 2 {
+		t.Errorf("l left the log panel visible=%v with %d rows", got.Views.Logs.Visible, got.Views.Logs.Rows)
+	}
+	if !strings.Contains(got.Views.Logs.Text, "LOG_BACKUP") {
+		t.Error("the log view does not show what is stopping the log being reused, which is the answer somebody looking at a full log wants")
+	}
+	if got.Views.PanelFollows.Which != "logs" || containsString(got.Views.PanelFollows.Fields, "sql_text") {
+		t.Errorf("the column panel says %q and offers %v while the log view is on screen", got.Views.PanelFollows.Which, got.Views.PanelFollows.Fields)
+	}
+	if !got.Views.BackToGrid {
+		t.Error("r did not bring the unfiltered grid back")
+	}
+
 	// The single-keypress commands of spec section 7.
 	if !got.Commands.Help.Open || got.Commands.Help.Entries == 0 {
 		t.Errorf("h left the help dialog open=%v with %d entries", got.Commands.Help.Open, got.Commands.Help.Entries)
@@ -420,6 +471,40 @@ type e2eResult struct {
 		Rows      int      `json:"rows"`
 		AfterShow []string `json:"afterShow"`
 	} `json:"columns"`
+	Views struct {
+		Tabs     []string `json:"tabs"`
+		Blocking struct {
+			Rows        int  `json:"rows"`
+			Total       int  `json:"total"`
+			GridVisible bool `json:"gridVisible"`
+			AllInAChain bool `json:"allInAChain"`
+			DepthShown  bool `json:"depthShown"`
+		} `json:"blocking"`
+		Sessions struct {
+			Visible    bool     `json:"visible"`
+			GridHidden bool     `json:"gridHidden"`
+			Headings   []string `json:"headings"`
+			Rows       int      `json:"rows"`
+			FirstRow   []string `json:"firstRow"`
+		} `json:"sessions"`
+		Transactions struct {
+			Visible  bool   `json:"visible"`
+			Tables   int    `json:"tables"`
+			TranRows int    `json:"tranRows"`
+			LockRows int    `json:"lockRows"`
+			LockText string `json:"lockText"`
+		} `json:"transactions"`
+		Logs struct {
+			Visible bool   `json:"visible"`
+			Rows    int    `json:"rows"`
+			Text    string `json:"text"`
+		} `json:"logs"`
+		PanelFollows struct {
+			Which  string   `json:"which"`
+			Fields []string `json:"fields"`
+		} `json:"panelFollows"`
+		BackToGrid bool `json:"backToGrid"`
+	} `json:"views"`
 	Commands struct {
 		Help struct {
 			Open    bool `json:"open"`
@@ -490,6 +575,13 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 			SQLText:   fmt.Sprintf("SELECT %d FROM dbo.T", i),
 		}
 	}
+	// One chain of three, so the blocking view has something to keep and
+	// 197 rows to drop. Without it that view would be empty and every
+	// assertion about it would pass on a page that filtered nothing.
+	rows[1].BlockedBy = rows[0].Ref.SessionID
+	rows[1].Depth = 1
+	rows[2].BlockedBy = rows[1].Ref.SessionID
+	rows[2].Depth = 2
 
 	src := fake.New(rows)
 	src.Info = model.ServerInfo{
@@ -507,6 +599,33 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 		// buffer_pool_mb is deliberately absent: a key the page names and
 		// the server never sends must render exactly like an unavailable
 		// one.
+	}
+
+	// The three on-demand views. Small fixtures: what is under test is the
+	// tab, the request it makes and the table it draws, not the arithmetic
+	// of a server that is not here.
+	src.SessionRows = []model.SessionSample{
+		{SessionID: 51, Login: "svc", Host: "APP01", Program: "sqltop e2e", Status: "sleeping",
+			Database: "alpha", ConnectedSec: 3600, IdleSec: 120, OpenTran: 1, TranSec: 900,
+			CPUMs: 4200, Reads: 99, Writes: 3, MemoryMB: 1.5},
+		{SessionID: 52, Login: "reporting", Host: "BI02", Program: "SSMS", Status: "running",
+			Database: "beta", ConnectedSec: 60, CPUMs: 12},
+	}
+	src.TranRows = []model.TransactionSample{
+		{TransactionID: 90210, SessionID: 51, Name: "user_transaction", ElapsedSec: 900,
+			Type: "read/write", State: "active", Database: "alpha", Databases: 1,
+			LogBytes: 3 << 20, LogRecords: 412},
+	}
+	src.LockRows = []model.LockSample{
+		{SessionID: 51, Database: "alpha", ResourceType: "OBJECT", Object: "Orders",
+			Mode: "IX", Status: "GRANT", Count: 1},
+		{SessionID: 51, Database: "alpha", ResourceType: "PAGE", Mode: "IX", Status: "GRANT", Count: 17},
+	}
+	src.LogRows = []model.LogSpaceSample{
+		{Database: "alpha", RecoveryModel: "FULL", ReuseWait: "LOG_BACKUP", State: "ONLINE",
+			SizeMB: 512, UsedMB: 480, UsedPercent: 93.75},
+		{Database: "master", RecoveryModel: "SIMPLE", ReuseWait: "NOTHING", State: "ONLINE",
+			SizeMB: 2, UsedMB: 0.5, UsedPercent: 25},
 	}
 
 	w := window.New(time.Minute, 5000)
@@ -588,6 +707,20 @@ func checkSnapshotFile(t *testing.T, dir string, wantRows int) {
 		t.Errorf("the snapshot holds %d rows and the view had %d; the virtualised grid keeps about forty in the DOM, which is what a document-level save would have caught", n-1, wantRows)
 	}
 }
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(s []string, want string) bool { return idx(s, want) >= 0 }
 
 func idx(s []string, want string) int {
 	for i, v := range s {

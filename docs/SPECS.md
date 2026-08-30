@@ -373,9 +373,62 @@ PowerShell prototype. Shortcuts are shown in the tab labels.
 | Repetitive queries | `q` | Aggregation of the retention window by `query_hash`: executions seen, distinct sessions, total CPU, average and maximum elapsed, one sample text. This is what catches the query that is individually fast and collectively ruinous | Derived from stored samples |
 | Throughput | `t` | Request counts and rates over the window: active requests, batch requests/sec, compilations, recompilations, by database and by command | Derived, plus `SQL Statistics` |
 | Programs | `a` | Aggregation by program name and login. `a` for applications: `p` is pause | Derived |
+| Sessions | `u` | Every open user session: who, from where, connected for how long, idle for how long, and whether a transaction is open and since when | `sys.dm_exec_sessions`, `sys.dm_tran_session_transactions`, `sys.dm_tran_active_transactions` |
+| Transactions | `x` | Every open user transaction with its age, state, type and log written, and underneath it what each holding session has locked | `sys.dm_tran_active_transactions`, `sys.dm_tran_database_transactions`, `sys.dm_tran_locks` |
+| Transaction logs | `l` | Every database's log: size, active portion, percent used, recovery model, and what is stopping the log being reused | `sys.dm_os_performance_counters`, `sys.databases` |
 
-Views are projections of one shared retention window. Switching views does not
-re-query the server.
+`u` for users and `x` for xact, which is the engine's own abbreviation, in
+`XACT_STATE` and in every `sys.dm_tran_` view. `t` is the throughput view
+and `s` is the snapshot command.
+
+The first six views are projections of one shared retention window;
+switching between them does not re-query the server. The blocking view is
+one of them and needs no query of its own: the rows arrive already
+flattened, a blocker immediately above what it blocks, so that view is a
+membership decision over rows the stream already delivered.
+
+### 7.2 The three views that are not projections
+
+Sessions, transactions and transaction logs are point in time rather than a
+series, and each is a query of its own. They run on demand, while their tab
+is open, and never on a tier. That is the same rule the request grid follows
+from the other end, where it drops the rows nobody reads rather than paying
+to describe them; here it is what makes the lock view affordable at all.
+
+`sys.dm_tran_locks` has one row per lock, so a single large statement puts
+millions in it. The tool never lists them. It aggregates on the server by
+session, database, resource type, object, mode and status, so the wire and
+the browser see tens of rows whatever the engine is holding, and the scan is
+the only cost left. The result is capped at two thousand groups, which only
+bites on a session holding locks on more than two thousand distinct objects.
+
+Only `OBJECT` locks carry a name. `OBJECT_NAME` takes a database id, so it
+resolves across databases without a context switch; a page, key or row lock
+names a partition instead, and turning one of those into an object name
+means a query inside that database, per database, which is not something to
+do on a screen that refreshes. An empty name in that column means "not
+resolvable cheaply", never "no object".
+
+The log figures come from the performance counters rather than from
+`sys.dm_db_log_space_usage`, which returns one row for the current database
+and would mean a context switch per database. `sys.dm_db_log_stats` would
+add the size since the last backup, which is finer, but it is SQL Server
+2016 and later and database-scoped in the same way. What is shown instead is
+the used size, which is the active portion, next to `log_reuse_wait_desc`
+from `sys.databases`, which is the answer somebody looking at a full log
+actually wants and which a percentage on its own never gives.
+
+All three need `VIEW SERVER STATE`. A login without it gets the reason
+rather than a list of one session presented as the instance: a plausible
+answer that happens to be a lie is the thing the whole Available convention
+exists to prevent.
+
+Every duration in these views is computed on the server, against the
+server's clock. The tool may be on another machine with a clock minutes out,
+and a transaction reported as running for negative four minutes is worse
+than no figure at all. Seconds rather than milliseconds, because `DATEDIFF`
+in milliseconds overflows a little past 24 days and a session open since
+last month is exactly what the sessions view is for.
 
 ### 7.1 Commands
 
@@ -714,7 +767,13 @@ work out by hand.
 
 Every view of section 7 is configured independently under `views`, because a
 blocking chain and a repetitive-query aggregation do not want the same columns
-in the same order.
+in the same order. The requests and blocking views read the same rows and
+offer the same columns, and differ only in what each shows by default: the
+chain depth is the point of one and repeats the SQL text's own indentation
+in the other. The lock list under the transactions view is configured like a
+view of its own, `locks`, because its columns are separate; it has no key
+and no tab, because an open transaction and what it has locked are one
+question.
 
 Every refresh tier of section 10 is configurable here, including the live plan
 refresh period, and the collection budget past which the tool throttles itself. Connection secrets are not stored

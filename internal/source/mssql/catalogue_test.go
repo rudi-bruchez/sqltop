@@ -123,6 +123,30 @@ func queryCatalogue() []catalogueEntry {
 			sql:  cpuHistoryQuery,
 		},
 		{
+			name: "sessionsQuery",
+			when: "on demand, while the sessions view is open",
+			why:  "Every open user session: who is connected, for how long, how long since their last request ended, and the age of their oldest open transaction. Cheap: one row per connection, and the OUTER APPLY reads views that hold one row per open transaction rather than one per lock. The durations are computed on the server's own clock, because a tool on another machine with a clock minutes out would otherwise report a transaction running for negative four minutes.",
+			sql:  sessionsQuery,
+		},
+		{
+			name: "transactionsQuery",
+			when: "on demand, while the transactions view is open",
+			why:  "Every open user transaction, with its age, its state and how much log it has written. A transaction spanning several databases is one row, with a count, rather than one row per database pretending to be several transactions.",
+			sql:  transactionsQuery,
+		},
+		{
+			name: "locksQuery",
+			when: "on demand, while the transactions view is open, alongside transactionsQuery",
+			why:  "What each session holding a transaction has locked, aggregated by database, resource type, object, mode and status. Never one row per lock: a single statement can hold millions and the question is which object, not which row of which page. This is the most expensive query in the tool after the grid, because it walks the lock manager, which is why it is on demand and never on a tier. Only OBJECT locks are named; OBJECT_NAME takes a database id so it resolves across databases without a context switch, while a page or key lock names a partition and turning that into a name means a query inside each database.",
+			sql:  locksQuery,
+		},
+		{
+			name: "logSpaceQuery",
+			when: "on demand, while the transaction log view is open",
+			why:  "Every database's log: size, active portion, percent used, recovery model, and what is stopping the log being reused. Read from the performance counters rather than from sys.dm_db_log_space_usage, which returns one row for the current database only and would mean a context switch per database.",
+			sql:  logSpaceQuery,
+		},
+		{
 			name: "costQuery",
 			when: "every tick, on whatever tier ran last",
 			why:  "The tool's own server CPU and logical reads, read from its own session. This is what the observation budget throttles against, and it is why the connection is pinned: a pooled connection would be reset between checkouts and zero these counters.",

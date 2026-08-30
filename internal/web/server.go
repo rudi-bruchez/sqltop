@@ -40,7 +40,7 @@ type Server struct {
 	mu   sync.RWMutex
 	cfg  config.Config
 	dash []DashGroup
-	grid []GridCol
+	grid []GridView
 }
 
 // WithConfig gives the server the resolved configuration: what the
@@ -53,7 +53,7 @@ func (s *Server) WithConfig(cfg config.Config) *Server {
 	defer s.mu.Unlock()
 	s.cfg = cfg
 	s.dash = resolveDashboard(cfg.Dashboard())
-	s.grid = resolveGrid("requests", cfg.Columns("requests"))
+	s.grid = resolveAllGrids(cfg)
 	return s
 }
 
@@ -123,7 +123,7 @@ func (s *Server) dashboard() []DashGroup {
 	return s.dash
 }
 
-func (s *Server) gridColumns() []GridCol {
+func (s *Server) gridColumns() []GridView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.grid
@@ -153,6 +153,9 @@ func (s *Server) routes() ([]route, error) {
 		{"/api/layout", http.HandlerFunc(s.layout)},
 		{"/api/period", http.HandlerFunc(s.period)},
 		{"/api/snapshot", http.HandlerFunc(s.snapshot)},
+		{"/api/sessions", http.HandlerFunc(s.sessions)},
+		{"/api/transactions", http.HandlerFunc(s.transactions)},
+		{"/api/logs", http.HandlerFunc(s.logs)},
 	}, nil
 }
 

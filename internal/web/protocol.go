@@ -407,9 +407,11 @@ type SnapshotPayload struct {
 	// table exists: it never changes for the life of a connection, and a
 	// client that reconnects gets a fresh Encoder and is told again.
 	Cols []string `json:"cols,omitempty"`
-	// Grid is the column selection and order of spec section 8.2, sent
-	// once per connection with Cols.
-	Grid []GridCol `json:"grid,omitempty"`
+	// Grid is every view and its column selection, in catalogue order,
+	// sent once per connection with Cols. All of them travel rather than
+	// only the one on screen: a few hundred bytes once, against a round
+	// trip every time somebody presses a tab key.
+	Grid []GridView `json:"grid,omitempty"`
 	// Figures carries the dashboard of spec section 6. It was on the wire
 	// for a release before anything read it, which is why it is a map of
 	// model.Figure rather than a struct: the collector merges four tiers
@@ -462,6 +464,27 @@ func resolveGrid(view string, cols []config.ViewColumn) []GridCol {
 			continue
 		}
 		out = append(out, GridCol{Field: c.Field, Title: t, Width: c.Width, Show: c.Show == nil || *c.Show})
+	}
+	return out
+}
+
+// GridView is one view on the wire: what to call its tab, which key
+// switches to it, and which columns it draws in what order. Key is empty
+// for a list that lives inside another view rather than having a tab, which
+// today is the lock list inside the transactions view.
+type GridView struct {
+	ID      string    `json:"id"`
+	Title   string    `json:"t"`
+	Key     string    `json:"k,omitempty"`
+	Columns []GridCol `json:"cols"`
+}
+
+// resolveAllGrids resolves every view in the catalogue against one
+// configuration, which is what a client is sent on connecting.
+func resolveAllGrids(cfg config.Config) []GridView {
+	out := make([]GridView, 0, len(model.ViewCatalogue))
+	for _, v := range model.ViewCatalogue {
+		out = append(out, GridView{ID: v.ID, Title: v.Title, Key: v.Key, Columns: resolveGrid(v.ID, cfg.Columns(v.ID))})
 	}
 	return out
 }
@@ -532,7 +555,7 @@ type Encoder struct {
 	seq  uint64
 	sent map[string]struct{} // ref keys already delivered to this client
 	dash []DashGroup         // sent once, with the column header
-	grid []GridCol           // ditto
+	grid []GridView          // ditto, every view
 }
 
 // WithDashboard sets the dashboard this encoder describes to its client.
@@ -542,7 +565,7 @@ func (e *Encoder) WithDashboard(d []DashGroup) *Encoder {
 }
 
 // WithGrid sets the grid columns this encoder describes to its client.
-func (e *Encoder) WithGrid(g []GridCol) *Encoder {
+func (e *Encoder) WithGrid(g []GridView) *Encoder {
 	e.grid = g
 	return e
 }

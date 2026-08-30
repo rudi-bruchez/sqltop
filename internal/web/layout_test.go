@@ -77,7 +77,7 @@ func TestSavedLayoutReachesTheFileAndTheNextClient(t *testing.T) {
 
 	// The running server has to agree with the file it just wrote, or the
 	// next browser to connect gets the old layout back.
-	grid := srv.gridColumns()
+	grid := viewColumns(srv.gridColumns(), "requests")
 	if len(grid) == 0 || grid[0].Field != "sql_text" {
 		t.Fatalf("the next client would be sent %v; the saved order starts with sql_text", gridFields(grid))
 	}
@@ -172,6 +172,16 @@ func fields(cols []config.ViewColumn) []string {
 		out[i] = c.Field
 	}
 	return out
+}
+
+// viewColumns picks one view out of what a client would be sent.
+func viewColumns(views []GridView, id string) []GridCol {
+	for _, v := range views {
+		if v.ID == id {
+			return v.Columns
+		}
+	}
+	return nil
 }
 
 func gridFields(cols []GridCol) []string {

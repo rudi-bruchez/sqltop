@@ -305,3 +305,35 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
 .helpList dd { margin: 0; }
 
 .notice { color: #8fbf7f; }
+
+.tabs { flex: none; display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid #2a2e37; }
+.tabs button {
+  background: none;
+  color: #9aa1ad;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  padding: 3px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.tabs button:hover { color: #d7dae0; }
+.tabs button.on { background: #1c1f26; border-color: #2a2e37; color: #d7dae0; }
+.tabs .tabKey { color: #6fb3d2; margin-left: 6px; }
+
+.listScroll { flex: 1 1 auto; overflow: auto; padding: 0 10px 10px; }
+.listTable { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 12px; }
+.listTable th {
+  position: sticky;
+  top: 0;
+  background: #1c1f26;
+  text-align: left;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-bottom: 1px solid #2a2e37;
+  white-space: nowrap;
+}
+.listTable td { padding: 0 8px; height: 22px; border-bottom: 1px solid #22262d; white-space: nowrap; }
+.listTable tbody tr:hover { background: #232830; }
+.listTable td.empty, .listError { color: #7a828e; padding: 10px 8px; }
+.listHeading { font-size: 12px; font-weight: 600; margin: 16px 0 6px; color: #9aa1ad; }
