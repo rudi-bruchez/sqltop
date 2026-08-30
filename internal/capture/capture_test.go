@@ -173,7 +173,11 @@ func TestALossIsWrittenAsAGapRecord(t *testing.T) {
 	f.prog = model.CaptureProgress{Total: 500, Missed: 487}
 	f.mu.Unlock()
 	f.offer(model.CapturedStatement{Kind: "batch", Text: "SELECT 1"})
-	waitFor(t, func() bool { return m.State(ctx).Missed == 487 })
+	// The fake reports the same loss on every poll and the manager adds them
+	// up, so the total only equals 487 for one interval. Waiting for it to
+	// reach 487 is what makes this deterministic; the file below is where
+	// the exact count is asserted.
+	waitFor(t, func() bool { return m.State(ctx).Missed >= 487 })
 
 	body, _ := os.ReadFile(m.State(ctx).File)
 	if !strings.Contains(string(body), `"record":"gap"`) || !strings.Contains(string(body), `"lost":487`) {
