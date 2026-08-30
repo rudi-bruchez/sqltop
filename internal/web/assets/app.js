@@ -184,8 +184,9 @@ const CELL_SESSIONS = {
   status: { text: (r) => r.status },
   database: { text: (r) => r.database },
   connected: { num: true, text: (r) => fDur(r.connected) },
-  // Blank while a request is running: the engine reports no end time for
-  // one that has not ended, and "0s idle" would read as a measurement.
+  // Blank while a request is running. The engine does report an end time
+  // then, the previous request's, so the source is what decides this; here
+  // a zero means "not idle" and drawing it as "0s" would read as one.
   idle: { num: true, text: (r) => (r.idle ? fDur(r.idle) : "") },
   open_tran: { num: true, text: (r) => n0(r.open_tran) },
   tran_age: { num: true, text: (r) => (r.tran_age ? fDur(r.tran_age) : "") },

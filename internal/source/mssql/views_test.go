@@ -2,6 +2,7 @@ package mssql
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -125,6 +126,81 @@ func TestTransactionsSeesAnOpenTransactionAndWhatItLocked(t *testing.T) {
 	if !named {
 		t.Errorf("no OBJECT lock on sqltop_tran_probe among %d lock groups; the object name is the whole point of this view", len(locks))
 	}
+}
+
+// TestIdleIsBlankWhileASessionIsBusy is a regression test for two versions
+// of the same lie, both caught against the container rather than reasoned
+// about. sys.dm_exec_sessions carries last_request_end_time while a request
+// is running, holding the end of the previous request, so a session busy at
+// that instant reported three seconds of idle. Comparing that end against
+// last_request_start_time did not fix it either: the previous statement had
+// started and finished inside the same millisecond and the two came back
+// equal, so the comparison is wrong on exactly the sessions this view is
+// about. The session's own status is what answers it.
+func TestIdleIsBlankWhileASessionIsBusy(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+
+	// One connection that runs something and then genuinely sits, and one
+	// that is still running when the sample is taken. Both pinned: a pool
+	// would put the two statements on different sessions and this would be
+	// watching the wrong ones.
+	_, quietSPID := pinnedSession(t, ctx)
+	busy, busySPID := pinnedSession(t, ctx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = busy.ExecContext(ctx, `WAITFOR DELAY '00:00:06'`)
+	}()
+	defer func() { <-done }()
+	time.Sleep(3 * time.Second)
+
+	rows, err := s.Sessions(ctx)
+	if err != nil {
+		t.Fatalf("Sessions: %v", err)
+	}
+	seen := 0
+	for _, r := range rows {
+		switch r.SessionID {
+		case quietSPID:
+			seen++
+			if r.IdleSec < 2 {
+				t.Errorf("a session idle for about three seconds reports %ds", r.IdleSec)
+			}
+		case busySPID:
+			seen++
+			if r.Status != "running" {
+				t.Errorf("the busy session reports status %q", r.Status)
+			}
+			if r.IdleSec != 0 {
+				t.Errorf("a session running a statement right now reports %ds of idle; the column would read as a measurement", r.IdleSec)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("found %d of the two sessions this test opened", seen)
+	}
+}
+
+// pinnedSession opens one connection, keeps it, and returns its session id.
+// Everything run through it lands on that session.
+func pinnedSession(t *testing.T, ctx context.Context) (*sql.Conn, int64) {
+	t.Helper()
+	db := adminConn(t)
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	var spid int64
+	if err := conn.QueryRowContext(ctx, `SELECT @@SPID`).Scan(&spid); err != nil {
+		t.Fatal(err)
+	}
+	return conn, spid
 }
 
 // TestTransactionNamesTheDatabaseTheWorkIsIn is a regression test for a

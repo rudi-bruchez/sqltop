@@ -340,7 +340,8 @@ SELECT s.session_id,
        ISNULL(s.login_name, N''), ISNULL(s.host_name, N''), ISNULL(s.program_name, N''),
        ISNULL(s.status, N''), ISNULL(DB_NAME(s.database_id), N''),
        ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
-       ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0),
+       CASE WHEN s.status = 'running' THEN 0
+            ELSE ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0) END,
        s.cpu_time, s.reads, s.writes, s.memory_usage,
        s.open_transaction_count,
        ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)

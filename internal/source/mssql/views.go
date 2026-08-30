@@ -15,6 +15,26 @@ import (
 // this tool giving those.
 var errNoInstanceWideView = errors.New("mssql: this login cannot see the whole instance; the session, transaction and log views need VIEW SERVER STATE")
 
+// On the idle figure, which took two attempts to get right.
+//
+// last_request_end_time is not null while a request is running: it holds the
+// end of the previous one. Reading it directly, as the first version did,
+// reported a session busy at that very instant as having been idle for three
+// seconds. The container confirmed that on the first attempt.
+//
+// The second version compared last_request_end_time against
+// last_request_start_time, on the reasoning that a request which has started
+// and not ended leaves the start later than the end. It reported the same
+// three seconds, because the previous request on that session had begun and
+// finished inside the same millisecond and the two timestamps came back
+// equal. A comparison that is wrong whenever the last statement was fast is
+// wrong on exactly the sessions this view is about.
+//
+// So the discriminator is the session's own status, which sys.dm_exec_sessions
+// documents as running while a request is active and sleeping while it waits
+// for the next batch. It costs nothing, and it does not need a semi-join
+// against sys.dm_exec_requests to say what that view already says.
+//
 // The durations are computed on the server, against the server's clock, for
 // the same reason the request grid's elapsed time is: the tool may be on
 // another machine, in another time zone, with a clock that is minutes out,
@@ -28,7 +48,8 @@ SELECT s.session_id,
        ISNULL(s.login_name, N''), ISNULL(s.host_name, N''), ISNULL(s.program_name, N''),
        ISNULL(s.status, N''), ISNULL(DB_NAME(s.database_id), N''),
        ISNULL(DATEDIFF(second, s.login_time, SYSDATETIME()), 0),
-       ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0),
+       CASE WHEN s.status = 'running' THEN 0
+            ELSE ISNULL(DATEDIFF(second, s.last_request_end_time, SYSDATETIME()), 0) END,
        s.cpu_time, s.reads, s.writes, s.memory_usage,
        s.open_transaction_count,
        ISNULL(DATEDIFF(second, t.oldest_begin, SYSDATETIME()), 0)
