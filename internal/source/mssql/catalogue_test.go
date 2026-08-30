@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -20,10 +21,11 @@ var updateDoc = flag.Bool("update", false, "rewrite docs/QUERIES.md from the cat
 // catalogueEntry is one statement this package can send to a monitored
 // server, with enough context to judge it without reading the Go around it.
 type catalogueEntry struct {
-	name string
-	when string // what makes it run
-	why  string // what it is for, and anything a reader should know before changing it
-	sql  string
+	name   string
+	when   string // what makes it run
+	why    string // what it is for, and anything a reader should know before changing it
+	sql    string
+	writes bool // the capture DDL, and the only statements the read-only check below lets through
 }
 
 // queryCatalogue is the single list of everything this package sends. It
@@ -176,6 +178,57 @@ func queryCatalogue() []catalogueEntry {
 			why:  "The tool's own server CPU and logical reads, read from its own session. This is what the observation budget throttles against, and it is why the connection is pinned: a pooled connection would be reset between checkouts and zero these counters.",
 			sql:  costQuery,
 		},
+		{
+			name:   "createCaptureQueryTemplate",
+			when:   "on the c command, only when -capture was passed",
+			why:    "Creates the scoped capture. Both ring buffer caps are stated because a target naming only MAX_MEMORY silently gets a thousand-event limit, measured on 2019 and 2022. ALLOW_SINGLE_EVENT_LOSS rather than NO_EVENT_LOSS, which would make the monitored workload wait for the buffer.",
+			sql:    createCaptureQueryTemplate,
+			writes: true,
+		},
+		{
+			name:   "startCaptureQueryTemplate",
+			when:   "immediately after createCaptureQueryTemplate",
+			why:    "Starts the session, which STARTUP_STATE = OFF deliberately does not do. Kept separate because the two cannot be made one statement, which is the window section 5 of the design records.",
+			sql:    startCaptureQueryTemplate,
+			writes: true,
+		},
+		{
+			name:   "stopCaptureQueryTemplate",
+			when:   "when a capture ends, for any of the reasons in model.StopReason, and once per session the sweep names",
+			why:    "Removes the session. An event session outlives the process that made it, so this is not optional tidiness.",
+			sql:    stopCaptureQueryTemplate,
+			writes: true,
+		},
+		{
+			name: "sweepCaptureQueryTemplate",
+			when: "at connection and before each new capture, only when -capture was passed",
+			why:  "Names the sessions under this tool's prefix that are dead by construction: a definition that is not started, or a started session past twice the cap. Anything younger may belong to another instance of sqltop watching the same server. The age comparison uses SYSDATETIME because create_time is local server time.",
+			sql:  sweepCaptureQueryTemplate,
+		},
+		{
+			name: "runningCapturesQuery",
+			when: "on every read of the capture panel",
+			why:  "Reports the other captures alive on this instance, so a second watcher of one session learns it is doubling the dispatch cost on the workload being watched. Nothing else would tell them, because that cost is invisible to the observation budget.",
+			sql:  runningCapturesQuery,
+		},
+		{
+			name: "drainCaptureQueryTemplate",
+			when: "every two seconds while a capture runs, whether or not the panel is open",
+			why:  "Reads the ring buffer target and the session's dropped event count. Draining does not wait for a reader: a buffer nobody empties loses events in silence.",
+			sql:  drainCaptureQueryTemplate,
+		},
+		{
+			name: "capturePermissionQuery",
+			when: "inside Identify, only when -capture was passed",
+			why:  "Asks for ALTER ANY EVENT SESSION and VIEW SERVER STATE together, because neither implies the other and a login holding only the first would create a capture it could never read.",
+			sql:  capturePermissionQuery,
+		},
+		{
+			name: "watchedSessionQueryTemplate",
+			when: "every two seconds while a capture runs",
+			why:  "Whether the watched session is still the one the capture started on. login_time moves when a pooled connection is reset and connect_time does not, which is why this reads the first. Asked of the server rather than of the retention window, which holds no login time and drops idle sessions entirely.",
+			sql:  watchedSessionQueryTemplate,
+		},
 	}
 }
 
@@ -206,6 +259,12 @@ func queryCatalogue() []catalogueEntry {
 // measurement to redo.
 func TestEveryQueryCarriesTheHints(t *testing.T) {
 	for _, e := range queryCatalogue() {
+		if e.writes {
+			// DDL takes no query hint. CREATE EVENT SESSION ... OPTION
+			// (MAXDOP 1) is Msg 156 on 2019 and 2022 alike, so this is a
+			// property of T-SQL rather than an exemption granted.
+			continue
+		}
 		if !strings.Contains(e.sql, "OPTION (MAXDOP 1)") {
 			t.Errorf("%s is missing OPTION (MAXDOP 1)", e.name)
 		}
@@ -225,12 +284,23 @@ func TestEveryQueryCarriesTheHints(t *testing.T) {
 func TestNoQueryWritesToTheMonitoredServer(t *testing.T) {
 	forbidden := []string{"INSERT", "UPDATE", "DELETE", "MERGE", "DROP", "CREATE", "ALTER", "TRUNCATE", "EXEC", "EXECUTE", "GRANT", "REVOKE", "DBCC", "KILL", "BACKUP", "RESTORE"}
 	for _, e := range queryCatalogue() {
+		if e.writes {
+			// The capture of docs/specs/2026-08-30-session-capture-design.md
+			// is the exception section 2 of that document named and argued.
+			// TestTheWriteExceptionIsOnlyTheCapture keeps it narrow, and that
+			// half is the one that matters.
+			continue
+		}
+		// A quoted literal is data, not a statement. Without this,
+		// capturePermissionQuery reports the tool altering the server
+		// because it asks whether the login may.
+		sql := stripLiterals(e.sql)
 		// The underscore counts as a word character, or every reference to
 		// sys.dm_exec_requests reports the tool executing something. That
 		// false positive is not hypothetical: it fired on three of these
 		// queries the first time this check ran, and a check that cries
 		// wolf is a check somebody deletes.
-		words := strings.FieldsFunc(strings.ToUpper(e.sql), func(r rune) bool {
+		words := strings.FieldsFunc(strings.ToUpper(sql), func(r rune) bool {
 			return !(r >= 'A' && r <= 'Z') && r != '_'
 		})
 		for _, w := range words {
@@ -239,6 +309,128 @@ func TestNoQueryWritesToTheMonitoredServer(t *testing.T) {
 					t.Errorf("%s contains the word %s; this tool is read-only on the monitored server (CLAUDE.md)", e.name, bad)
 				}
 			}
+		}
+	}
+}
+
+// stripLiterals blanks single-quoted strings, keeping the quotes so nothing
+// on either side is joined into one word. Doubled quotes inside a literal are
+// an escaped quote and stay inside it.
+func stripLiterals(sql string) string {
+	var b strings.Builder
+	in := false
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		if c == '\'' {
+			in = !in
+			b.WriteByte(c)
+			continue
+		}
+		if in {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// TestTheWriteExceptionIsOnlyTheCapture stops the exceptions above from
+// spreading. A statement may claim them only if it is one of these three by
+// name, and only if its text is the DDL that names a bracketed identifier
+// this package builds.
+func TestTheWriteExceptionIsOnlyTheCapture(t *testing.T) {
+	allowed := map[string]bool{
+		"createCaptureQueryTemplate": true,
+		"startCaptureQueryTemplate":  true,
+		"stopCaptureQueryTemplate":   true,
+	}
+	claimed := map[string]bool{}
+	for _, e := range queryCatalogue() {
+		if !e.writes {
+			continue
+		}
+		if !allowed[e.name] {
+			t.Errorf("%s claims the write exception; only the capture DDL may", e.name)
+			continue
+		}
+		if claimed[e.name] {
+			t.Errorf("%s appears twice in the catalogue; a second entry under an allowed name would inherit the exception", e.name)
+		}
+		claimed[e.name] = true
+		// Every allowed statement is an EVENT SESSION statement naming a
+		// bracketed identifier and nothing else. This is deliberately not a
+		// substring test for "[%s]": that would let any statement carrying
+		// that fragment through, DROP DATABASE included.
+		if !eventSessionDDL(e.sql) {
+			t.Errorf("%s is not an EVENT SESSION statement over a bracketed name: %q", e.name, e.sql)
+		}
+	}
+	for name := range allowed {
+		if !claimed[name] {
+			t.Errorf("%s is allowed to write but is not in the catalogue", name)
+		}
+	}
+}
+
+// eventSessionDDL matches the three shapes and nothing else, rendered with a
+// name under this tool's prefix so the prefix rule is actually exercised
+// rather than assumed. Checking the raw template would prove nothing: it
+// contains [%s], which names no prefix at all.
+//
+// Every pattern is anchored at both ends. Without a closing anchor a
+// developer could append anything to a template, DROP DATABASE included, and
+// this would still pass.
+func eventSessionDDL(tmpl string) bool {
+	name := capturePrefix + "51_a3f2c9d1"
+	n := strings.Count(tmpl, "%s") + strings.Count(tmpl, "%d")
+	var rendered string
+	switch n {
+	case 1:
+		rendered = fmt.Sprintf(tmpl, name)
+	case 3:
+		rendered = fmt.Sprintf(tmpl, name, 51, 51)
+	default:
+		return false
+	}
+	if !strings.Contains(rendered, "["+capturePrefix) {
+		return false
+	}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`(?s)\A` + regexp.QuoteMeta("CREATE EVENT SESSION ["+name+"] ON SERVER") + `.*STARTUP_STATE = OFF\n\)\z`),
+		regexp.MustCompile(`\AALTER EVENT SESSION \[` + regexp.QuoteMeta(name) + `\] ON SERVER STATE = START\z`),
+		regexp.MustCompile(`\ADROP EVENT SESSION \[` + regexp.QuoteMeta(name) + `\] ON SERVER\z`),
+	} {
+		if re.MatchString(rendered) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTheReadOnlyCaptureQueriesStillCarryTheHint keeps the hint exception from
+// swallowing the read-only half of the capture. The names are catalogue entry
+// names, and every one of them must be found: a rename would otherwise leave
+// this test looking at nothing and passing.
+func TestTheReadOnlyCaptureQueriesStillCarryTheHint(t *testing.T) {
+	want := map[string]bool{
+		"sweepCaptureQueryTemplate": true, "runningCapturesQuery": true,
+		"drainCaptureQueryTemplate": true, "capturePermissionQuery": true,
+		"watchedSessionQueryTemplate": true,
+	}
+	seen := map[string]bool{}
+	for _, e := range queryCatalogue() {
+		if !want[e.name] {
+			continue
+		}
+		seen[e.name] = true
+		if !strings.Contains(e.sql, "OPTION (MAXDOP 1)") {
+			t.Errorf("%s is a read-only capture query and must carry the hint like every other", e.name)
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("%s is not in the catalogue under that name, so this test was checking nothing", name)
 		}
 	}
 }
@@ -345,20 +537,32 @@ rewritten from the code by
 and a test fails when it falls out of date. To change a query, change it in
 the Go source and regenerate.
 
-Every statement here is read-only, carries ` + "`OPTION (MAXDOP 1)`" + `
-and runs on a session set to read uncommitted. Those three properties are
-checked by tests, not by convention: RECOMPILE keeps these plans out of the
-monitored server's cache, MAXDOP 1 keeps a monitoring query from taking
-parallel workers on the server it is watching, and read uncommitted keeps it
-from blocking or being blocked.
+Every statement here runs on a session set to read uncommitted, which keeps
+it from blocking and from being blocked. All but three are read-only and
+carry ` + "`OPTION (MAXDOP 1)`" + `, which keeps a monitoring query from taking
+parallel workers on the server it is watching. Both properties are checked by
+tests rather than left to convention.
+
+The three exceptions are the capture DDL, marked as such below. Creating,
+starting and dropping one named event session is the only write this tool
+makes, it happens only when the capture flag is passed, and it can carry no
+query hint: ` + "`CREATE EVENT SESSION ... OPTION (MAXDOP 1)`" + ` is Msg 156 on
+SQL Server 2019 and 2022 alike. A test names those three statements one by
+one and fails if a fourth ever claims the exception.
 
 Two of the queries are built rather than written, because they depend on the
-server's version and on what the login may read. They appear below as the
-shapes they are actually built into.
+server's version and on what the login may read; they appear below as the
+shapes they are actually built into. The capture statements appear as the
+templates the code holds, ` + "`%s`" + ` standing for a session name generated per
+capture and ` + "`%d`" + ` for a session id, because they take no one fixed shape.
 
 `)
 	for _, e := range queryCatalogue() {
-		fmt.Fprintf(&b, "## %s\n\nRuns %s.\n\n%s\n\n```sql\n%s\n```\n\n", e.name, e.when, e.why, strings.TrimSpace(e.sql))
+		fmt.Fprintf(&b, "## %s\n\nRuns %s.\n\n", e.name, e.when)
+		if e.writes {
+			b.WriteString("Writes to the monitored server, and carries no query hint. One of the three capture statements.\n\n")
+		}
+		fmt.Fprintf(&b, "%s\n\n```sql\n%s\n```\n\n", e.why, strings.TrimSpace(e.sql))
 	}
 	return b.String()
 }
