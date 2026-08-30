@@ -84,6 +84,22 @@ The rule lives in the machine-wide `~/.claude/CLAUDE.md`: commits carry no
 attribution trailer, and the message is prose explaining why. Repeated here
 only so an agent reading this file alone does not have to guess.
 
+## Testing the interface
+
+`go test ./internal/web` drives the real page in a real browser when
+chromium and deno are both present, and skips when either is missing. That
+test exists because of an asymmetry worth naming: the Go side has close to
+two hundred tests and the JavaScript side had two functions reachable from
+any of them, while 0.2 was mostly a release of interface. It is also the only
+kind of check that finds the class of bug that has actually shipped here, a
+page whose stylesheet is refused because a relative URL does not carry the
+token; curl cannot find that.
+
+It is hermetic: a fake source, no container, no network. When adding an
+assertion to it, break the thing it asserts and watch it fail first. Two of
+the first four assertions written passed against a deliberately broken page,
+because the fixture made them true by accident.
+
 ## Before committing
 
 `gofmt` clean and `go vet ./...` clean.
