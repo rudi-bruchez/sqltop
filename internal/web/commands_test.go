@@ -13,6 +13,7 @@ import (
 	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/model"
+	"github.com/rudi-bruchez/sqltop/internal/outdir"
 	"github.com/rudi-bruchez/sqltop/internal/source/fake"
 	"github.com/rudi-bruchez/sqltop/internal/window"
 )
@@ -89,11 +90,11 @@ func TestSnapshotNeverOverwritesOneFromTheSameSecond(t *testing.T) {
 	at := time.Date(2026, 8, 30, 17, 4, 5, 0, time.UTC)
 
 	base := at.Format("server-2006-01-02-150405")
-	first, err := writeUnique(dir, base, ".html", []byte("one"))
+	first, err := outdir.Write(dir, base, ".html", []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := writeUnique(dir, base, ".html", []byte("two"))
+	second, err := outdir.Write(dir, base, ".html", []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}
