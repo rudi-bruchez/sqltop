@@ -12,7 +12,7 @@ import "runtime/debug"
 // Version follows spec section 11: zero-major while the shape can change.
 // 0.1 was the collector and a working request grid; 0.2 adds the server
 // dashboard. The CHANGELOG is the authority on what each one covers.
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 // Revision returns the commit this binary was built from, and whether the
 // tree was dirty. Both are empty and false when the build carried no VCS

@@ -7,7 +7,34 @@ constant changes.
 ## Unreleased
 
 Nothing yet. Still to come: the other views, the plan panel, the kill flow,
-column sorting and filtering, and the instance switcher.
+and the instance switcher.
+
+## 0.2.1, 30 August 2026
+
+Sorting and filtering, and the verification that was missing under the 0.2
+interface.
+
+- Column sorting and per-column filtering in the request grid, placed in the
+  browser after measuring every client-side candidate against a server-side
+  twin. Five operators, read from what is typed rather than picked from a
+  dropdown. Changing a filter re-anchors the view on the selected row.
+- The configuration file is now `sqltop.yaml`. JSON is a subset of YAML, so
+  an existing file works once renamed, and the resolution looks for both.
+- An end-to-end test that drives the real page in a real browser from
+  `go test`, hermetic and skipped when chromium or deno is missing. It closes
+  the gap that mattered: two of thirty-three JavaScript functions had been
+  reachable from any test, under a release that was mostly interface.
+- A Firefox pass on the rendering bench, and a standing caveat with it: every
+  figure in this project depends on what else the machine was running, which
+  caught us three times in one day.
+- Each dashboard group folds on its own. The full product version and the
+  deployment kind sit beside the edition, and a filter box carries a cross to
+  clear it.
+- The counters query stopped trimming the columns it filters on, which was a
+  per-row cost over fifteen hundred rows buying nothing: 4.38 ms per call to
+  2.23.
+- `sqlstress` no longer borrows sqltop's configuration type, which had broken
+  it silently, and it has tests now.
 
 ## 0.2.0, 30 August 2026
 
