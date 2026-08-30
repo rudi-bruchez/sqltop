@@ -90,7 +90,6 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
   user-select: none;
 }
 .dashboard > summary:hover { color: var(--fg); }
-.dashSpan { color: #5f6773; }
 
 .dashBody {
   display: flex;
@@ -128,8 +127,6 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 .tileValue { display: block; font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1.3; }
 .tileValue.na { font-size: 13px; color: var(--dim); font-style: italic; }
 
-.spark { display: block; width: 100%; height: 20px; }
-.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 
 /* Visually hidden but still read by a screen reader, for the table caption. */
 .visually-hidden {

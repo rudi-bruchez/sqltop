@@ -95,6 +95,10 @@ can say exactly which tree it came from. It is printed at startup, by
 `--version`, and in the interface header. `scripts/bump-version.sh <version>`
 moves it, and deliberately does not commit or tag.
 
+## Licence
+
+MIT. See `LICENSE`.
+
 ## Shape of the project
 
 A single static Go binary, no CGO, cross-compiled in one command. It serves its
@@ -108,9 +112,7 @@ come later, behind a source abstraction designed in from the start.
 ## Language
 
 Everything in this repository is written in English: code, comments, specs,
-documentation and user interface. The only exception is `docs/`, which holds
-captured research conversations in their original French; they are source
-material, not project documentation.
+documentation and user interface.
 
 ## Layout
 
@@ -124,4 +126,5 @@ material, not project documentation.
 | `docs/QUERIES.md` | Every query the tool sends, generated from the code by a test |
 | `docs/PERFORMANCE.md` | What was optimised, what was measured, and what was measured and rejected |
 | `docs/plans/` | Implementation plans and the decisions taken while executing them |
-| `docs/` | Research notes, in their original French |
+| `LICENSE` | MIT |
+

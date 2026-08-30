@@ -121,20 +121,7 @@ const FMT = {
 // snapshot arrives, which is also when the grid's columns arrive.
 let FIG_GROUPS = [];
 
-// Not the retention window section 6 asks for: fifteen minutes is nine
-// hundred points and a hundred-pixel sparkline draws that as a smear. It
-// keeps what it can render and the panel heading states the span. The full
-// window belongs in a chart in its own view, not a wider tile.
-const HISTORY_MAX = 120;
-
-// One series per key: parallel arrays of tick number and reading.
-// Unavailable ticks append nothing, so a gap draws as one straight segment
-// rather than compressing the time axis. All tiles share one x scale.
-const history = new Map();
 const tiles = new Map();
-// Wall clock against tick numbers, so the heading can say what span it is
-// showing: the period is not fixed, the budget slows the collector down.
-const span = [];
 
 // Every column carries three things: how to render it, how to read its raw
 // value for sorting and filtering, and whether that value is a number.
@@ -541,18 +528,15 @@ function head() {
 function buildDashboard(groups) {
   FIG_GROUPS = groups || [];
   tiles.clear();
-  history.clear();
   $("dashBody").innerHTML = FIG_GROUPS.map((g) =>
     `<details class="figGroup" id="g-${esc(g.id)}" ${g.folded ? "" : "open"}><summary>${esc(g.title)}</summary><div class="figTiles">` +
     (g.figures || []).map((t) => `<div class="tile"><span class="tileLabel">${esc(t.label)}</span>` +
-      `<span class="tileValue na" id="v-${esc(t.key)}">n/a</span>` +
-      `<svg class="spark" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">` +
-      `<polyline id="s-${esc(t.key)}" points=""></polyline></svg></div>`).join("") +
+      `<span class="tileValue na" id="v-${esc(t.key)}">n/a</span></div>`).join("") +
     `</div></details>`).join("");
 
   for (const g of FIG_GROUPS) {
     for (const t of g.figures || []) {
-      tiles.set(t.key, { fmt: FMT[t.key] || fInt, value: $("v-" + t.key), spark: $("s-" + t.key) });
+      tiles.set(t.key, { fmt: FMT[t.key] || fInt, value: $("v-" + t.key) });
     }
     // The configuration says whether a group starts folded; what the user
     // then does with it is remembered and wins from that point.
@@ -1225,39 +1209,9 @@ function setFilter(el, value) {
   refresh(true);
 }
 
-// The y scale is the series' own min to max, not an absolute one: a cache
-// hit ratio on a 0-100 axis is a flat line at the top of every server ever
-// built. A flat series draws through the middle, not along the floor where
-// it would read as zero.
-function sparkPoints(h, oldest, newest) {
-  if (h.v.length < 2) return "";
-  let min = Infinity, max = -Infinity;
-  for (const v of h.v) {
-    if (v < min) min = v;
-    if (v > max) max = v;
-  }
-  const width = Math.max(1, newest - oldest);
-  const range = max - min;
-  const out = new Array(h.v.length);
-  for (let i = 0; i < h.v.length; i++) {
-    const x = ((h.t[i] - oldest) / width) * 100;
-    const y = range > 0 ? 18 - ((h.v[i] - min) / range) * 16 : 10;
-    out[i] = x.toFixed(1) + "," + y.toFixed(1);
-  }
-  return out.join(" ");
-}
-
 // The dashboard's whole render path: text and attributes, never markup,
 // and only what changed.
-function updateDashboard(figures, seq, ts) {
-  const oldest = seq - HISTORY_MAX + 1;
-
-  span.push({ seq: seq, ts: ts });
-  while (span.length && span[0].seq < oldest) span.shift();
-  const seconds = span.length > 1 ? (span[span.length - 1].ts - span[0].ts) / 1000 : 0;
-  const label = seconds > 0 ? " \u00b7 last " + fDur(seconds) : "";
-  if ($("dashSpan").textContent !== label) $("dashSpan").textContent = label;
-
+function updateDashboard(figures) {
   for (const [key, t] of tiles) {
     const f = figures[key];
     const ok = !!(f && f.available);
@@ -1266,22 +1220,6 @@ function updateDashboard(figures, seq, ts) {
     const text = ok ? t.fmt(f.value) : "n/a";
     if (t.value.textContent !== text) t.value.textContent = text;
     t.value.classList.toggle("na", !ok);
-
-    let h = history.get(key);
-    if (!h) {
-      h = { t: [], v: [] };
-      history.set(key, h);
-    }
-    if (ok) {
-      h.t.push(seq);
-      h.v.push(f.value);
-    }
-    while (h.t.length && h.t[0] < oldest) {
-      h.t.shift();
-      h.v.shift();
-    }
-    const pts = sparkPoints(h, oldest, seq);
-    if (t.spark.getAttribute("points") !== pts) t.spark.setAttribute("points", pts);
   }
 }
 
@@ -1439,7 +1377,7 @@ es.addEventListener("snapshot", (e) => {
   // Section 6 lists active requests as counted from the grid data, free.
   // Injected into a copy so nothing mistakes it for a collector measurement.
   const figures = Object.assign({ active_requests: { value: data.length, unit: "", available: true } }, p.figures || {});
-  updateDashboard(figures, p.seq, p.ts || Date.now());
+  updateDashboard(figures);
 });
 es.addEventListener("error", () => {
   $("dot").classList.remove("live");

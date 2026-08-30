@@ -7,8 +7,8 @@ every session.
 ## Language
 
 Everything is written in English: code, comments, commits, UI, documentation.
-The sole exception is `docs/`, which holds captured research conversations in
-their original French. They are source material and are not to be translated.
+There is no exception. The captured research conversations that used to sit
+in `docs/` in French were removed before the project was made public.
 
 ## Implementation rules
 

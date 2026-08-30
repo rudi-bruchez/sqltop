@@ -28,6 +28,12 @@ constant changes.
 - `d` writes the selected request's plan to `plans/` beside the binary as a
   `.sqlplan` file: the live plan with its row counts where the server keeps
   them, and the plan as compiled otherwise, with the name saying which.
+- The sparklines are gone from the dashboard tiles. A hundred pixels of line
+  over a rolling window is too little to read a slope from and too much to
+  ignore; the honest version is a chart in a view of its own, with an axis,
+  and that is not built.
+- MIT licence, and the two captured research conversations unrelated to the
+  tool are out of `docs/`.
 - The throughput view of section 7 moves from `t` to `v`.
 
 ## 0.3.0, 30 August 2026

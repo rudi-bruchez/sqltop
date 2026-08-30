@@ -357,8 +357,11 @@ counter against the delta of its base between two samples, which is what
 Microsoft describes as the way to get a reading for the last second. Page life
 expectancy is displayed next to it and is the figure to trust.
 
-Each numeric tile carries a sparkline over the retention window. A number alone
-does not show a server going wrong; its slope does.
+The tiles carry numbers and nothing else. They carried a sparkline for two
+releases, and it was cut: a hundred pixels of line over a rolling window is
+too little to read a slope from and too much to ignore, and the honest way
+to show a figure moving is a chart in a view of its own with an axis on it.
+That is not built. Until it is, the number is the number.
 
 ## 7. Views
 
@@ -599,7 +602,7 @@ specifically and are already prototyped in the bench.
 | `database` | Filter and sort. Named explicitly as a requirement |
 | `command` | Filter and sort. Named explicitly as a requirement. `SELECT`, `INSERT`, `BACKUP DATABASE`, `DBCC`, and so on |
 | `login`, `host`, `program` | |
-| `elapsed`, `cpu_ms`, `cpu_sparkline` | |
+| `elapsed`, `cpu_ms` | |
 | `logical_reads`, `physical_reads`, `writes` | |
 | `tempdb_mb` | From `sys.dm_db_task_space_usage`, allocation minus deallocation |
 | `memory_grant_mb`, `dop` | |
@@ -692,7 +695,7 @@ figure the file does not mention keeps the built-in default. Hiding a tile is
 a display decision and never a collection decision. The collector goes on
 sampling every figure, for three reasons: a figure that stopped being
 collected has no history, so re-enabling its tile would show an empty
-sparkline rather than the slope that made you look; two browsers on one
+history rather than the movement that made you look; two browsers on one
 collector would need either a union or a query each; and "you hid it" would
 need a third visual state next to "the server cannot answer it", when the
 whole point of the Available flag is that there are two.
