@@ -16,7 +16,9 @@ KISS and idiomatic Go. `docs/SPECS.md` section 2.1 states these as checkable
 rules; read it before writing code. In short:
 
 - Standard library first. A new dependency needs a reason stated in the commit
-  that introduces it.
+  that introduces it. There is one: `go.yaml.in/yaml/v3`, for the
+  configuration file, because that file is edited by hand and handed between
+  colleagues and JSON is a poor format for that.
 - No abstraction before there is a second real implementation of it.
 - Boring concurrency: one goroutine per collection tier, channels, one mutex on
   the retention window.

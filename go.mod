@@ -2,7 +2,10 @@ module github.com/rudi-bruchez/sqltop
 
 go 1.27.0
 
-require github.com/microsoft/go-mssqldb v1.11.0
+require (
+	github.com/microsoft/go-mssqldb v1.11.0
+	go.yaml.in/yaml/v3 v3.0.5
+)
 
 require (
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect

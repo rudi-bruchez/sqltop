@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to sqltop.json (default: beside the binary, then the user config directory)")
+	configPath := flag.String("config", "", "path to sqltop.yaml (default: beside the binary, then the user config directory)")
 	envPath := flag.String("env", ".env", "path to the .env file holding secrets")
 	showConfig := flag.Bool("show-config", false, "print the resolved configuration and exit")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -74,7 +74,7 @@ func main() {
 		dsn = os.ExpandEnv(cfg.Instances[0].DSN)
 	}
 	if dsn == "" {
-		log.Fatal("no instance to connect to: set SQLTOP_CONN in .env, or add one to sqltop.json")
+		log.Fatal("no instance to connect to: set SQLTOP_CONN in .env, or add one to sqltop.yaml")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

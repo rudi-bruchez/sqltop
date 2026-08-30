@@ -339,3 +339,166 @@ func TestDefaultsSitInsideTheirOwnBounds(t *testing.T) {
 		t.Fatalf("the built-in defaults do not pass validation: %v", err)
 	}
 }
+
+// TestLoadsYAMLNatively is the test the existing ones do not amount to.
+// They all write JSON, and JSON is a subset of YAML, so every one of them
+// would pass against a parser that had never seen a YAML document. This
+// writes YAML syntax: unquoted keys, unquoted scalars, block sequences,
+// nested maps by indentation.
+func TestLoadsYAMLNatively(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sqltop.yaml")
+	body := `
+instances:
+  - name: PROD-SQL01
+    dsn: sqlserver://prod-sql01?authenticator=krb5
+  - name: Azure sales
+    dsn: sqlserver://x.database.windows.net?database=sales
+tiers:
+  requests: 2s
+  cpuHistory: 30s
+retention: 5m
+server:
+  port: 9000
+budget:
+  serverCpuMsPerSecond: 25
+  maxSamples: 1000
+layouts:
+  default:
+    views:
+      requests:
+        columns:
+          - field: spid
+            width: 60
+`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Instances) != 2 || cfg.Instances[1].Name != "Azure sales" {
+		t.Errorf("instances = %+v, want the two from the file in order", cfg.Instances)
+	}
+	if cfg.Tiers.Requests.Std() != 2*time.Second {
+		t.Errorf("tiers.requests = %s, want 2s", cfg.Tiers.Requests)
+	}
+	// The camelCase key has to survive: yaml's default is to lowercase a
+	// field name, which would silently ignore cpuHistory and leave the
+	// default in place.
+	if cfg.Tiers.CPUHistory.Std() != 30*time.Second {
+		t.Errorf("tiers.cpuHistory = %s, want 30s; the key is camelCase and needs an explicit tag", cfg.Tiers.CPUHistory)
+	}
+	if cfg.Budget.ServerCPUMsPerSecond != 25 || cfg.Budget.MaxSamples != 1000 {
+		t.Errorf("budget = %+v, want 25 and 1000", cfg.Budget)
+	}
+	// A field the file leaves out keeps its default, which is what makes a
+	// partial hand-written file valid.
+	if cfg.Tiers.Space.Std() != Default().Tiers.Space.Std() {
+		t.Errorf("tiers.space = %s, want the default %s", cfg.Tiers.Space, Default().Tiers.Space)
+	}
+	if cfg.Layouts == nil {
+		t.Error("layouts came back nil; the opaque node must survive loading or a saved layout is lost on the next write")
+	}
+}
+
+// TestJSONStillLoads holds the compatibility claim in the spec: JSON is a
+// subset of YAML, so an install predating the format change needs a rename
+// and nothing else.
+func TestJSONStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sqltop.json")
+	body := `{"retention":"7m","tiers":{"cpuHistory":"90s"},"server":{"port":8500}}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Retention.Std() != 7*time.Minute || cfg.Tiers.CPUHistory.Std() != 90*time.Second || cfg.Server.Port != 8500 {
+		t.Errorf("got %s / %s / %d, want 7m / 90s / 8500", cfg.Retention, cfg.Tiers.CPUHistory, cfg.Server.Port)
+	}
+}
+
+// TestResolvePrefersYAMLOverJSONInTheSameDirectory pins the order within a
+// location. A directory holding both must be answered by the current
+// format, not by whichever name the loop happens to try first.
+func TestResolvePrefersYAMLOverJSONInTheSameDirectory(t *testing.T) {
+	dir := t.TempDir()
+	seams(t, dir, t.TempDir())
+	for _, name := range []string{"sqltop.json", "sqltop.yaml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "sqltop.yaml"); got != want {
+		t.Errorf("Resolve = %q, want %q", got, want)
+	}
+}
+
+// TestSaveWritesYAMLThatLoadsBack is the round trip. A Save that produced
+// something Load could not read would be discovered by a user, once, after
+// they had built a layout worth keeping.
+func TestSaveWritesYAMLThatLoadsBack(t *testing.T) {
+	dir := t.TempDir()
+	seams(t, dir, t.TempDir())
+
+	cfg := Default()
+	cfg.Retention = Duration(11 * time.Minute)
+	cfg.Tiers.CPUHistory = Duration(45 * time.Second)
+	cfg.Instances = []Instance{{Name: "one", DSN: "sqlserver://host"}}
+
+	path, err := Save(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "sqltop.yaml" {
+		t.Errorf("saved to %q, want sqltop.yaml", path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Durations must come back as "45s", not as a count of nanoseconds:
+	// the file is meant to be read by a person.
+	if !strings.Contains(string(b), "45s") || !strings.Contains(string(b), "11m") {
+		t.Errorf("saved file does not carry readable durations:\n%s", b)
+	}
+	if strings.Contains(string(b), "{") {
+		t.Errorf("saved file looks like JSON rather than YAML:\n%s", b)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("%v; what Save writes, Load has to read:\n%s", err, b)
+	}
+	if back.Retention != cfg.Retention || back.Tiers.CPUHistory != cfg.Tiers.CPUHistory {
+		t.Errorf("round trip lost a value: got %s / %s, want %s / %s", back.Retention, back.Tiers.CPUHistory, cfg.Retention, cfg.Tiers.CPUHistory)
+	}
+	if len(back.Instances) != 1 || back.Instances[0].Name != "one" {
+		t.Errorf("round trip lost the instance list: %+v", back.Instances)
+	}
+}
+
+// TestMalformedYAMLNamesTheLine is why the format was changed at all. A
+// syntax error in a file a person edits has to say where.
+func TestMalformedYAMLNamesTheLine(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sqltop.yaml")
+	if err := os.WriteFile(p, []byte("retention: 5m\ntiers:\n  requests: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("a malformed file loaded without complaint")
+	}
+	if !strings.Contains(err.Error(), "line") {
+		t.Errorf("error %q does not say which line; that is the whole reason this file is not JSON", err)
+	}
+}
