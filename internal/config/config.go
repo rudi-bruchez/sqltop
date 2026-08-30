@@ -131,6 +131,14 @@ func Resolve(explicit string) (string, error) {
 
 // Load reads path over the built-in defaults, so a partial file is valid.
 // An empty path yields the defaults untouched.
+//
+// Every value is validated before it is handed back, because nothing between
+// here and the collector clamps a bad one: a "requests" tier of "0s" is not
+// a typo the tool can absorb, it is a tight loop against the monitored
+// server, and a "maxSamples" of 0 is a grid that never shows a row. Spec
+// section 8.3 already treats a missing explicit --config path as a startup
+// error rather than a silent fallback; this extends the same principle to
+// every other field the file can set.
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
@@ -144,7 +152,52 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("config: %s: %w", path, err)
 	}
 	cfg.Path = path
+	if err := cfg.validate(); err != nil {
+		return cfg, fmt.Errorf("config: %s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+// minTierPeriod is the floor below which a tier period is rejected rather
+// than accepted and clamped later. 100 ms is generous: the fastest tier
+// defaults to 1 s, so this floor is ten times faster than anything the tool
+// actually asks for, and still far enough from zero that a typo cannot land
+// on it by accident.
+const minTierPeriod = 100 * time.Millisecond
+
+// validate rejects a configuration that would either hammer the monitored
+// server or silently produce an empty tool. Every check names the field and
+// the value it rejected, so a typo reads as an error message rather than as
+// a working default that happens to be wrong.
+func (cfg Config) validate() error {
+	tiers := []struct {
+		field string
+		d     Duration
+	}{
+		{"tiers.requests", cfg.Tiers.Requests},
+		{"tiers.counters", cfg.Tiers.Counters},
+		{"tiers.space", cfg.Tiers.Space},
+		{"tiers.cpuHistory", cfg.Tiers.CPUHistory},
+		{"tiers.livePlan", cfg.Tiers.LivePlan},
+	}
+	for _, t := range tiers {
+		if t.d.Std() < minTierPeriod {
+			return fmt.Errorf("%s: %s is below the floor of %s", t.field, t.d, minTierPeriod)
+		}
+	}
+	if cfg.Retention.Std() <= 0 {
+		return fmt.Errorf("retention: %s must be positive", cfg.Retention)
+	}
+	if cfg.Budget.MaxSamples <= 0 {
+		return fmt.Errorf("budget.maxSamples: %d must be positive", cfg.Budget.MaxSamples)
+	}
+	if cfg.Budget.ServerCPUMsPerSecond <= 0 {
+		return fmt.Errorf("budget.serverCpuMsPerSecond: %d must be positive", cfg.Budget.ServerCPUMsPerSecond)
+	}
+	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
+		return fmt.Errorf("server.port: %d is out of range 1-65535", cfg.Server.Port)
+	}
+	return nil
 }
 
 // Save writes cfg back to the file it came from. When it came from defaults,
