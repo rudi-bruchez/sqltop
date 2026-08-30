@@ -676,6 +676,17 @@ tree it came from. Nothing has to be passed at build time for that to work,
 which is the point: a version that depends on the build command is a version
 that is wrong the first time someone builds it differently.
 
+Where the number shows. `--version` prints it and exits. The tool logs it as
+its first line at startup, before anything can fail, because the first question
+about any report is which build produced it and a run that dies on a bad
+configuration file is exactly the report that arrives without one. The
+interface header carries the same string, so a screenshot and a log agree.
+
+Changing it. `scripts/bump-version.sh <version>` rewrites the constant and
+nothing else. It refuses anything that is not major.minor.patch, and it neither
+commits nor tags: whether a milestone actually works is a judgement, not a
+script's to make.
+
 Where it shows. `sqltop --version` prints it and exits. The status endpoint
 carries it, and the interface header shows it beside the instance name, because
 the first question about a bug report is which build produced it.

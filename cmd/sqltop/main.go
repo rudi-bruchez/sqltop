@@ -31,6 +31,13 @@ func main() {
 		return
 	}
 
+	// Announced before anything can fail, because the first question about
+	// any report from this tool is which build produced it, and a startup
+	// that dies on a bad configuration file or an unreachable server is
+	// exactly the report that arrives without one. The same string is what
+	// the interface header shows, so a screenshot and a log agree.
+	log.Print(buildinfo.String())
+
 	if err := dotenv.Load(*envPath); err != nil {
 		log.Printf("warning: %s: %v", *envPath, err)
 	}
