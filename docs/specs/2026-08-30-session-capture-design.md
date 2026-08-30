@@ -144,7 +144,13 @@ server cost and complicate the panel for no diagnostic gain. Pressing the key
 on another row stops the first capture and says so.
 
 The capture stops on any of six conditions, and the panel header always says
-which one ended it.
+which one ended it. The two that concern the watched session are answered by
+one small query against `sys.dm_exec_sessions`, on the source, and not by the
+retention window: that window holds only request samples, which carry no login
+time at all, and `Latest()` returns the tick's running requests, so a session
+that is merely idle is absent from it. A manager consulting the window would
+stop every capture within one tick of the watched session going quiet, which is
+the case this feature most needs to survive.
 
 The key is pressed again. The process shuts down, including on `SIGINT`. The
 last browser connection has been gone for thirty seconds, which tolerates a
@@ -194,9 +200,15 @@ else's, and destroying a colleague's capture is a worse failure than leaving a
 stale one for another twenty minutes.
 
 The age comparison is made on the server, in the query, against
-`SYSUTCDATETIME()`. Comparing `create_time` to the sqltop process clock would
-put clock skew between two machines in the path of a decision that destroys
-another person's work.
+`SYSDATETIME()`. Two mistakes are available here and the design has made one of
+them already. Comparing `create_time` to the sqltop process clock puts skew
+between two machines in the path of a decision that destroys another person's
+work. Comparing it to `SYSUTCDATETIME()` is worse, because it looks correct:
+`sys.dm_xe_sessions.create_time` is local server time, so on a server west of
+Greenwich every session appears hours old and every colleague's live capture is
+swept, while east of it an abandoned one survives for the cap plus the offset.
+It passes every test on a container running in UTC, which is every container on
+the development machine.
 
 The sweep runs at connection and again before each new capture, and only when
 the flag is set. A failed `DROP`, typically a permission the login does not
@@ -314,15 +326,29 @@ loss from `dropped_event_count`, which counts what the server discarded before
 it ever reached the target; both are reported, separately, because they mean
 different things.
 
-Truncation breaks that arithmetic and has to be detected rather than assumed
-away. `truncated="1"` on the element means the XML omitted part of the buffer,
-and in that state `eventCount` still reports what the buffer holds, not what
-the document contains: an external review measured the attribute saying 3 620
-while 2 399 nodes were returned. So the drain checks both, and treats either
-`truncated="1"` or a node count below `eventCount` as the same condition. It
-records a gap of unknown size, re-anchors the mark to `totalEventsProcessed`,
-and says so. An unknown gap that announces itself is acceptable. A silent one
-is not.
+Truncation does not break that arithmetic, which is the opposite of what an
+earlier draft of this document said and is worth stating carefully, because
+getting it backwards produces silent duplicates rather than a visible error.
+
+Past four megabytes of XML the document holds only part of the buffer, and in
+that state `eventCount` keeps reporting the whole buffer rather than what was
+returned. Measured on 2022: four thousand events driven through an unbounded
+ring buffer gave `totalEventsProcessed="4000"`, `eventCount="4000"`,
+`truncated="1"`, and 2 191 nodes carrying the sequence numbers 0 through 2 190.
+The document keeps the oldest of the buffer and drops the newest.
+
+So the first node always sits at `totalEventsProcessed - eventCount`, truncated
+or not, and placement holds. Computing it as `totalEventsProcessed` minus the
+node count is what fails: it labels the oldest event with a high index,
+concludes placement is impossible, and re-emits the whole document on every
+poll while discarding the events that were genuinely missing.
+
+Two things still change under truncation. Both `truncated="1"` and a node count
+below `eventCount` are treated as the same signal, since the flag is the server
+saying so and the short count says the same and shows up first. And the mark
+advances only to the end of what the document actually carried, never to
+`totalEventsProcessed`: the tail the document could not fit is still in the
+buffer, and advancing past it would skip it permanently.
 
 The last thousand statements are kept in memory for the panel, so opening it
 does not re-read the file. That slice is written by the drain goroutine and
@@ -349,7 +375,11 @@ wrong artefact for something that never existed as a file on the server. JSON
 Lines appends, survives a process that dies mid-capture, and is readable by
 anything.
 
-Three record kinds share the stream, distinguished by `kind`. A header,
+Three record kinds share the stream, distinguished by a field named `record`.
+Not `kind`: the statement itself already spends that name on batch versus rpc,
+and a flat JSON object carrying two keys of one name is not a parse error but
+something quieter, since a decoder simply keeps the last. The kinds are: a
+header,
 written first, naming the tool version, the instance, the session id, its
 `login_time`, the event session name and the start time. An `event` record per
 statement, carrying the fields of `CapturedStatement`. A `gap` record with a
