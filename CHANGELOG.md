@@ -4,7 +4,12 @@ Versioning follows `docs/SPECS.md` section 11: zero-major while the shape can
 still change, and the tag is cut when the milestone works rather than when the
 constant changes.
 
-## Unreleased, towards 0.1.0
+## Unreleased
+
+Nothing yet. 0.2 is the dashboard, the other views, the plan panel and the
+kill flow.
+
+## 0.1.0, 30 August 2026
 
 The collector and a working request grid. See
 `docs/plans/2026-08-29-collector.md` for what that covers and what it
