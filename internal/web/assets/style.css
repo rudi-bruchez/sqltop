@@ -165,9 +165,14 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 #grid tbody tr:hover { background: #232830; }
 #grid tbody tr.sel { background: #2d3a44; }
 
+/* space-between spread the items evenly while there were three of them and
+   crammed them against each other the moment a button on the right claimed
+   the slack. An explicit gap spaces them, and the button's own margin is
+   what pushes it to the far end. */
 #statusBar {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
   padding: 6px 14px;
   color: var(--dim);
   border-top: 1px solid var(--line);
@@ -306,7 +311,7 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
 
 .notice { color: #8fbf7f; }
 
-.tabs { flex: none; display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid #2a2e37; }
+.tabs { flex: none; display: flex; align-items: center; gap: 2px; padding: 0 10px; border-bottom: 1px solid #2a2e37; }
 .tabs button {
   background: none;
   color: #9aa1ad;
@@ -320,6 +325,19 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
 .tabs button:hover { color: #d7dae0; }
 .tabs button.on { background: #1c1f26; border-color: #2a2e37; color: #d7dae0; }
 .tabs .tabKey { color: #6fb3d2; margin-left: 6px; }
+
+/* The commands, at the far end of the row that already shows the view keys:
+   one place to look for "what can I press". */
+.cmdHints { margin-left: auto; display: flex; gap: 14px; color: #7a828e; padding-right: 4px; }
+.cmdHints kbd {
+  background: #1c1f26;
+  border: 1px solid #2a2e37;
+  border-radius: 3px;
+  padding: 0 5px;
+  margin-right: 5px;
+  color: #6fb3d2;
+  font: inherit;
+}
 
 .listScroll { flex: 1 1 auto; overflow: auto; padding: 0 10px 10px; }
 .listTable { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 12px; }

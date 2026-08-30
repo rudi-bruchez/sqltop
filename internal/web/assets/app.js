@@ -264,8 +264,14 @@ function waitBadge(w) {
   return `<span class="badge${cls}">${esc(w)}</span>`;
 }
 
+// The fallback reads through col.get, not through the field name. Those are
+// two different vocabularies now: field is the readable name the file and
+// the catalogue use, and only get knows the terse name the same value has on
+// the wire. Looking the field name up in the wire header instead rendered
+// every column without an explicit html as empty, which is how status, the
+// database and the command silently went blank.
 function cellHTML(col, row) {
-  return col.html ? col.html(row) : esc(val(row, col.field) ?? "");
+  return col.html ? col.html(row) : esc(col.get(row) ?? "");
 }
 
 // Sort and filter, spec section 8.1. Both run in the browser on data already
@@ -545,10 +551,16 @@ function buildColumnPanel() {
 // One tab per view the server gave a key to. The list that lives inside
 // another view, the locks under transactions, has none and gets no tab.
 function buildTabs(views) {
+  // The commands ride at the end of the same row as the view keys, so
+  // "what can I press" has one place to look rather than being knowable
+  // only by pressing h first. Built from COMMANDS, like the help dialog, so
+  // the strip cannot advertise a key nothing is bound to.
   $("tabs").innerHTML = views.filter((v) => v.k).map((v) =>
     `<button type="button" data-v="${esc(v.id)}" id="tab-${esc(v.id)}">${esc(v.t)}` +
-    `<span class="tabKey">${esc(v.k)}</span></button>`).join("");
-  for (const b of $("tabs").children) {
+    `<span class="tabKey">${esc(v.k)}</span></button>`).join("") +
+    `<span class="cmdHints">` + COMMANDS.map(([k, , short]) =>
+      `<span><kbd>${esc(k)}</kbd>${esc(short)}</span>`).join("") + `</span>`;
+  for (const b of $("tabs").querySelectorAll("button")) {
     b.addEventListener("click", () => setView(b.dataset.v));
   }
   markTabs();
@@ -558,11 +570,14 @@ function buildTabs(views) {
 // from it and the key handler dispatches from it, so a command cannot exist
 // in one and not the other. app_commands_test.go checks that this list and
 // the handler's own table cover each other.
+// Key, what the help dialog says, and the one word the strip beside the
+// tabs shows. Three columns rather than two because a status strip has room
+// for a word and the dialog has room for a sentence.
 const COMMANDS = [
-  ["s", "save the current state to snapshots/ beside the binary"],
-  ["p", "pause and resume the display"],
-  ["f", "cycle the refresh period"],
-  ["h", "this list"],
+  ["s", "save the current state to snapshots/ beside the binary", "save"],
+  ["p", "pause and resume the display", "pause"],
+  ["f", "cycle the refresh period", "rate"],
+  ["h", "this list", "help"],
 ];
 
 function buildHelp() {
@@ -653,7 +668,7 @@ function applyColumns() {
 const isGrid = (v) => v === "requests" || v === "blocking";
 
 function markTabs() {
-  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.v === activeView);
+  for (const b of $("tabs").querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === activeView);
 }
 
 // setView switches tab. The three list views are filled on demand and left

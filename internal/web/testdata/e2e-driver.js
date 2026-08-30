@@ -278,11 +278,40 @@ out.columns = await json(`(() => {
            rows: view.length, afterShow: order() };
 })()`);
 
+// Every visible column of a real row actually renders something. The grid
+// draws a cell from a column's own reader, and the field name a column is
+// known by is not the name the same value carries on the wire; a fallback
+// that confused the two rendered status, database and command as empty
+// cells while every other assertion here stayed green.
+out.cells = await json(`(() => {
+  const th = [...document.querySelectorAll("#gridHead th")].map((x) => x.dataset.f);
+  const tr = [...document.querySelectorAll("#gridBody tr")].find((r) => r.children.length > 1 && !r.hidden);
+  if (!tr) return {};
+  const out = {};
+  [...tr.cells].forEach((td, i) => { out[th[i]] = td.textContent.trim(); });
+  return out;
+})()`);
+
 // The tabs of spec section 7. Each list view is filled by its own request,
 // made only while its tab is open, so this is also the check that the tab
 // actually asks for anything.
 const key = (k) => `globalThis.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true }))`;
 out.views = { tabs: await json(`[...document.querySelectorAll("#tabs button")].map((b) => b.dataset.v)`) };
+// The status bar's items must not run into each other. They did, the day a
+// button on the right claimed the slack that space-between had been using to
+// space them.
+out.views.barGap = await json(`(() => {
+  const kids = [...document.getElementById("statusBar").children].filter((el) => !el.hidden && el.getBoundingClientRect().width > 0);
+  let min = Infinity;
+  for (let i = 1; i < kids.length; i++) {
+    const a = kids[i - 1].getBoundingClientRect(), b = kids[i].getBoundingClientRect();
+    min = Math.min(min, Math.round(b.left - a.right));
+  }
+  return { items: kids.length, min: min === Infinity ? -1 : min };
+})()`);
+
+// The commands have to be readable without pressing anything first.
+out.views.hints = await json(`[...document.querySelectorAll(".cmdHints kbd")].map((k) => k.textContent)`);
 
 await ev(key("b"));
 out.views.blocking = await json(`(() => ({

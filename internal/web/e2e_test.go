@@ -196,11 +196,29 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("after switching a column back on the row pool has %d cells per row and the header has %d columns (%d rows in view)", got.Columns.PoolCells, len(got.Columns.AfterShow), got.Columns.Rows)
 	}
 
+	// Every visible column of a real row draws something. The fixture gives
+	// each of these a value, so an empty cell here is the renderer losing
+	// it, not the server withholding it.
+	for _, field := range []string{"spid", "status", "database", "login", "program", "command", "cpu_ms", "elapsed", "sql_text"} {
+		if got.Cells[field] == "" {
+			t.Errorf("column %q drew an empty cell on a row that has a value for it; the whole row is %v", field, got.Cells)
+		}
+	}
+
 	// The views of spec section 7: one tab each, and the three that are
 	// not projections of the retention window fetch their own data only
 	// while their tab is open.
 	if want := []string{"requests", "blocking", "sessions", "transactions", "logs"}; !equalStrings(got.Views.Tabs, want) {
 		t.Errorf("the tab bar shows %v, want %v", got.Views.Tabs, want)
+	}
+	if got.Views.BarGap.Items < 3 || got.Views.BarGap.Min < 8 {
+		t.Errorf("the status bar's %d items are %d px apart at their closest; they run into each other below about 8", got.Views.BarGap.Items, got.Views.BarGap.Min)
+	}
+
+	// A command nobody can discover is a command nobody uses, so the keys
+	// are on the page rather than only behind h.
+	if want := []string{"s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
+		t.Errorf("the command strip shows %v, want %v", got.Views.Hints, want)
 	}
 	if got.Views.Blocking.Rows == 0 || got.Views.Blocking.Rows >= got.Views.Blocking.Total {
 		t.Errorf("the blocking view shows %d of %d rows; it should keep the chains and drop the rest", got.Views.Blocking.Rows, got.Views.Blocking.Total)
@@ -471,8 +489,14 @@ type e2eResult struct {
 		Rows      int      `json:"rows"`
 		AfterShow []string `json:"afterShow"`
 	} `json:"columns"`
+	Cells map[string]string `json:"cells"`
 	Views struct {
-		Tabs     []string `json:"tabs"`
+		Tabs   []string `json:"tabs"`
+		Hints  []string `json:"hints"`
+		BarGap struct {
+			Items int `json:"items"`
+			Min   int `json:"min"`
+		} `json:"barGap"`
 		Blocking struct {
 			Rows        int  `json:"rows"`
 			Total       int  `json:"total"`
