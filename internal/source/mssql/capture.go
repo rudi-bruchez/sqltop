@@ -1,10 +1,17 @@
 package mssql
 
 import (
+	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
 // capturePrefix names every event session this tool creates, and is what
@@ -63,12 +70,19 @@ const stopCaptureQueryTemplate = `DROP EVENT SESSION [%s] ON SERVER`
 // capture is worse than leaving a stale one for another twenty minutes.
 //
 // SYSDATETIME and not SYSUTCDATETIME: create_time is local server time.
+//
+// The LIKE wildcard is doubled because this whole string is a format string;
+// go vet reads it as one and rejects a lone percent before the tests do.
+//
+// The offset carries its own sign rather than the template writing -%d: a
+// negative threshold would render as -- and comment out the rest of the
+// statement, which is how the test that shortens the age found it.
 const sweepCaptureQueryTemplate = `SELECT s.name
 FROM sys.server_event_sessions AS s
 LEFT JOIN sys.dm_xe_sessions AS x ON x.name = s.name
-WHERE s.name LIKE '` + capturePrefix + `%'
+WHERE s.name LIKE '` + capturePrefix + `%%'
   AND (x.name IS NULL
-       OR x.create_time < DATEADD(minute, -%d, SYSDATETIME()))
+       OR x.create_time < DATEADD(minute, %d, SYSDATETIME()))
 OPTION (MAXDOP 1)`
 
 const runningCapturesQuery = `SELECT x.name, x.create_time
@@ -107,3 +121,131 @@ const watchedSessionQueryTemplate = `SELECT s.login_time
 FROM sys.dm_exec_sessions AS s
 WHERE s.session_id = %d
 OPTION (MAXDOP 1)`
+
+// spidFromCaptureName recovers the session id a capture watches from the name
+// it was given, so a note names what is being watched rather than an event
+// session nobody outside this package should have to know about. Zero when
+// the name is not one of ours.
+func spidFromCaptureName(name string) int64 {
+	rest, ok := strings.CutPrefix(name, capturePrefix)
+	if !ok {
+		return 0
+	}
+	digits, _, _ := strings.Cut(rest, "_")
+	spid, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return spid
+}
+
+// CanCapture reports whether a capture is possible, and says why not when it
+// is not. Three gates, in the order a reader would ask them.
+func (s *Source) CanCapture(ctx context.Context) (bool, string, error) {
+	if !s.captureAllowed {
+		return false, "capture is off; start sqltop with -capture to allow it", nil
+	}
+	// knownDeployment rather than s.info directly: info is written under
+	// s.mu at the end of Identify, and reading it unsynchronised from a
+	// handler goroutine is a race whatever the value turns out to be. It is
+	// also empty until Identify finishes, so the Azure refusal is simply not
+	// yet knowable on the first call, and an unknown deployment is allowed
+	// through rather than refused: the permission probe below is the real
+	// gate, and Azure fails it anyway because sys.dm_xe_sessions is not the
+	// view it has.
+	if s.knownDeployment() == model.DeploymentAzureSQLDB {
+		return false, "Azure SQL Database has only database-scoped event sessions, which this is not written for", nil
+	}
+	var ddl, view bool
+	if err := s.queryRow(ctx, capturePermissionQuery, &ddl, &view); err != nil {
+		return false, "", err
+	}
+	switch {
+	case !ddl && !view:
+		return false, "this login has neither ALTER ANY EVENT SESSION nor VIEW SERVER STATE", nil
+	case !ddl:
+		return false, "this login lacks ALTER ANY EVENT SESSION", nil
+	case !view:
+		return false, "this login lacks VIEW SERVER STATE, so a capture could be created but never read", nil
+	}
+	return true, "", nil
+}
+
+func (s *Source) SweepCaptures(ctx context.Context) (int, error) {
+	return s.sweepOlderThan(ctx, 2*captureCap)
+}
+
+// sweepOlderThan is SweepCaptures with the threshold exposed, so the age rule
+// can be tested without waiting twenty minutes.
+func (s *Source) sweepOlderThan(ctx context.Context, age time.Duration) (int, error) {
+	if !s.captureAllowed {
+		return 0, nil
+	}
+	var names []string
+	q := fmt.Sprintf(sweepCaptureQueryTemplate, -int(age.Minutes()))
+	err := s.query(ctx, q, func(rows *sql.Rows) error {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return err
+		}
+		names = append(names, n)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	var dropped int
+	for _, n := range names {
+		// Belt and braces. The query filters on the prefix and so does
+		// this: the right this feature holds would also allow dropping
+		// system_health, and one filter is one mistake away from that.
+		if !strings.HasPrefix(n, capturePrefix) {
+			continue
+		}
+		drop := fmt.Sprintf(stopCaptureQueryTemplate, n)
+		if err := s.exec(ctx, drop); err != nil {
+			return dropped, err
+		}
+		dropped++
+	}
+	return dropped, nil
+}
+
+// RunningCaptures lists the captures alive on this instance, this Source's
+// own included: nothing on the server distinguishes them, and the caller
+// knows which session it started on.
+//
+// Since is the server's local wall clock, taken as the driver hands it over
+// and never adjusted, on the same terms as Source.startTime.
+func (s *Source) RunningCaptures(ctx context.Context) ([]model.CaptureNote, error) {
+	var notes []model.CaptureNote
+	err := s.query(ctx, runningCapturesQuery, func(rows *sql.Rows) error {
+		var name string
+		var since time.Time
+		if err := rows.Scan(&name, &since); err != nil {
+			return err
+		}
+		notes = append(notes, model.CaptureNote{SessionID: spidFromCaptureName(name), Since: since})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return notes, nil
+}
+
+// WatchedSession returns the login time of a session, and whether it is still
+// there at all. No row is the session having ended, which is an answer and
+// not an error: it is the commonest reason a capture has to stop.
+func (s *Source) WatchedSession(ctx context.Context, spid int64) (time.Time, bool, error) {
+	var login time.Time
+	q := fmt.Sprintf(watchedSessionQueryTemplate, spid)
+	switch err := s.queryRow(ctx, q, &login); {
+	case errors.Is(err, sql.ErrNoRows):
+		return time.Time{}, false, nil
+	case err != nil:
+		return time.Time{}, false, err
+	}
+	return login, true, nil
+}

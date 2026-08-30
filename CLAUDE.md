@@ -78,6 +78,26 @@ thing: Azure SQL Database, which cannot be containerised, and Kerberos against a
 real domain. Managed instance edition detection is asserted from documentation
 for the same reason.
 
+One test is timezone-sensitive and every container here runs in UTC, so it
+proves nothing where it usually runs. The capture sweep compares
+`sys.dm_xe_sessions.create_time`, which is local server time, against the
+server clock; against `SYSUTCDATETIME()` instead, every session looks hours
+old and the sweep drops a colleague's live capture on any server west of
+Greenwich, while passing on every container on this machine. After touching
+`sweepCaptureQueryTemplate` or `sweepOlderThan`, run the sweep tests on a
+server that is not in UTC:
+
+```
+podman run -d --name sqltop-tz -e ACCEPT_EULA=Y -e TZ=America/Los_Angeles \
+  -e MSSQL_SA_PASSWORD='Sqltop_dev_2026!' -p 11443:1433 \
+  mcr.microsoft.com/mssql/server:2022-latest
+SQLTOP_TEST_DSN="sqlserver://sa:Sqltop_dev_2026%21@127.0.0.1:11443?database=master&encrypt=disable" \
+  go test ./internal/source/mssql/ -run Sweep -v
+podman rm -f sqltop-tz
+```
+
+`TestSweepLeavesAYoungRunningCaptureAlone` is the one that matters there.
+
 ## Commits
 
 The rule lives in the machine-wide `~/.claude/CLAUDE.md`: commits carry no

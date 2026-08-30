@@ -70,6 +70,12 @@ type Source struct {
 	// tempdb_mb pinned at zero, rather than erroring or blocking on a
 	// version nobody has probed yet.
 	requestsQuery string
+
+	// captureAllowed comes from -capture and is the whole of the permission
+	// to write to the monitored server. Nothing in this package creates,
+	// starts or drops an event session while it is false, the sweep
+	// included: a sweep is a DROP like any other.
+	captureAllowed bool
 }
 
 func New() *Source {
@@ -524,6 +530,16 @@ OPTION (MAXDOP 1)`
 //
 // A failure of the marker query leaves the default rather than an error.
 // This is a label, and losing a connection over a label would be absurd.
+// knownDeployment reads info under the lock Identify writes it under. Empty
+// until Identify has finished, which callers have to treat as "not yet
+// known" rather than as a deployment. Never called from anything already
+// holding s.mu.
+func (s *Source) knownDeployment() model.Deployment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.info.Deployment
+}
+
 func (s *Source) deployment(ctx context.Context, engineEdition int) model.Deployment {
 	switch engineEdition {
 	case 5:

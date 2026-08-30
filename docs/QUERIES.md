@@ -602,9 +602,9 @@ Names the sessions under this tool's prefix that are dead by construction: a def
 SELECT s.name
 FROM sys.server_event_sessions AS s
 LEFT JOIN sys.dm_xe_sessions AS x ON x.name = s.name
-WHERE s.name LIKE 'sqltop_capture_%'
+WHERE s.name LIKE 'sqltop_capture_%%'
   AND (x.name IS NULL
-       OR x.create_time < DATEADD(minute, -%d, SYSDATETIME()))
+       OR x.create_time < DATEADD(minute, %d, SYSDATETIME()))
 OPTION (MAXDOP 1)
 ```
 
