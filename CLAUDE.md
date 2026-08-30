@@ -86,5 +86,12 @@ only so an agent reading this file alone does not have to guess.
 
 `gofmt` clean and `go vet ./...` clean.
 
+`deno lint internal/web/assets/app.js` clean. Deno rather than eslint: one
+static binary, no `package.json`, no `node_modules` and no configuration
+file, in a repository that otherwise has no JavaScript toolchain. The gate
+also runs from `go test ./internal/web`, which finds the binary on the PATH
+or in deno's default install directory and skips when it finds neither, so
+a machine without it still builds and tests.
+
 `bench/` is a local rendering harness and is deliberately not tracked in git.
 It still has to build when the tree does, but only on a machine that has it.

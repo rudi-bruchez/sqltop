@@ -13,7 +13,6 @@ const NA = '<span class="num na">n/a</span>';
 // them has to invent a reading.
 const fInt = (v) => n0(v);
 const fNum1 = (v) => Number(v).toFixed(1);
-const fNum2 = (v) => Number(v).toFixed(2);
 const fPct = (v) => Math.round(v) + " %";
 const fPct1 = (v) => Number(v).toFixed(1) + " %";
 const fMB = (v) => (Math.abs(v) >= 1024 ? (v / 1024).toFixed(1) + " GB" : Number(v).toFixed(1) + " MB");
@@ -415,7 +414,7 @@ es.addEventListener("error", () => {
 document.querySelector(".gridScroll").addEventListener("scroll", layout, { passive: true });
 // Otherwise enlarging the window leaves the new space empty until the next
 // snapshot happens to call layout().
-window.addEventListener("resize", layout);
+globalThis.addEventListener("resize", layout);
 
 // Collapsing hands the dashboard's whole height to the grid: watching a
 // blocking chain, you want the process list and nothing else. The toggle
@@ -429,12 +428,12 @@ const DASH_KEY = "sqltop.dashboard.open";
 try {
   const saved = localStorage.getItem(DASH_KEY);
   if (saved !== null) $("dashboard").open = saved === "1";
-} catch (e) { /* no stored preference is not a problem worth reporting */ }
+} catch { /* no stored preference is not a problem worth reporting */ }
 
 $("dashboard").addEventListener("toggle", () => {
   try {
     localStorage.setItem(DASH_KEY, $("dashboard").open ? "1" : "0");
-  } catch (e) { /* a browser that will not store it still works, it just forgets */ }
+  } catch { /* a browser that will not store it still works, it just forgets */ }
   layout();
 });
 head();
