@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -372,6 +373,39 @@ func TestQueryAfterSessionKilledRepairsThePinnedConnection(t *testing.T) {
 	if err := s.queryRow(ctx, probe, &n); err != nil {
 		t.Fatalf("query after repair: %v, want a fresh connection re-pinned and the query to succeed", err)
 	}
+}
+
+func TestExecTakesTheMutexAndRepairs(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+
+	// A harmless statement that returns nothing. SET options are session
+	// scoped and reset with the connection, so this changes nothing that
+	// outlives the test and is not a write to the server.
+	if err := s.exec(ctx, "SET LOCK_TIMEOUT 5000"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Concurrency: exec must serialise against query the way query does
+	// against itself, since both run on one pinned connection.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.exec(ctx, "SET LOCK_TIMEOUT 5000"); err != nil {
+				t.Error(err)
+			}
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := s.Identify(ctx); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestSampleRequestsSeesALongQuery(t *testing.T) {

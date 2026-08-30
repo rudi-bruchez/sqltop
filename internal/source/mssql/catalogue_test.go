@@ -366,7 +366,7 @@ shapes they are actually built into.
 // queryCallers are the methods that actually send SQL to the monitored
 // server. Anything added beside them has to be added here too, which is the
 // same naming-convention bargain the catalogue makes, one level down.
-var queryCallers = map[string]bool{"query": true, "queryRow": true}
+var queryCallers = map[string]bool{"query": true, "queryRow": true, "exec": true}
 
 // TestEveryQuerySentComesFromTheCatalogue closes the hole an external review
 // found in the check above: that one enforces a naming convention on
@@ -376,13 +376,13 @@ var queryCallers = map[string]bool{"query": true, "queryRow": true}
 // hints would then be guaranteed for the queries somebody remembered to
 // name, which is not a guarantee.
 //
-// This walks the call sites instead. The second argument of every s.query
-// and s.queryRow must be an identifier, never a literal, and must resolve
-// to a catalogued query: either directly, or through an assignment in the
-// same function whose right-hand side mentions one. That is one level of
-// data flow rather than a real analysis, which is enough for this package
-// and fails loudly rather than silently if the code ever gets cleverer than
-// that.
+// This walks the call sites instead. The second argument of every s.query,
+// s.queryRow and s.exec call must be an identifier, never a literal, and
+// must resolve to a catalogued query: either directly, or through an
+// assignment in the same function whose right-hand side mentions one. That
+// is one level of data flow rather than a real analysis, which is enough
+// for this package and fails loudly rather than silently if the code ever
+// gets cleverer than that.
 func TestEveryQuerySentComesFromTheCatalogue(t *testing.T) {
 	known := map[string]bool{
 		// requestsQuery is a field on Source, built by buildRequestsQuery

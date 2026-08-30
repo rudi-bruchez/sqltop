@@ -278,6 +278,23 @@ func (s *Source) queryRow(ctx context.Context, query string, dest ...any) error 
 	return err
 }
 
+// exec runs a statement that returns nothing, on the same terms as queryRow:
+// one at a time on the pinned connection, with a dead connection handed to
+// repairLocked rather than retried. Only the capture uses it, behind its own
+// flag; see capture.go.
+func (s *Source) exec(ctx context.Context, q string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conn, err := s.connLocked(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, q)
+	s.repairLocked(conn, err)
+	return err
+}
+
 // query runs one query under the same lock queryRow uses, holding it for the
 // whole query-plus-scan cycle rather than just the call that starts it: a
 // *sql.Conn can have another batch put on the wire while a previous result
