@@ -353,5 +353,9 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
 }
 .listTable td { padding: 0 8px; height: 22px; border-bottom: 1px solid #22262d; white-space: nowrap; }
 .listTable tbody tr:hover { background: #232830; }
+/* The list views put this on the cell itself, so it must not touch display:
+   .num carries display: block for the spans inside the grid's cells, and on
+   a td that drops the cell out of its own row. */
+.listTable td.numCell { text-align: right; font-variant-numeric: tabular-nums; }
 .listTable td.empty, .listError { color: #7a828e; padding: 10px 8px; }
 .listHeading { font-size: 12px; font-weight: 600; margin: 16px 0 6px; color: #9aa1ad; }

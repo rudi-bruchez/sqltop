@@ -332,6 +332,14 @@ out.views.sessions = await json(`(() => {
     headings: [...p.querySelectorAll("th")].map((th) => th.textContent),
     rows: p.querySelectorAll("tbody tr").length,
     firstRow: [...(p.querySelectorAll("tbody tr")[0] || { cells: [] }).cells].map((td) => td.textContent),
+    // Every cell of a row has to sit on the same line. A cell whose CSS
+    // takes it out of table-cell layout still has the right text and the
+    // right count, and lands on a line of its own, which is what every
+    // assertion here missed until a screenshot showed a session list with
+    // its numbers scattered down the page.
+    rowLines: new Set([...(p.querySelectorAll("tbody tr")[0] || { cells: [] }).cells]
+      .map((td) => Math.round(td.getBoundingClientRect().top))).size,
+    rowHeight: Math.round((p.querySelectorAll("tbody tr")[0] || { getBoundingClientRect: () => ({ height: 0 }) }).getBoundingClientRect().height),
   };
 })()`);
 

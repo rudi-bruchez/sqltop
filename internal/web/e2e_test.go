@@ -238,6 +238,14 @@ func TestEndToEndInABrowser(t *testing.T) {
 	if len(got.Views.Sessions.Headings) == 0 || got.Views.Sessions.Headings[0] != "spid" {
 		t.Errorf("the sessions table's headings are %v", got.Views.Sessions.Headings)
 	}
+	// Every cell of a row on one line. A stylesheet rule that takes a cell
+	// out of table-cell layout leaves the text and the cell count right and
+	// scatters the row down the page, which no other assertion here sees.
+	if got.Views.Sessions.RowLines != 1 {
+		t.Errorf("the first session row's cells sit on %d different lines and the row is %d px tall; they belong on one",
+			got.Views.Sessions.RowLines, got.Views.Sessions.RowHeight)
+	}
+
 	// The durations are formatted, not printed raw: 900 seconds of open
 	// transaction has to read as a duration or the column is useless.
 	if !containsString(got.Views.Sessions.FirstRow, "15m 00s") {
@@ -510,6 +518,8 @@ type e2eResult struct {
 			Headings   []string `json:"headings"`
 			Rows       int      `json:"rows"`
 			FirstRow   []string `json:"firstRow"`
+			RowLines   int      `json:"rowLines"`
+			RowHeight  int      `json:"rowHeight"`
 		} `json:"sessions"`
 		Transactions struct {
 			Visible  bool   `json:"visible"`

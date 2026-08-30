@@ -779,7 +779,12 @@ function listTable(view, rows) {
     for (const c of cols) {
       const td = tr.insertCell();
       td.textContent = c.text(r);
-      if (c.num) td.className = "num";
+      // numCell, not the grid's num. That one carries display: block,
+      // because in the grid it styles a span inside a cell; put on the cell
+      // itself it stops the cell being a table-cell and drops it out of its
+      // own row, which is what every numeric column of these three views
+      // did until a screenshot showed it.
+      if (c.num) td.className = "numCell";
     }
   }
   if (!rows.length) {
@@ -831,6 +836,10 @@ function post(path, body, type) {
 // own status, so "snapshot written to ..." survived for one tick at most and
 // usually for none.
 let noticeTimer = 0;
+function showRate() {
+  $("rate").textContent = periodMs ? "every " + (periodMs >= 1000 ? periodMs / 1000 + " s" : periodMs + " ms") : "";
+}
+
 function say(text) {
   $("notice").textContent = text;
   clearTimeout(noticeTimer);
@@ -887,7 +896,17 @@ function cycleFrequency() {
     rateIdx = (rateIdx + 1) % RATES.length;
   }
   post("/api/period", JSON.stringify({ period: RATES[rateIdx] + "ms" }), "application/json")
-    .then((r) => say("sampling every " + r.period))
+    .then((r) => {
+      // Shown from the answer rather than waited for. The status carries
+      // the period too, but it arrives on the next tick, which is now the
+      // new and slower one: stepping to thirty seconds meant the footer
+      // still read the old rate for half a minute, and the list views went
+      // on polling at the old cadence for one more cycle. The next status
+      // corrects this if the throttle has doubled it.
+      periodMs = RATES[rateIdx];
+      showRate();
+      say("sampling every " + r.period);
+    })
     .catch((e) => say("could not change the refresh period: " + e.message));
 }
 
@@ -1132,7 +1151,7 @@ function applyStatus(st, seq) {
   // too much, and a status bar that showed the request would be wrong
   // exactly when it mattered.
   periodMs = st.periodMs || 0;
-  $("rate").textContent = periodMs ? "every " + (periodMs >= 1000 ? periodMs / 1000 + " s" : periodMs + " ms") : "";
+  showRate();
 }
 
 const es = new EventSource("/api/stream?t=" + encodeURIComponent(token));
