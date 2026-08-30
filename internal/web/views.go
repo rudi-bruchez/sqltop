@@ -303,3 +303,35 @@ func (s *Server) sessionwaits(rw http.ResponseWriter, req *http.Request) {
 	}
 	writeJSON(rw, map[string]any{"rows": out})
 }
+
+// capture is the c command: POST toggles a capture on one session, GET
+// reports what it has seen. A source that cannot capture answers with a
+// reason rather than an error, because the panel has to be able to say why
+// the key did nothing.
+func (s *Server) capture(rw http.ResponseWriter, req *http.Request) {
+	m := s.col.Captures()
+	if m == nil {
+		writeJSON(rw, map[string]any{
+			"state": model.CaptureState{Why: "this source cannot capture", Others: []model.CaptureNote{}},
+			"rows":  []model.CapturedStatement{},
+		})
+		return
+	}
+	ctx := req.Context()
+	if req.Method == http.MethodPost {
+		spid, err := strconv.ParseInt(req.URL.Query().Get("spid"), 10, 64)
+		if err != nil || spid <= 0 {
+			http.Error(rw, "a session id is required", http.StatusBadRequest)
+			return
+		}
+		if err := m.Toggle(ctx, spid); err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	rows := m.Recent()
+	if rows == nil {
+		rows = []model.CapturedStatement{}
+	}
+	writeJSON(rw, map[string]any{"state": m.State(ctx), "rows": rows})
+}

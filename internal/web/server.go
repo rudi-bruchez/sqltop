@@ -165,6 +165,7 @@ func (s *Server) routes() ([]route, error) {
 		{"/api/plansave", http.HandlerFunc(s.plansave)},
 		{"/api/history", http.HandlerFunc(s.history)},
 		{"/api/sessionwaits", http.HandlerFunc(s.sessionwaits)},
+		{"/api/capture", http.HandlerFunc(s.capture)},
 	}, nil
 }
 

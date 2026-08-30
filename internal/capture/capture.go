@@ -79,6 +79,15 @@ func New(c source.Capturer, version, instance string) *Manager {
 	}
 }
 
+// SetIdentity names the server the header record records. It arrives after
+// New because the collector builds the manager before the server has been
+// identified, and a capture only ever starts long after that.
+func (m *Manager) SetIdentity(version, instance string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.version, m.instance = version, instance
+}
+
 // Toggle starts a capture on spid, or stops the running one when it is
 // already watching that session.
 func (m *Manager) Toggle(ctx context.Context, spid int64) error {
@@ -121,11 +130,15 @@ func (m *Manager) start(ctx context.Context, spid int64) error {
 		_ = m.src.StopCapture(ctx, h)
 		return err
 	}
+	m.mu.Lock()
+	version, instance := m.version, m.instance
+	m.mu.Unlock()
+
 	r := &run{handle: h, login: login, done: make(chan struct{}), file: f, enc: json.NewEncoder(f)}
 	r.write(headerRecord{
 		Record:    "header",
-		Version:   m.version,
-		Instance:  m.instance,
+		Version:   version,
+		Instance:  instance,
 		SessionID: spid,
 		StartedAt: h.Started,
 	})
