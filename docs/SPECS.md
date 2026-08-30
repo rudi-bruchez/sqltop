@@ -880,13 +880,52 @@ it was written for, a filter changing, and this one is left alone
 deliberately rather than fixed by pinning a scroll position that the user
 did not ask to have pinned.
 
-Three sets of figures now exist for this table and the conclusion has not
+The same nine modes under Firefox 154, same machine, same 800 rows at 1 Hz,
+same viewport, on a headless profile of its own:
+
+| Mode | apply p50 | apply p95 | frame p95 | Time frozen | Scroll lost | Selection lost |
+|---|---|---|---|---|---|---|
+| No sort, no filter | 1.3 ms | 2.8 ms | 17.3 ms | 0 % | 0 | 0 |
+| Client sort, stable key | 1.5 ms | 3.4 ms | 17.2 ms | 0 % | 0 | 0 |
+| Server sort, stable key | 1.5 ms | 2.9 ms | 17.2 ms | 0 % | 0 | 0 |
+| Client sort, volatile key | 1.3 ms | 1.6 ms | 17.3 ms | 0 % | 0 | 0 |
+| Server sort, volatile key | 1.2 ms | 1.5 ms | 17.3 ms | 0 % | 0 | 0 |
+| Client filter | 1.2 ms | 1.5 ms | 17.3 ms | 0 % | 0 | 0 |
+| Server filter | 1.3 ms | 2.8 ms | 17.3 ms | 0 % | 0 | 0 |
+| Client filter and volatile sort | 1.3 ms | 2.7 ms | 17.3 ms | 0 % | 0 | 0 |
+| Server filter and volatile sort | 1.3 ms | 1.7 ms | 17.3 ms | 0 % | 0 | 0 |
+
+Same conclusion, and one result that has to be read carefully. The client
+and server pairs do not separate here either, no mode freezes, nothing is
+lost. But Firefox comes out faster than Chrome, 1.3 ms against 2.6 to 3.6,
+where the original measurements in this section had it two to three times
+slower.
+
+That is not a finding about Firefox. Those original numbers were taken on a
+machine running its owner's ordinary Firefox with many windows open, and
+these were taken on a pristine headless profile with no extensions and
+nothing else running. The likely variable is the load on the machine, and
+the gap between those two conditions is plausibly larger than any gap
+between the two browsers. Neither figure describes what the tool will meet
+in practice, which is a browser with dozens of tabs and a dozen extensions,
+and nobody has measured that.
+
+Two things had to be fixed before the Firefox numbers meant anything, and
+both are recorded in the bench's own README. Firefox rounds
+`performance.now()` to the millisecond by default, which was a tolerable
+plus or minus when this renderer cost 12 ms and is not when it costs 1.3:
+every reading came back a whole number until the bench profile set
+`privacy.reduceTimerPrecision` to false. And Firefox permits one WebDriver
+BiDi session at a time, so a driver that exits without ending its session
+leaves the browser refusing every later one.
+
+Four sets of figures now exist for this table and the conclusion has not
 moved through any of them. The first was taken before the number formatter
 was fixed and ran 5.2 to 6.4 ms. The second, after that fix, ran 2.7 to 4.3.
-This one measures the shipped sort and filter rather than a simulation and
-runs 2.6 to 3.6. Each time the whole table moved together, which is what a
-change in something every mode uses should do, and each time the client and
-server twins stayed inside each other's noise.
+The third measures the shipped sort and filter rather than a simulation and
+runs 2.6 to 3.6. The fourth is Firefox. Each time the whole table moved
+together, which is what a change in something every mode uses should do, and
+each time the client and server twins stayed inside each other's noise.
 
 ## 11. Versioning
 

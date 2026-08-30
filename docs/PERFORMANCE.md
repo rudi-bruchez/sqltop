@@ -303,12 +303,45 @@ only on a machine that has them.
   is the tool that finds the class of bug curl cannot: it found both the
   subresource 401s and the favicon 401s.
 
+## The machine is a variable, and it has caught this project three times
+
+Every number in this document was taken on one workstation, and three
+separate times the state of that workstation turned out to be the thing
+that moved a measurement, not the code.
+
+A morning of benchmark runs left eighty-one stale chromium processes alive,
+because Linux truncates a process name to fifteen characters and
+`pkill -x chromium-browser` therefore matched nothing. The first one kept
+the debugging port, later launches quietly handed their tabs to it, and it
+was carrying twenty dead tabs still retrying their connections. Everything
+measured before that was noticed had been measured on a busy machine.
+
+An external reviewer measured a refresh at 7.8 ms against the 3.7 recorded
+here, on a machine that was simultaneously running a coding agent, a browser
+and the tool. Both figures were honest and they described different
+conditions. What was wrong was this document, for not saying which.
+
+And the Firefox pass below was taken on a pristine headless profile, no
+extensions, no other windows, while the original Firefox measurements in
+spec section 10.1 were taken on a machine running the owner's ordinary
+Firefox with many windows open. Those old numbers said Firefox was two to
+three times slower than Chrome. The new ones say it is slightly faster.
+Attributing that to the browser would be a mistake: the likelier variable is
+the load, and the difference between the two conditions is plausibly larger
+than any difference between the two browsers.
+
+The rule that follows, and it is the only defensible one: a rendering figure
+means nothing without the state of the machine that produced it. Every table
+here now says what else was running. And the case nobody has measured is the
+realistic one, a browser with forty tabs and a dozen extensions, which is
+what the tool will actually run in.
+
 ## What has not been measured
 
-- Firefox. Section 10.1's original runs found it two to three times slower
-  than Chrome on both renderers, with the ratio between renderers unchanged.
-  The sort and filter table is Chrome only. `drive-firefox.js` exists and has
-  not been run.
+- A browser under realistic load. Both passes ran on pristine headless
+  profiles with no extensions and nothing else open, which makes them
+  comparable to each other and to nothing a user will experience. See the
+  section above: this is now the largest known gap in these figures.
 - A remote server. Every observation-cost figure here comes from a container
   on the same machine. The budget is measured as server CPU rather than round
   trip time specifically so that distance does not throttle a healthy server,
