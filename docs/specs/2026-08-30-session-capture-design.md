@@ -53,8 +53,10 @@ filtered on that prefix. `ALTER ANY EVENT SESSION` is a server-wide right that
 would also allow dropping `system_health`; the prefix filter is what
 guarantees we never do.
 
-Two documents have to be corrected before this ships, and both corrections
-are consequences of section 2 rather than new licence. `CLAUDE.md` states the
+Three documents have to be corrected before this ships. Two of the
+corrections are consequences of section 2 rather than new licence; the third,
+in section 9, is a genuine change of mind that has to be recorded as one.
+`CLAUDE.md` states the
 constraint as "No object created" without section 2's MVP qualifier. Section
 12 of the specification says "No configuration of the monitored server. The
 tool reads.", which section 2 already contradicts and which should be read,
@@ -111,19 +113,26 @@ type CaptureProgress struct {
 type Capturer interface {
     CanCapture(ctx context.Context) (bool, string, error)
     SweepCaptures(ctx context.Context) (dropped int, err error)
-    RunningCaptures(ctx context.Context) ([]string, error)
+    RunningCaptures(ctx context.Context) ([]model.CaptureNote, error)
     StartCapture(ctx context.Context, spid int64) (CaptureHandle, error)
     PollCapture(ctx context.Context, h CaptureHandle) ([]model.CapturedStatement, model.CaptureProgress, error)
     StopCapture(ctx context.Context, h CaptureHandle) error
 }
 ```
 
+`RunningCaptures` returns `model.CaptureNote{SessionID int64; Since time.Time}`
+rather than the event session names. The names are a SQL Server concept and
+section 4.1 forbids them travelling upward; the panel wants to say "another
+capture is watching session 63" and does not need to know how that is spelled
+on the server.
+
 `CanCapture` returns a reason when it returns false, because a greyed key
 with no explanation is the failure mode this project has already fixed twice
-in the dashboard. It probes
-`HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY EVENT SESSION')` rather than
-guessing from the login's role membership, and it refuses Azure SQL Database
-outright.
+in the dashboard. It probes two rights, not one:
+`HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY EVENT SESSION')` for the DDL and
+`VIEW SERVER STATE` for the drain, because the second does not follow from the
+first and a login holding only the first would create a session it could never
+read. It refuses Azure SQL Database outright.
 
 A new capability, `CapCaptureSession`, joins the existing set so the UI can
 grey the key rather than fail on use.
@@ -184,9 +193,24 @@ Anything started and younger than that is left alone. It is probably somebody
 else's, and destroying a colleague's capture is a worse failure than leaving a
 stale one for another twenty minutes.
 
+The age comparison is made on the server, in the query, against
+`SYSUTCDATETIME()`. Comparing `create_time` to the sqltop process clock would
+put clock skew between two machines in the path of a decision that destroys
+another person's work.
+
 The sweep runs at connection and again before each new capture, and only when
 the flag is set. A failed `DROP`, typically a permission the login does not
 have, is reported in the panel header and not retried in a loop.
+
+One case defeats the sweep entirely and is worth stating rather than
+discovering. An event session is server-scoped and does not follow an
+availability group failover. If the instance fails over mid-capture, sqltop
+reconnects to the new primary, sweeps there, and leaves the session running on
+the old primary, which it has no reason to connect to again. Nothing in this
+design fixes that: an instance can only clean the server it talks to. What it
+can do is not hide it, so a failover detected during a capture ends the
+capture with a stop reason that names the old primary and says a session may
+have been left there.
 
 ## 6. The event session
 
@@ -200,7 +224,7 @@ ADD EVENT sqlserver.rpc_completed (
     ACTION (sqlserver.database_name, sqlserver.client_app_name, sqlserver.username)
     WHERE (sqlserver.session_id = 51)
 )
-ADD TARGET package0.ring_buffer (SET MAX_MEMORY = 1024)
+ADD TARGET package0.ring_buffer (SET MAX_EVENTS_LIMIT = 1000, MAX_MEMORY = 1024)
 WITH (
     MAX_MEMORY = 2 MB,
     EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
@@ -217,10 +241,30 @@ Every clause is load-bearing.
 a diagnostic tool into the outage. It must never be used here, and a test
 should assert the generated DDL does not contain it.
 
-The ring buffer target is capped at 1024 KB on Microsoft's own advice. The
-documented consumption limit is a 4 MB XML document, and a larger buffer
-simply produces truncated reads. 1024 KB leaves room for the XML markup and
-Unicode expansion that pushes the document past the buffer's own size.
+The ring buffer target carries two caps and both are written out, because
+the one that is left implicit is the one that governs. `MAX_EVENTS_LIMIT`
+defaults to 1000, and a target that sets only `MAX_MEMORY` is a
+thousand-event buffer whatever memory figure it names. Measured against 2022,
+with the memory cap at 1024 KB and again at 4096 KB, short statements filled
+the buffer at exactly 1000 events both times and the memory cap never bound.
+With 6 KB statements the memory cap did bind, at 85 events. The buffer
+therefore holds whichever of a thousand events and 1024 KB comes first, and
+the document says so rather than describing a megabyte it does not get.
+
+That gives the feature a capacity, which is the number a reader actually
+needs. Drained every two seconds, the capture keeps up with a session
+completing up to five hundred statements per second, or up to 512 KB of event
+per second, whichever binds first. Past that, events are lost between polls,
+counted exactly by section 7, and shown. A session busy enough to exceed it is
+a session where sampling was always going to be the honest answer.
+
+1024 KB is Microsoft's own recommendation for this target, and the reason to
+respect it is the 4 MB limit on the XML document the buffer is read through.
+The expansion from buffer bytes to document bytes was measured between 0.6 and
+1.9 times across event shapes here, and an external review measured 3.7 on a
+different shape, so 1024 KB keeps the document under 4 MB comfortably in some
+workloads and narrowly in others. It is not a guarantee, which is why section
+7 handles truncation rather than assuming it away.
 
 `MAX_DISPATCH_LATENCY = 2 SECONDS` matches the drain interval, so events reach
 the target at roughly the rate we read them.
@@ -270,14 +314,22 @@ loss from `dropped_event_count`, which counts what the server discarded before
 it ever reached the target; both are reported, separately, because they mean
 different things.
 
-`truncated="1"` on the element means the XML omitted part of the buffer, at
-which point positional arithmetic cannot be trusted. The 1024 KB cap is there
-to make this not happen; if it happens anyway the drain records a gap of
-unknown size, re-anchors the mark to `totalEventsProcessed`, and says so. An
-unknown gap that announces itself is acceptable. A silent one is not.
+Truncation breaks that arithmetic and has to be detected rather than assumed
+away. `truncated="1"` on the element means the XML omitted part of the buffer,
+and in that state `eventCount` still reports what the buffer holds, not what
+the document contains: an external review measured the attribute saying 3 620
+while 2 399 nodes were returned. So the drain checks both, and treats either
+`truncated="1"` or a node count below `eventCount` as the same condition. It
+records a gap of unknown size, re-anchors the mark to `totalEventsProcessed`,
+and says so. An unknown gap that announces itself is acceptable. A silent one
+is not.
 
 The last thousand statements are kept in memory for the panel, so opening it
-does not re-read the file.
+does not re-read the file. That slice is written by the drain goroutine and
+read by an HTTP handler, which is the shape of the fatal map race an external
+reviewer already found in `/api/layout` on this project. It is guarded by its
+own mutex, held only across the copy, never across the file write or the
+server query.
 
 If the connection to the server is lost, the existing repair path reconnects
 and the drain resumes; the event session is server-scoped and unaffected. If
@@ -317,19 +369,27 @@ shared package rather than being copied.
 ## 9. The panel
 
 A sixth mode of the detail panel, on `c`, alongside `t`, `e`, `y` and `n`.
-`c` was reserved in section 7 of the specification for a sub-mode of the waits
-view; that view does not exist yet, and a good mnemonic for a shipped feature
-outranks a reserved one for an unwritten one. The waits sub-mode will need
-another key or a click when it lands.
+
+`c` is not free. Section 7 of the specification reserves it for the sub-mode
+toggle of the waits view. That view does not exist yet, and a good mnemonic
+for a shipped feature outranks a reserved one for an unwritten one, but that
+is a request to change the specification rather than a discovery that the key
+was available. Section 7's table is amended in the same change that ships
+this, and the waits sub-mode is recorded there as needing another key or a
+click. Shipping the feature without the amendment would leave the
+specification saying one thing and the program doing another, which is the
+whole failure this document exists to avoid.
 
 The header states the situation in one line and never leaves the reader
 guessing: capture unavailable and why, capture running on session 51 since
 2 minutes with 1 480 statements, capture ended because the session id was
-reused, or capture ended at the ten minute cap. Loss is shown beside the
-count when it is not zero, with the two kinds distinguished.
+reused, or capture ended at the ten minute cap. Loss is shown beside the count
+when it is not zero, with the two kinds distinguished. A capture on a session
+that is idle says so and shows zero, because a running capture with an empty
+table and no explanation reads as a broken feature.
 
-The header also lists any other `sqltop_capture_` session running on the
-instance. Two people capturing the same session id is legitimate and the
+The header also names any other capture running on the instance, by the
+session id it watches and how long it has been running. Two people capturing the same session id is legitimate and the
 random suffix makes it possible, but it doubles the dispatch cost on the
 monitored workload, and section 10 explains why nothing else in this tool will
 tell them.
@@ -388,6 +448,27 @@ give up the property the check exists to hold.
 Two properties get their own tests because getting them wrong is expensive:
 the generated DDL never contains `NO_EVENT_LOSS`, and the generated session
 name and predicate contain nothing but the integer session id and hex.
+
+The loss path needs tests of its own, and it is the part most likely to ship
+untested because it only appears under load. Drive more than a thousand
+statements through a watched session between two polls and assert that a gap
+record is written with the exact count, not merely that a gap is noticed.
+Assert that the generated DDL sets `MAX_EVENTS_LIMIT` explicitly, which is the
+regression that would silently restore the implicit default this design was
+written around. Force truncation with long statement texts and assert the
+unknown-gap path fires on both signals, the attribute and the node count.
+
+Four failure modes get a test even though each is awkward to arrange, because
+they are cheap to describe now and expensive to debug later: a login that
+passes `CanCapture` but lacks `VIEW SERVER STATE` for the drain, a capture
+started on a session with nothing running, the drain goroutine and the panel
+handler racing on the in-memory slice under `-race`, and a capture whose
+server connection is lost and restored.
+
+Availability group failover is named here and not tested. It cannot be
+arranged against a single container, and the design's answer to it is a stop
+reason rather than a recovery, so what would be tested is a message. It stays
+on the list of things asserted from reasoning, beside Managed Instance.
 
 The panel gets geometric assertions like the other views, and each one is
 verified by breaking what it asserts and watching it fail, as the interface
