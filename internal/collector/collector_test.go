@@ -661,3 +661,35 @@ func TestPeriodForwardsToTheBudgetAndTracksThrottle(t *testing.T) {
 		t.Fatalf("Period(TierRequests) = %v after escalating to level 3, want %v (doubled): Collector.Period must track the budget live, not a value cached at construction", got, want)
 	}
 }
+
+// TestConnectedMeansTheConnectionNotEveryTier is the honesty rule applied
+// to the tool's statement about itself. A login that can read the request
+// grid but not the instance-wide views has a live connection and failing
+// server tiers, and the status used to read "disconnected" over rows that
+// were visibly updating. The tier failures still reach the user through the
+// message and through every figure being greyed; what must not happen is
+// the tool denying a connection it is currently using.
+func TestConnectedMeansTheConnectionNotEveryTier(t *testing.T) {
+	c := New(fake.New(nil), window.New(time.Minute, 100), NewBudget(50, config.Default().Tiers))
+
+	c.mu.Lock()
+	c.tierErr[model.TierCounters] = "counters: VIEW SERVER STATE denied"
+	c.tierErr[model.TierSpace] = "space: VIEW SERVER STATE denied"
+	c.mu.Unlock()
+
+	st := c.Status()
+	if !st.Connected {
+		t.Error("Connected = false while only server tiers are failing; the grid is live and saying otherwise is the tool contradicting itself")
+	}
+	if !strings.Contains(st.Message, "VIEW SERVER STATE denied") {
+		t.Errorf("message = %q; the tier failures still have to be visible somewhere", st.Message)
+	}
+
+	// The connection itself failing is the case Connected exists for.
+	c.mu.Lock()
+	c.identifyErr = "cannot reach the server"
+	c.mu.Unlock()
+	if c.Status().Connected {
+		t.Error("Connected = true after the preflight itself failed")
+	}
+}

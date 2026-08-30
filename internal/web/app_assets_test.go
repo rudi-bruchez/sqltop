@@ -63,7 +63,14 @@ func TestGridUpdatePathNeverWritesMarkupOutsideItsSetupRegion(t *testing.T) {
 		t.Fatal("could not find the \"setup-region: begin\" / \"setup-region: end\" markers in assets/app.js; this test cannot tell setup work from the render path without them")
 	}
 
-	writeRE := regexp.MustCompile(`\.(innerHTML|outerHTML)\s*=|\.insertAdjacentHTML\s*\(`)
+	// The list is every API that turns a string into markup, not every API
+	// that adds a node. An external reviewer called the previous three-API
+	// list narrow, correctly; appendChild and insertAdjacentElement are
+	// deliberately still absent, because they take nodes rather than
+	// markup, they are how the pool is built in the first place, and
+	// banning them would fail on the renderer's own setup. What is added
+	// here are the remaining ways to write markup from a string.
+	writeRE := regexp.MustCompile(`\.(innerHTML|outerHTML)\s*=|\.(insertAdjacentHTML|createContextualFragment|write|writeln)\s*\(`)
 	allowedRE := regexp.MustCompile(`entry\.tds\[[^\]]*\]\.((innerHTML|outerHTML)\s*=|insertAdjacentHTML\s*\()`)
 
 	foundAllowed := false

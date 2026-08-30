@@ -25,31 +25,6 @@ const (
 	// not oscillate.
 	recoveryPeriod = 30 * time.Second
 
-	// escalateCooldown is the minimum spacing between two steps up, after
-	// the first. It is not derived from recoveryPeriod: raising that to damp
-	// oscillation on the way down must not silently make escalation slower
-	// to protect the server too, which is the opposite of what it is for.
-	// The real constraint is that a step's own effect has to become visible
-	// before another step is justified: doubling a tier's period only
-	// changes future samples, and that change only fully displaces the old
-	// rate from the window once the window has turned over past a sample
-	// taken at the new, slower cadence. The space tier gives first and has
-	// the longest base period this throttles, five seconds, doubled to ten;
-	// a window turning over after that is twenty seconds, with no margin
-	// borrowed from any other constant.
-	//
-	// Debt: the ten seconds above is the default Space period (5s) doubled,
-	// baked in as a package constant. config.Tiers.Space is configurable
-	// per spec section 8.3; an operator who sets it to, say, 30s doubles it
-	// to 60s, and this fixed 20s cooldown no longer outlasts the visibility
-	// delay it was derived to cover. The way out is to stop deriving this
-	// from an assumption about config and instead compute it per Budget, in
-	// NewBudget, from the actual base.Space.Std() supplied there, making it
-	// a field rather than a package const. Left as a constant for now
-	// because no test or deployment has yet exercised a non-default Space
-	// period against this code; when one does, this is the line to change.
-	escalateCooldown = budgetWindow + 10*time.Second
-
 	maxLevel = 3
 )
 
@@ -95,13 +70,41 @@ type Budget struct {
 
 	lastEscalate time.Time // when the level last went up
 	quietFrom    time.Time // when the current unbroken quiet streak began
+
+	// escalateCooldown is the minimum spacing between two steps up, after
+	// the first. It is not derived from recoveryPeriod: raising that to
+	// damp oscillation on the way down must not silently make escalation
+	// slower to protect the server too, which is the opposite of what it
+	// is for.
+	//
+	// The constraint is that a step's own effect has to become visible
+	// before another step is justified. Doubling a tier's period only
+	// changes future samples, and that change fully displaces the old rate
+	// from the window only once the window has turned over past a sample
+	// taken at the new, slower cadence. So it is the window plus one
+	// throttled period of the slowest tier this throttles, which is the
+	// space tier.
+	//
+	// It is a field rather than a constant because config.Tiers.Space is
+	// configurable, and a constant baked from the 5 s default stopped
+	// outlasting the delay it was derived from as soon as anybody set the
+	// space tier slower. It was written down as debt in exactly those
+	// words, and an external reviewer read the note and asked why it was
+	// still a constant. Fair question.
+	escalateCooldown time.Duration
 }
 
 // NewBudget builds a Budget that throttles once the tool's own server CPU,
 // averaged over a sliding ten second window, exceeds limitMsPerSecond,
 // falling back to base for every tier's period while it stays inside it.
 func NewBudget(limitMsPerSecond int, base config.Tiers) *Budget {
-	return &Budget{limit: float64(limitMsPerSecond), base: base}
+	// One throttled space period past the window, computed from the space
+	// period this Budget was actually given. See the field's own comment.
+	return &Budget{
+		limit:            float64(limitMsPerSecond),
+		base:             base,
+		escalateCooldown: budgetWindow + 2*base.Space.Std(),
+	}
 }
 
 // Observe takes the cumulative cost of the tool's own session, as read from
@@ -185,7 +188,7 @@ func (b *Budget) reviseLocked(now time.Time) {
 
 	if avg > b.limit {
 		b.quietFrom = time.Time{}
-		if b.level < maxLevel && (b.lastEscalate.IsZero() || now.Sub(b.lastEscalate) >= escalateCooldown) {
+		if b.level < maxLevel && (b.lastEscalate.IsZero() || now.Sub(b.lastEscalate) >= b.escalateCooldown) {
 			b.level++
 			b.lastEscalate = now
 			b.msg = fmt.Sprintf("observation budget exceeded (%.0f ms/s of server CPU over the last %s, limit %.0f): %s",

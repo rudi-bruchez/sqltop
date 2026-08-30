@@ -38,7 +38,11 @@ func main() {
 	// the interface header shows, so a screenshot and a log agree.
 	log.Print(buildinfo.String())
 
-	if err := dotenv.Load(*envPath); err != nil {
+	envWarnings, err := dotenv.Load(*envPath)
+	for _, w := range envWarnings {
+		log.Printf("warning: %s", w)
+	}
+	if err != nil {
 		log.Printf("warning: %s: %v", *envPath, err)
 	}
 

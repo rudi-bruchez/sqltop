@@ -220,7 +220,7 @@ func TestEscalationCooldownSurvivesARecoveryStep(t *testing.T) {
 	// from fifteen seconds into the test and this would fire almost at
 	// once, as soon as the window itself carries enough of the burst.
 	at = recoveredAt
-	for i := 0; i < int(escalateCooldown.Seconds())-1; i++ {
+	for i := 0; i < int(b.escalateCooldown.Seconds())-1; i++ {
 		at = at.Add(time.Second)
 		total += 200
 		b.Observe(model.Cost{At: at, CPUMs: total})
@@ -347,4 +347,33 @@ func TestDegradedFromPanicsOnUnknownTier(t *testing.T) {
 		}
 	}()
 	degradedFrom(model.Tier(99))
+}
+
+// TestEscalateCooldownFollowsTheConfiguredSpacePeriod pins what stopped
+// being a constant. The cooldown exists so a step up has time to become
+// visible in the window before another is justified, and a step doubles a
+// tier's period, so the delay it has to outlast is two space periods, not
+// two of the default space period. Baked from the default, it silently
+// stopped covering that delay for anybody who configured the space tier
+// slower, which is the shape of bug this project keeps finding: a constant
+// derived from a value the user can change.
+func TestEscalateCooldownFollowsTheConfiguredSpacePeriod(t *testing.T) {
+	for _, space := range []time.Duration{time.Second, 5 * time.Second, 30 * time.Second} {
+		tiers := config.Default().Tiers
+		tiers.Space = config.Duration(space)
+		b := NewBudget(50, tiers)
+		want := budgetWindow + 2*space
+		if b.escalateCooldown != want {
+			t.Errorf("space %s: escalateCooldown = %s, want %s (the window plus one throttled space period)", space, b.escalateCooldown, want)
+		}
+		// The property that matters, stated without the arithmetic: a step
+		// up must not be allowed again before a sample taken at the new,
+		// slower cadence has had time to displace the old rate.
+		if b.escalateCooldown <= budgetWindow {
+			t.Errorf("space %s: cooldown %s does not outlast the window itself", space, b.escalateCooldown)
+		}
+		if b.escalateCooldown < 2*space {
+			t.Errorf("space %s: cooldown %s is shorter than one throttled space period", space, b.escalateCooldown)
+		}
+	}
 }

@@ -60,6 +60,17 @@ budget at a one second period. The memory clerk half is the one that grows
 with the size of the instance, so that figure is worth taking again on a
 large server.
 
+An external reviewer measured the same tier under its own load and got
+10.65 ms for the two queries together, which leaves roughly 6.5 ms for
+osViewsQuery against the 1.70 ms recorded above. Both figures are honest and
+they were taken under different loads on a machine that was not idle either
+time. The disagreement is the useful part: it says the memory-clerk half of
+that query grows with what the server is doing, not only with how big it
+is, and that the recorded figure should have said what the machine was
+doing when it was taken. Every measurement in this document was taken on
+this workstation against a container, with the tool and a load generator
+running and nothing else deliberately loading the machine.
+
 tempdb's total is summed in Go from its three parts rather than asked of the
 server as a fourth aggregate. This is not a speed optimisation: two
 aggregates over a view that moves between them can disagree, and a dashboard
