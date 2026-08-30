@@ -15,6 +15,7 @@ import (
 	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/dotenv"
+	"github.com/rudi-bruchez/sqltop/internal/model"
 	"github.com/rudi-bruchez/sqltop/internal/source/mssql"
 	"github.com/rudi-bruchez/sqltop/internal/web"
 	"github.com/rudi-bruchez/sqltop/internal/window"
@@ -75,16 +76,24 @@ func main() {
 		return
 	}
 
-	// -write-config exists so nobody has to know a tile's name to switch it
-	// off. It writes every dashboard group and every figure the catalogue
-	// knows, each with its own switch, on top of whatever was already
-	// configured.
+	// -write-config exists so nobody has to know a tile's or a column's
+	// name to switch it off. It writes every dashboard group, every figure
+	// and every column the catalogue knows, each with its own switch, on
+	// top of whatever was already configured.
 	if *writeConfig {
 		if cfg.Layouts == nil {
 			cfg.Layouts = map[string]config.Layout{}
 		}
 		l := cfg.Layouts["default"]
 		l.Dashboard = cfg.Dashboard()
+		if l.Views == nil {
+			l.Views = map[string]config.ViewLayout{}
+		}
+		for _, v := range model.ViewCatalogue {
+			view := l.Views[v.ID]
+			view.Columns = cfg.Columns(v.ID)
+			l.Views[v.ID] = view
+		}
 		cfg.Layouts["default"] = l
 		path, err := config.Save(cfg)
 		if err != nil {
@@ -132,7 +141,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	srv = srv.WithDashboard(cfg.Dashboard())
+	srv = srv.WithConfig(cfg)
 	// The token in this URL is exactly what URL's own doc comment names as
 	// its cost: printing it here sends it to stderr, and from there to
 	// whatever captures this process's output, journald, a CI log, a

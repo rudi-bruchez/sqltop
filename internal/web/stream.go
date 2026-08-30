@@ -63,7 +63,7 @@ func (s *Server) stream(rw http.ResponseWriter, req *http.Request) {
 	// keeps the unbounded write it had before.
 	rc := http.NewResponseController(rw)
 
-	enc := NewEncoder().WithDashboard(s.dashboard())
+	enc := NewEncoder().WithDashboard(s.dashboard()).WithGrid(s.gridColumns())
 	send := func() bool {
 		payload := enc.Snapshot(s.win.Latest(), s.col.Server().Figures, s.col.Status())
 		b, err := json.Marshal(payload)

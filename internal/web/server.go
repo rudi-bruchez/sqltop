@@ -35,17 +35,25 @@ type Server struct {
 	win      *window.Window
 	token    string
 	listener net.Listener
-	// dash is the dashboard every client is told to draw, resolved once
-	// from the configuration file at startup because that file does not
-	// change while the process runs.
+	// mu guards cfg, dash and grid, which the layout endpoint rewrites
+	// while stream goroutines are reading them.
+	mu   sync.RWMutex
+	cfg  config.Config
 	dash []DashGroup
+	grid []GridCol
 }
 
-// WithDashboard sets what the dashboard shows, from the resolved
-// configuration. A server built without one still serves the full
-// catalogue, which is what the tests and a defaults-only run want.
-func (s *Server) WithDashboard(groups []config.DashboardGroup) *Server {
-	s.dash = resolveDashboard(groups)
+// WithConfig gives the server the resolved configuration: what the
+// dashboard shows, which grid columns are drawn in what order, and the file
+// to write back to when the interface saves a layout. A server built
+// without one still serves the full catalogue, which is what the tests and
+// a defaults-only run want.
+func (s *Server) WithConfig(cfg config.Config) *Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg = cfg
+	s.dash = resolveDashboard(cfg.Dashboard())
+	s.grid = resolveGrid("requests", cfg.Columns("requests"))
 	return s
 }
 
@@ -104,10 +112,23 @@ func (s *Server) Close() error {
 // given a configuration falls back to the whole catalogue, so a run on
 // built-in defaults shows everything rather than nothing.
 func (s *Server) dashboard() []DashGroup {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.dash != nil {
 		return s.dash
 	}
 	return resolveDashboard(config.DefaultLayout().Dashboard)
+}
+
+// gridColumns is what a new client draws. Same fallback as dashboard: no
+// configuration means the catalogue's own defaults.
+func (s *Server) gridColumns() []GridCol {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.grid != nil {
+		return s.grid
+	}
+	return resolveGrid("requests", config.Default().Columns("requests"))
 }
 
 // route pairs a path with the handler that serves it.
@@ -131,6 +152,7 @@ func (s *Server) routes() ([]route, error) {
 		{"/", http.HandlerFunc(s.index)},
 		{"/api/status", http.HandlerFunc(s.status)},
 		{"/api/stream", http.HandlerFunc(s.stream)},
+		{"/api/layout", http.HandlerFunc(s.layout)},
 	}, nil
 }
 

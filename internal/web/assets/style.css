@@ -245,3 +245,49 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 .blocked { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; text-align: right; display: block; }
 .na { color: var(--dim); font-style: italic; }
+
+.barBtn {
+  margin-left: auto;
+  background: #1c1f26;
+  color: inherit;
+  border: 1px solid #2a2e37;
+  border-radius: 3px;
+  padding: 1px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+.barBtn:hover { background: #262a33; }
+
+/* The column being dragged onto, so the drop is not a guess. */
+th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
+
+.panel {
+  background: #14161a;
+  color: #d7dae0;
+  border: 1px solid #2a2e37;
+  border-radius: 4px;
+  padding: 14px 18px;
+  font: inherit;
+}
+.panel::backdrop { background: rgba(0, 0, 0, 0.55); }
+.panel h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+.panel menu { display: flex; gap: 8px; margin: 12px 0 0; padding: 0; }
+.panel button {
+  background: #1c1f26;
+  color: inherit;
+  border: 1px solid #2a2e37;
+  border-radius: 3px;
+  padding: 3px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.panel button:hover { background: #262a33; }
+
+.colList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: 2px 18px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.colItem { display: flex; align-items: center; gap: 6px; cursor: pointer; }

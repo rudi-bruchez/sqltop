@@ -484,6 +484,16 @@ every tick as the row count moved.
 Columns can be shown, hidden, reordered and resized. That state is a named
 layout and it persists.
 
+What exists is a catalogue in Go, `model.ViewCatalogue`, one entry per view
+of section 7, listing every column that view can draw with its heading, its
+width and its default. It lives in Go rather than only in the browser for
+the same reason the dashboard catalogue does: the configuration file has to
+be able to list every column with an explicit switch, and a list that only
+exists in JavaScript cannot be written into a YAML file. The browser keeps
+what Go has no business knowing, which is how to read and draw each cell. A
+test checks the two halves cover each other, so a column can never exist on
+one side alone.
+
 A layout holds the column set, order and widths per view, the sort, the saved
 filters, the dashboard's tile selection, and which of its groups are folded.
 Layouts are named and switchable. One layout is the default.
@@ -509,6 +519,23 @@ survives a change of browser, it can be copied between machines, it can be
 committed to a team repository, and a DBA who has built a good layout can hand
 it to a colleague. The server owns the file and the UI reads and writes it
 through an endpoint.
+
+The gestures. A column moves by dragging its heading, which is what people
+try first. Visibility is a panel of checkboxes reached from the status bar,
+one per column of the view including the hidden ones, listed in the order
+the file gave and deliberately not reshuffled by a drag: a list that moved
+under the pointer while boxes were being ticked would be worse than one that
+does not follow the header. Saving is explicit, a button in that panel, not
+an autosave on every drag; the tool does not rewrite a file somebody may
+have under version control without being asked.
+
+`POST /api/layout` is the endpoint. It carries the view and every column of
+it in display order, hidden ones included, each with its switch and width.
+It checks every field against the catalogue and runs the assembled
+configuration through exactly the validation a hand-edited file gets, so a
+stale interface cannot put a field into a file that outlives it. It holds
+the token like every other route, so that check is not the trust boundary,
+only the guard against writing nonsense.
 
 ### 8.3 The configuration file
 
@@ -591,12 +618,16 @@ layouts:
       requests:
         columns:
           - field: spid
+            show: true
             width: 60
           - field: database
-            width: 100
-          - field: command
-            width: 100
+            show: true
+            width: 110
+          - field: host
+            show: false
+            width: 95
           - field: cpu_ms
+            show: true
             width: 90
         sort:
           - field: cpu_ms
@@ -605,34 +636,36 @@ layouts:
           - field: database
             op: in
             value: [CRM]
-      blocking:
-        columns:
-          - field: spid
-            width: 60
-          - field: blocking_depth
-            width: 50
-          - field: sql_text
-            width: 520
 ```
 
-`sqltop --write-config` writes that file out in full: every group and every
-figure the tool knows, each with its own switch. The point is that a user can
-see what exists and turn a tile off without knowing its name in advance,
-which is why the generated file lists everything rather than only what is
-enabled. Anything a hand-written file leaves out keeps its default, which is
-on, so a figure added by a later version appears rather than staying
-invisible to everyone who ever saved a configuration.
+`sqltop --write-config` writes that file out in full: every group, every
+figure and every column the tool knows, each with its own switch. The point
+is that a user can see what exists and turn a tile or a column off without
+knowing its name in advance, which is why the generated file lists
+everything rather than only what is enabled.
 
 `collect.skipTiers` is the collection scope of section 8.2. A tier named there
 is never sampled, for every viewer, which removes its query rather than its
 tiles. Absent or empty means collect everything.
 
-A layout is exactly that shape: per view, an ordered column list with widths,
-a sort, and a filter list, plus the dashboard's groups and figures. Column
-order is the list order; a column absent from the list is hidden. Anything the
-file does not mention falls back to the built-in default, so a hand-written
-partial layout is valid, and the `blocking` view above inherits its sort and
-filters while naming only three columns.
+A layout is exactly that shape: per view, an ordered column list with a
+switch and a width, a sort, and a filter list, plus the dashboard's groups
+and figures. Column order is the list order.
+
+One rule governs everything the file leaves out, and it is the same rule for
+a tile and for a column: what is not mentioned keeps its built-in default.
+That is on for most columns and off for the two that are usually blank,
+`percent_complete` and `blocking_depth`. So a hand-written partial layout is
+valid, a column named only to move it stays visible, and a column added by a
+later version of the tool appears rather than staying invisible to everyone
+who ever saved a layout.
+
+An earlier draft of this section said the opposite, that a column absent from
+the list is hidden. That rule makes every saved layout a permanent ceiling on
+what the tool can ever show its owner, which is the failure this one avoids.
+The cost is that hiding a column takes an explicit `show: false` rather than
+a deletion, and `--write-config` writes every line so there is nothing to
+work out by hand.
 
 Every view of section 7 is configured independently under `views`, because a
 blocking chain and a repetitive-query aggregation do not want the same columns

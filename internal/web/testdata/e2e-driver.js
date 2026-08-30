@@ -168,9 +168,9 @@ out.sort = await json(`(() => {
   const desc = (a) => a.every((v, i) => i === 0 || a[i - 1] >= v);
   const cpus = () => view.map(${cpuOf});
   const seen = [];
-  setSort("cpu"); seen.push({ dir: sortDir, ordered: asc(cpus()) });
-  setSort("cpu"); seen.push({ dir: sortDir, ordered: desc(cpus()) });
-  setSort("cpu"); seen.push({ dir: sortDir, field: sortField });
+  setSort("cpu_ms"); seen.push({ dir: sortDir, ordered: asc(cpus()) });
+  setSort("cpu_ms"); seen.push({ dir: sortDir, ordered: desc(cpus()) });
+  setSort("cpu_ms"); seen.push({ dir: sortDir, field: sortField });
   return seen;
 })()`);
 
@@ -184,30 +184,30 @@ const setFilter = (field, text) => ev(`(() => {
 // The clear button appears only when there is something to clear, and
 // clearing through it must leave the same state as clearing by hand.
 out.clearButton = await json(`(() => {
-  const x = document.getElementById("x-db");
+  const x = document.getElementById("x-database");
   return { hiddenWhenEmpty: x.hidden };
 })()`);
 
-await setFilter("db", "alpha");
-out.clearButton.shownWhenFiltered = await ev(`!document.getElementById("x-db").hidden`);
+await setFilter("database", "alpha");
+out.clearButton.shownWhenFiltered = await ev(`!document.getElementById("x-database").hidden`);
 
 out.filterOne = await json(`({ rows: view.length, total: data.length,
   allMatch: view.every((r) => val(r, "db").toLowerCase().includes("alpha")),
-  boxMarked: document.getElementById("f-db").classList.contains("on"),
+  boxMarked: document.getElementById("f-database").classList.contains("on"),
   rowCount: document.getElementById("rowCount").textContent })`);
 
-await setFilter("cpu", ">5000");
+await setFilter("cpu_ms", ">5000");
 out.filterAnd = await json(`({ rows: view.length,
   allMatch: view.every((r) => val(r, "db").toLowerCase().includes("alpha") && val(r, "cpu") > 5000) })`);
 
-await setFilter("cpu", "");
+await setFilter("cpu_ms", "");
 // The db filter goes through the cross rather than through the keyboard,
 // so the button is exercised as a user would use it.
 out.clearedByButton = await json(`(() => {
-  document.getElementById("x-db").dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  const el = document.getElementById("f-db");
+  document.getElementById("x-database").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  const el = document.getElementById("f-database");
   return { boxValue: el.value, boxMarked: el.classList.contains("on"),
-           buttonHidden: document.getElementById("x-db").hidden,
+           buttonHidden: document.getElementById("x-database").hidden,
            rows: view.length, total: data.length };
 })()`);
 out.filterCleared = await json(`({ rows: view.length, total: data.length })`);
@@ -228,7 +228,7 @@ out.anchorKeeps = await json(`(() => {
   sc.scrollTop = sc.scrollHeight;
   layout();
   const scrollBefore = Math.round(sc.scrollTop);
-  const el = document.getElementById("f-db");
+  const el = document.getElementById("f-database");
   el.value = db;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   const sel = document.querySelector("#gridBody tr.sel");
@@ -244,10 +244,38 @@ out.anchorKeeps = await json(`(() => {
 out.anchorDrops = await json(`(() => {
   const sc = document.querySelector(".gridScroll");
   sc.scrollTop = 400;
-  const el = document.getElementById("f-db");
+  const el = document.getElementById("f-database");
   el.value = "no-such-database-anywhere";
   el.dispatchEvent(new Event("input", { bubbles: true }));
   return { rows: view.length, scrollAfter: Math.round(sc.scrollTop) };
+})()`);
+
+// The column selection of spec section 8.2, from the file to the screen and
+// back: what the configuration asked for, what the panel offers, what
+// dragging a heading does, and what ticking a box does. Last, so none of it
+// can disturb the assertions above.
+out.columns = await json(`(() => {
+  const order = () => [...document.querySelectorAll("#gridHead th")].map((th) => th.dataset.f);
+  const boxes = () => [...document.querySelectorAll("#colList input")].map((i) => ({ f: i.dataset.f, on: i.checked }));
+  const configured = order();
+  const panel = boxes();
+  // anchorDrops left a filter that matches nothing, and an empty grid has
+  // an empty row pool, which would make the cell count below vacuous.
+  setFilter(document.getElementById("f-database"), "");
+
+  moveColumn("spid", "database");
+  const afterDrag = order();
+
+  // Switching a column back on changes the column count, which is the one
+  // change the per-cell update path cannot absorb: measured here rather
+  // than after the drag, where the count does not move and the reading
+  // would be true whatever applyColumns did with the pool.
+  const host = [...document.querySelectorAll("#colList input")].find((i) => i.dataset.f === "host");
+  host.checked = true;
+  host.dispatchEvent(new Event("change"));
+
+  return { configured, panel, afterDrag, poolCells: pool.length ? pool[0].tds.length : -1,
+           rows: view.length, afterShow: order() };
 })()`);
 
 console.log(JSON.stringify(out));

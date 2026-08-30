@@ -58,12 +58,36 @@ type DashboardGroup struct {
 	Figures map[string]bool `yaml:"figures"`
 }
 
-// Layout is one named layout. Only the dashboard is typed so far: the views
-// of section 8.2 are carried through untouched, because nothing reads them
-// yet and inventing their shape before something does would be guessing.
+// ViewColumn is one column of one view as the configuration file sees it.
+// The list is ordered and the order is the display order, so moving a
+// column is moving a line in the file.
+//
+// Show is a pointer so that "not mentioned" and "mentioned as false" are
+// different things. A hand-written file that names a column only to move it
+// (- field: sql_text) must keep showing it; a plain bool would read that
+// omission as false and hide it. What -write-config produces always says
+// so explicitly.
+type ViewColumn struct {
+	Field string `yaml:"field"`
+	Show  *bool  `yaml:"show,omitempty"`
+	Width int    `yaml:"width,omitempty"`
+}
+
+// ViewLayout is one view's saved layout. Sort and Filters are carried
+// through untouched: section 8.2 lists both as part of a layout, nothing
+// reads them yet, and a rewrite of this file must not silently throw away
+// what somebody already wrote in it.
+type ViewLayout struct {
+	Columns []ViewColumn `yaml:"columns,omitempty"`
+	Sort    *yaml.Node   `yaml:"sort,omitempty"`
+	Filters *yaml.Node   `yaml:"filters,omitempty"`
+}
+
+// Layout is one named layout: the dashboard's groups and figures, and each
+// view's columns.
 type Layout struct {
-	Dashboard []DashboardGroup `yaml:"dashboard,omitempty"`
-	Views     *yaml.Node       `yaml:"views,omitempty"`
+	Dashboard []DashboardGroup      `yaml:"dashboard,omitempty"`
+	Views     map[string]ViewLayout `yaml:"views,omitempty"`
 }
 
 type Instance struct {
@@ -112,7 +136,7 @@ type Config struct {
 // of the file is that somebody can see what exists and switch a tile off
 // without having to know its name in advance.
 func DefaultLayout() Layout {
-	l := Layout{}
+	l := Layout{Views: map[string]ViewLayout{}}
 	for _, g := range model.DashboardCatalogue {
 		grp := DashboardGroup{Group: g.ID, Folded: false, Figures: map[string]bool{}}
 		for _, f := range g.Figures {
@@ -120,7 +144,82 @@ func DefaultLayout() Layout {
 		}
 		l.Dashboard = append(l.Dashboard, grp)
 	}
+	for _, v := range model.ViewCatalogue {
+		l.Views[v.ID] = ViewLayout{Columns: defaultColumns(v)}
+	}
 	return l
+}
+
+func defaultColumns(v model.ViewDef) []ViewColumn {
+	out := make([]ViewColumn, 0, len(v.Columns))
+	for _, c := range v.Columns {
+		show := c.Default
+		out = append(out, ViewColumn{Field: c.Field, Show: &show, Width: c.Width})
+	}
+	return out
+}
+
+// Columns returns one view's columns in display order, every one of them
+// listed with an explicit switch and a width. The file's order wins where
+// it says anything, so moving a line moves a column; the catalogue supplies
+// everything the file left out, in its own order, at its own default. That
+// last rule is what keeps a column added by a later version from being
+// invisible to everybody who ever saved a layout, and it is the same rule
+// the dashboard follows above.
+//
+// A column the file names and the catalogue does not know is dropped: it is
+// a typo or a leftover from an older version, and drawing an empty column
+// for it would be worse than ignoring it.
+func (cfg Config) Columns(view string) []ViewColumn {
+	def, known := model.ViewByID(view)
+	if !known {
+		return nil
+	}
+
+	said := map[string]ViewColumn{}
+	var order []string
+	if l, ok := cfg.Layouts["default"]; ok {
+		for _, c := range l.Views[view].Columns {
+			if _, dup := said[c.Field]; dup {
+				continue
+			}
+			said[c.Field] = c
+			order = append(order, c.Field)
+		}
+	}
+
+	byField := map[string]model.Column{}
+	for _, c := range def.Columns {
+		byField[c.Field] = c
+	}
+
+	out := make([]ViewColumn, 0, len(def.Columns))
+	seen := map[string]bool{}
+	emit := func(field string) {
+		cat, inCatalogue := byField[field]
+		if !inCatalogue || seen[field] {
+			return
+		}
+		seen[field] = true
+		show := cat.Default
+		width := cat.Width
+		if c, configured := said[field]; configured {
+			if c.Show != nil {
+				show = *c.Show
+			}
+			if c.Width > 0 {
+				width = c.Width
+			}
+		}
+		out = append(out, ViewColumn{Field: field, Show: &show, Width: width})
+	}
+	for _, f := range order {
+		emit(f)
+	}
+	for _, c := range def.Columns {
+		emit(c.Field)
+	}
+	return out
 }
 
 // Dashboard returns the groups and figures this configuration asks for,
@@ -276,7 +375,7 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("config: %s: %w", path, err)
 	}
 	cfg.Path = path
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return cfg, fmt.Errorf("config: %s: %w", path, err)
 	}
 	return cfg, nil
@@ -311,13 +410,24 @@ const (
 	maxRetention  = 24 * time.Hour
 	maxSamplesCap = 10_000_000
 	maxBudgetMs   = 1000
+
+	// A column narrower than this cannot show its own heading, and one
+	// wider than this is wider than any screen the grid is drawn on. Typo
+	// detection again, not policy.
+	minColumnWidth = 20
+	maxColumnWidth = 2000
 )
 
-// validate rejects a configuration that would either hammer the monitored
+// Validate rejects a configuration that would either hammer the monitored
 // server or silently produce an empty tool. Every check names the field and
 // the value it rejected, so a typo reads as an error message rather than as
 // a working default that happens to be wrong.
-func (cfg Config) validate() error {
+//
+// Exported because the layout endpoint writes this file too, and a value
+// that arrives from the interface has to pass exactly the checks a value
+// typed into the file does, through the same code rather than a second copy
+// of it.
+func (cfg Config) Validate() error {
 	tiers := []struct {
 		field string
 		d     Duration
@@ -356,6 +466,15 @@ func (cfg Config) validate() error {
 	}
 	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port: %d is out of range 1-65535", cfg.Server.Port)
+	}
+	for name, l := range cfg.Layouts {
+		for view, v := range l.Views {
+			for _, c := range v.Columns {
+				if c.Width != 0 && (c.Width < minColumnWidth || c.Width > maxColumnWidth) {
+					return fmt.Errorf("layouts.%s.views.%s: column %s has width %d, outside %d-%d", name, view, c.Field, c.Width, minColumnWidth, maxColumnWidth)
+				}
+			}
+		}
 	}
 	return nil
 }

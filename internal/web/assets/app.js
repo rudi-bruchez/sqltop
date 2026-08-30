@@ -140,26 +140,47 @@ const span = [];
 // value for sorting and filtering, and whether that value is a number.
 // Rendering and comparing are separate on purpose: "1,234" sorts as text
 // between "1,2" and "1,3", and n/a is not a small number.
-const COLUMNS = [
-  { field: "spid", title: "spid", width: 60, num: true, get: (r) => val(r, "spid"), html: (r) => `<span class="num">${val(r, "spid")}</span>` },
-  { field: "st", title: "status", width: 90, get: (r) => val(r, "st") },
-  { field: "db", title: "database", width: 110, get: (r) => val(r, "db") },
-  { field: "login", title: "login", width: 100, get: (r) => ref(val(r, "ref")).login, html: (r) => esc(ref(val(r, "ref")).login) },
-  { field: "host", title: "host", width: 95, get: (r) => ref(val(r, "ref")).host, html: (r) => esc(ref(val(r, "ref")).host) },
-  { field: "prg", title: "program", width: 200, get: (r) => ref(val(r, "ref")).prg, html: (r) => esc(ref(val(r, "ref")).prg) },
-  { field: "cmd", title: "command", width: 110, get: (r) => val(r, "cmd") },
-  { field: "w", title: "wait type", width: 150, get: (r) => val(r, "w"), html: (r) => waitBadge(val(r, "w")) },
-  { field: "wms", title: "wait ms", width: 85, num: true, get: (r) => val(r, "wms"), html: (r) => `<span class="num">${n0(val(r, "wms"))}</span>` },
-  { field: "el", title: "elapsed ms", width: 100, num: true, get: (r) => val(r, "el"), html: (r) => `<span class="num">${n0(val(r, "el"))}</span>` },
-  { field: "cpu", title: "cpu ms", width: 90, num: true, get: (r) => val(r, "cpu"), html: (r) => `<span class="num">${n0(val(r, "cpu"))}</span>` },
-  { field: "rd", title: "reads", width: 95, num: true, get: (r) => val(r, "rd"), html: (r) => `<span class="num">${n0(val(r, "rd"))}</span>` },
-  { field: "wr", title: "writes", width: 90, num: true, get: (r) => val(r, "wr"), html: (r) => `<span class="num">${n0(val(r, "wr"))}</span>` },
-  { field: "tdb", title: "tempdb MB", width: 100, num: true, get: (r) => val(r, "tdb"), html: (r) => (hasCap("tempdbPerTask") ? `<span class="num">${n2(val(r, "tdb"))}</span>` : NA) },
-  { field: "gr", title: "grant MB", width: 95, num: true, get: (r) => val(r, "gr"), html: (r) => `<span class="num">${n2(val(r, "gr"))}</span>` },
-  { field: "dop", title: "dop", width: 55, num: true, get: (r) => val(r, "dop"), html: (r) => (hasCap("requestDOP") ? `<span class="num">${val(r, "dop")}</span>` : NA) },
-  { field: "by", title: "blocked by", width: 95, num: true, get: (r) => val(r, "by"), html: (r) => (val(r, "by") ? `<span class="blocked">${val(r, "by")}</span>` : "") },
-  { field: "sql", title: "SQL text", width: 520, get: (r) => ref(val(r, "ref")).sql, html: (r) => `<span class="sqlcell" style="padding-left:${val(r, "d") * 14}px">${esc(ref(val(r, "ref")).sql)}</span>` },
-];
+//
+// Keyed by the readable field name of spec section 8.1, which is also what
+// the configuration file uses. The terse names inside val() are the wire's:
+// the wire spends its bytes 800 times a second, the file is read by a
+// person. internal/web/catalogue_test.go checks these keys against
+// model.ViewCatalogue so neither half can gain a column the other lacks.
+const CELL = {
+  spid: { num: true, get: (r) => val(r, "spid"), html: (r) => `<span class="num">${val(r, "spid")}</span>` },
+  status: { get: (r) => val(r, "st") },
+  database: { get: (r) => val(r, "db") },
+  login: { get: (r) => ref(val(r, "ref")).login, html: (r) => esc(ref(val(r, "ref")).login) },
+  host: { get: (r) => ref(val(r, "ref")).host, html: (r) => esc(ref(val(r, "ref")).host) },
+  program: { get: (r) => ref(val(r, "ref")).prg, html: (r) => esc(ref(val(r, "ref")).prg) },
+  command: { get: (r) => val(r, "cmd") },
+  wait_type: { get: (r) => val(r, "w"), html: (r) => waitBadge(val(r, "w")) },
+  wait_ms: { num: true, get: (r) => val(r, "wms"), html: (r) => `<span class="num">${n0(val(r, "wms"))}</span>` },
+  elapsed: { num: true, get: (r) => val(r, "el"), html: (r) => `<span class="num">${n0(val(r, "el"))}</span>` },
+  cpu_ms: { num: true, get: (r) => val(r, "cpu"), html: (r) => `<span class="num">${n0(val(r, "cpu"))}</span>` },
+  logical_reads: { num: true, get: (r) => val(r, "rd"), html: (r) => `<span class="num">${n0(val(r, "rd"))}</span>` },
+  writes: { num: true, get: (r) => val(r, "wr"), html: (r) => `<span class="num">${n0(val(r, "wr"))}</span>` },
+  tempdb_mb: { num: true, get: (r) => val(r, "tdb"), html: (r) => (hasCap("tempdbPerTask") ? `<span class="num">${n2(val(r, "tdb"))}</span>` : NA) },
+  memory_grant_mb: { num: true, get: (r) => val(r, "gr"), html: (r) => `<span class="num">${n2(val(r, "gr"))}</span>` },
+  dop: { num: true, get: (r) => val(r, "dop"), html: (r) => (hasCap("requestDOP") ? `<span class="num">${val(r, "dop")}</span>` : NA) },
+  // Blank rather than 0 % where the engine reports nothing, which is
+  // everything but BACKUP, DBCC and a few others.
+  percent_complete: { num: true, get: (r) => val(r, "pct"), html: (r) => (val(r, "pct") ? `<span class="num">${fPct1(val(r, "pct"))}</span>` : "") },
+  blocked_by: { num: true, get: (r) => val(r, "by"), html: (r) => (val(r, "by") ? `<span class="blocked">${val(r, "by")}</span>` : "") },
+  blocking_depth: { num: true, get: (r) => val(r, "d"), html: (r) => `<span class="num">${val(r, "d")}</span>` },
+  sql_text: { get: (r) => ref(val(r, "ref")).sql, html: (r) => `<span class="sqlcell" style="padding-left:${val(r, "d") * 14}px">${esc(ref(val(r, "ref")).sql)}</span>` },
+};
+
+// The columns actually drawn, in order. Built by applyColumns from what the
+// server resolved out of the configuration file, so nothing here decides
+// which columns exist or in what order they start.
+let COLUMNS = [];
+// The whole selection, hidden columns included: the order is what gets
+// saved, so a column switched off has to keep its place in it.
+let colOrder = [];
+const colShown = new Set();
+const colWidth = new Map();
+const colTitle = new Map();
 
 function waitBadge(w) {
   if (!w) return "";
@@ -348,8 +369,9 @@ let spacerTop = null, spacerBottom = null;
 // region: read that test before touching them.
 function head() {
   $("gridHead").innerHTML = COLUMNS.map((c) =>
-    `<th scope="col" style="min-width:${c.width}px"><button type="button" class="sortBtn" data-f="${esc(c.field)}" ` +
-    `title="sort by ${esc(c.title)}">${esc(c.title)}<span class="sortMark" id="sort-${esc(c.field)}"></span></button></th>`).join("");
+    `<th scope="col" draggable="true" data-f="${esc(c.field)}" style="min-width:${c.width}px">` +
+    `<button type="button" class="sortBtn" data-f="${esc(c.field)}" ` +
+    `title="sort by ${esc(c.title)}, drag to move">${esc(c.title)}<span class="sortMark" id="sort-${esc(c.field)}"></span></button></th>`).join("");
 
   // A second header row of filter boxes. One box per column, and the
   // operator is read from what is typed: see parseFilter.
@@ -361,6 +383,29 @@ function head() {
 
   for (const el of document.querySelectorAll(".sortBtn")) {
     el.addEventListener("click", () => setSort(el.dataset.f));
+  }
+  // Dragging a heading moves the column. The gesture is on the <th> rather
+  // than on the sort button inside it, so a click still sorts.
+  for (const th of $("gridHead").children) {
+    th.addEventListener("dragstart", (e) => {
+      dragField = th.dataset.f;
+      e.dataTransfer.effectAllowed = "move";
+      // Firefox starts no drag at all without a payload, whatever the
+      // effect says.
+      e.dataTransfer.setData("text/plain", dragField);
+    });
+    th.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      th.classList.add("dropTarget");
+    });
+    th.addEventListener("dragleave", () => th.classList.remove("dropTarget"));
+    th.addEventListener("drop", (e) => {
+      e.preventDefault();
+      th.classList.remove("dropTarget");
+      moveColumn(dragField, th.dataset.f);
+      dragField = null;
+    });
   }
   for (const el of document.querySelectorAll(".filterBox")) {
     el.addEventListener("input", () => setFilter(el, el.value));
@@ -402,8 +447,108 @@ function buildDashboard(groups) {
     remember($("g-" + g.id), "sqltop.group." + g.id);
   }
 }
+
+// One checkbox per column of the view, hidden ones included, in the order
+// the file gave. Built once per connection: reordering by drag deliberately
+// does not reshuffle it, because a list that moves under the pointer while
+// you are ticking boxes is worse than one that does not match the header.
+function buildColumnPanel() {
+  const list = $("colList");
+  list.innerHTML = colOrder.filter((f) => CELL[f]).map((f) =>
+    `<label class="colItem"><input type="checkbox" data-f="${esc(f)}"${colShown.has(f) ? " checked" : ""}>` +
+    `<span>${esc(colTitle.get(f) || f)}</span></label>`).join("");
+  for (const el of list.querySelectorAll("input")) {
+    el.addEventListener("change", () => {
+      if (el.checked) colShown.add(el.dataset.f);
+      else colShown.delete(el.dataset.f);
+      applyColumns();
+    });
+  }
+}
 //
 // setup-region: end
+
+// setGrid takes the column selection the server resolved from the
+// configuration file. Sent once per connection, with the wire header.
+function setGrid(list) {
+  colOrder = list.map((c) => c.f);
+  colShown.clear();
+  colWidth.clear();
+  colTitle.clear();
+  for (const c of list) {
+    colWidth.set(c.f, c.w);
+    colTitle.set(c.f, c.t);
+    if (c.s) colShown.add(c.f);
+  }
+  buildColumnPanel();
+  applyColumns();
+}
+
+// applyColumns rebuilds the header and the row pool from colOrder and
+// colShown. The pool has one cell per column, so a change of column count
+// is the one thing that cannot be absorbed by the per-cell update path and
+// has to throw the pool away.
+function applyColumns() {
+  COLUMNS = colOrder
+    .filter((f) => colShown.has(f) && CELL[f])
+    .map((f) => Object.assign({ field: f, title: colTitle.get(f) || f, width: colWidth.get(f) || 100 }, CELL[f]));
+
+  // A filter or a sort on a column that has just been hidden would go on
+  // silently shaping the grid with nothing on screen to say so.
+  const dropped = [...filters.keys()].filter((f) => !colShown.has(f));
+  for (const f of dropped) filters.delete(f);
+  if (sortField && !colShown.has(sortField)) {
+    sortField = null;
+    sortDir = 0;
+  }
+
+  const body = $("gridBody");
+  body.textContent = "";
+  pool.length = 0;
+  spacerTop = null;
+  spacerBottom = null;
+
+  head();
+  markSort();
+  // head() built empty boxes; put back what was typed in the ones that
+  // survived, through setFilter so nothing can drift apart.
+  for (const [field, text] of [...filters]) {
+    const el = $("f-" + field);
+    if (el) setFilter(el, text);
+  }
+  refresh();
+}
+
+let dragField = null;
+
+// moveColumn drops from in front of to, in the full order rather than the
+// visible one, so a hidden column between them keeps its place.
+function moveColumn(from, to) {
+  if (!from || !to || from === to) return;
+  const i = colOrder.indexOf(from);
+  const j = colOrder.indexOf(to);
+  if (i < 0 || j < 0) return;
+  colOrder.splice(i, 1);
+  colOrder.splice(colOrder.indexOf(to) + (i < j ? 1 : 0), 0, from);
+  applyColumns();
+}
+
+// saveLayout writes the current selection and order back to sqltop.yaml,
+// through the server, which owns that file. Spec section 8.2: a layout
+// survives a change of browser and can be handed to a colleague, which
+// local storage cannot do.
+function saveLayout() {
+  fetch("/api/layout?t=" + encodeURIComponent(token), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      view: "requests",
+      columns: colOrder.map((f) => ({ field: f, show: colShown.has(f), width: colWidth.get(f) || 0 })),
+    }),
+  }).then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(new Error(t)))))
+    .then((r) => { $("message").textContent = "layout saved to " + r.path; })
+    .catch((e) => { $("message").textContent = "could not save the layout: " + e.message; });
+}
 
 // setFilter is the single place a filter box changes. Typing, Escape and the
 // clear button all go through it, so the value, the highlight, the clear
@@ -601,6 +746,7 @@ es.addEventListener("snapshot", (e) => {
   // The column header and the dashboard shape both come once, on the first
   // snapshot of a connection.
   if (p.cols) setCols(p.cols);
+  if (p.grid) setGrid(p.grid);
   if (p.dash) buildDashboard(p.dash);
   data = p.rows || [];
   caps = new Set((p.status && p.status.caps) || []);
@@ -655,7 +801,8 @@ function remember(el, key) {
 }
 
 remember($("dashboard"), "sqltop.dashboard.open");
-head();
+$("colsBtn").addEventListener("click", () => $("colDialog").showModal());
+$("colSave").addEventListener("click", saveLayout);
 // Counts locally: it keeps moving while the connection is down, which is
 // honest, the instance is still up and this tool just cannot see it.
 setInterval(updateUptime, 1000);

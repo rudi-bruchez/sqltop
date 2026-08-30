@@ -62,7 +62,23 @@
   <span id="rowCount">0 requests</span>
   <span id="seq"></span>
   <span id="cost"></span>
+  <button type="button" id="colsBtn" class="barBtn">columns</button>
 </footer>
+
+<!-- Visibility only. The order is changed by dragging a heading, which is
+     the gesture people try first, and a list that reshuffled itself under
+     the pointer while boxes were being ticked would be worse than one that
+     does not follow. -->
+<dialog id="colDialog" class="panel">
+  <form method="dialog">
+    <h2>columns</h2>
+    <div id="colList" class="colList"></div>
+    <menu>
+      <button type="button" id="colSave">save to sqltop.yaml</button>
+      <button value="close">close</button>
+    </menu>
+  </form>
+</dialog>
 
 <script src="app.js"></script>
 </body>

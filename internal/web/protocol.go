@@ -401,6 +401,9 @@ type SnapshotPayload struct {
 	// table exists: it never changes for the life of a connection, and a
 	// client that reconnects gets a fresh Encoder and is told again.
 	Cols []string `json:"cols,omitempty"`
+	// Grid is the column selection and order of spec section 8.2, sent
+	// once per connection with Cols.
+	Grid []GridCol `json:"grid,omitempty"`
 	// Figures carries the dashboard of spec section 6. It was on the wire
 	// for a release before anything read it, which is why it is a map of
 	// model.Figure rather than a struct: the collector merges four tiers
@@ -412,6 +415,49 @@ type SnapshotPayload struct {
 	// way: no number.
 	Figures map[string]model.Figure `json:"figures,omitempty"`
 	Status  StatusPayload           `json:"status"`
+}
+
+// GridCol is one column the client should draw, in order, with the heading
+// and width the configuration resolved to. Sent once per connection on the
+// same terms as Cols and Dash: it comes from a file that does not change
+// while the process runs.
+//
+// It is not the same list as Cols. Cols is the wire order of every field a
+// Row carries and never varies; this is what the user chose to look at.
+// Keeping them apart is what lets a column be hidden without changing the
+// payload, and a column be shown again without a reconnect costing a
+// different row shape.
+type GridCol struct {
+	Field string `json:"f"`
+	Title string `json:"t"`
+	Width int    `json:"w"`
+	// Show is whether this column is drawn. The hidden ones travel too, so
+	// the interface can offer them in the column panel and so their place
+	// in the order survives being switched off and on again.
+	Show bool `json:"s"`
+}
+
+// resolveGrid fills in each heading from the catalogue. The configuration
+// only ever stores a field, a switch and a width; the title is not the
+// user's to set.
+func resolveGrid(view string, cols []config.ViewColumn) []GridCol {
+	def, known := model.ViewByID(view)
+	if !known {
+		return nil
+	}
+	title := map[string]string{}
+	for _, c := range def.Columns {
+		title[c.Field] = c.Title
+	}
+	out := make([]GridCol, 0, len(cols))
+	for _, c := range cols {
+		t, ok := title[c.Field]
+		if !ok {
+			continue
+		}
+		out = append(out, GridCol{Field: c.Field, Title: t, Width: c.Width, Show: c.Show == nil || *c.Show})
+	}
+	return out
 }
 
 // DashGroup is one folding section of the dashboard on the wire.
@@ -480,11 +526,18 @@ type Encoder struct {
 	seq  uint64
 	sent map[string]struct{} // ref keys already delivered to this client
 	dash []DashGroup         // sent once, with the column header
+	grid []GridCol           // ditto
 }
 
 // WithDashboard sets the dashboard this encoder describes to its client.
 func (e *Encoder) WithDashboard(d []DashGroup) *Encoder {
 	e.dash = d
+	return e
+}
+
+// WithGrid sets the grid columns this encoder describes to its client.
+func (e *Encoder) WithGrid(g []GridCol) *Encoder {
+	e.grid = g
 	return e
 }
 
@@ -602,6 +655,7 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 	if e.firstSnapshot() {
 		out.Cols = rowFields
 		out.Dash = e.dash
+		out.Grid = e.grid
 	}
 
 	if figures != nil {

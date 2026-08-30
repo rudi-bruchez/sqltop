@@ -156,6 +156,46 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Error("the memory group was configured folded and is open")
 	}
 
+	// The column selection of spec section 8.2, from the file to the
+	// screen: a column switched off is absent, one moved to the front of
+	// the list is the first heading, and the panel still offers the hidden
+	// one so it can be brought back.
+	if len(got.Columns.Configured) == 0 {
+		t.Fatal("the grid drew no headings at all")
+	}
+	if got.Columns.Configured[0] != "cpu_ms" {
+		t.Errorf("the first heading is %q; the configuration puts cpu_ms first", got.Columns.Configured[0])
+	}
+	if idx(got.Columns.Configured, "host") >= 0 {
+		t.Error("host was switched off in the configuration and the grid draws it")
+	}
+	if idx(got.Columns.Configured, "database") < 0 {
+		t.Error("database is missing although only its neighbour was switched off")
+	}
+	if idx(got.Columns.Configured, "percent_complete") >= 0 {
+		t.Error("percent_complete is off by default in the catalogue and the grid draws it")
+	}
+	if on, listed := panelState(got.Columns.Panel, "host"); !listed || on {
+		t.Errorf("the column panel offers host as listed=%v checked=%v; a hidden column must still be there to switch back on", listed, on)
+	}
+	if on, listed := panelState(got.Columns.Panel, "cpu_ms"); !listed || !on {
+		t.Errorf("the column panel offers cpu_ms as listed=%v checked=%v", listed, on)
+	}
+
+	// Dragging a heading moves the column; switching one back on changes
+	// the column count, and the row pool has to be rebuilt to match. A pool
+	// still holding the old cell count leaves every row one column short of
+	// its own header.
+	if i, j := idx(got.Columns.AfterDrag, "database"), idx(got.Columns.AfterDrag, "spid"); j != i+1 {
+		t.Errorf("after dragging spid onto database the order is %v; spid should sit immediately after database", got.Columns.AfterDrag)
+	}
+	if idx(got.Columns.AfterShow, "host") < 0 {
+		t.Errorf("ticking host in the column panel did not bring it back; the order is %v", got.Columns.AfterShow)
+	}
+	if got.Columns.PoolCells != len(got.Columns.AfterShow) {
+		t.Errorf("after switching a column back on the row pool has %d cells per row and the header has %d columns (%d rows in view)", got.Columns.PoolCells, len(got.Columns.AfterShow), got.Columns.Rows)
+	}
+
 	// The honesty rule, end to end, on three figures that reach the page by
 	// three different routes.
 	if got.Honesty.Available == nil || got.Honesty.Available.NA {
@@ -334,6 +374,17 @@ type e2eResult struct {
 		Marked       bool   `json:"marked"`
 		Visible      bool   `json:"visible"`
 	} `json:"anchorKeeps"`
+	Columns struct {
+		Configured []string `json:"configured"`
+		Panel      []struct {
+			F  string `json:"f"`
+			On bool   `json:"on"`
+		} `json:"panel"`
+		AfterDrag []string `json:"afterDrag"`
+		PoolCells int      `json:"poolCells"`
+		Rows      int      `json:"rows"`
+		AfterShow []string `json:"afterShow"`
+	} `json:"columns"`
 	Identity    map[string]string `json:"identity"`
 	ClearButton struct {
 		HiddenWhenEmpty   bool `json:"hiddenWhenEmpty"`
@@ -413,8 +464,9 @@ func browserTestServer(t *testing.T) (*Server, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One tile switched off and one group folded, so the browser can be
-	// asked whether the configuration file actually reaches the screen.
+	// One tile switched off, one group folded, one column hidden and one
+	// column moved to the front, so the browser can be asked whether the
+	// configuration file actually reaches the screen.
 	layout := config.DefaultLayout()
 	for i := range layout.Dashboard {
 		if layout.Dashboard[i].Group == "memory" {
@@ -422,7 +474,14 @@ func browserTestServer(t *testing.T) (*Server, func()) {
 			layout.Dashboard[i].Figures["plan_cache_mb"] = false
 		}
 	}
-	srv = srv.WithDashboard(layout.Dashboard)
+	off := false
+	layout.Views["requests"] = config.ViewLayout{Columns: []config.ViewColumn{
+		{Field: "cpu_ms"},
+		{Field: "host", Show: &off},
+	}}
+	cfg := config.Default()
+	cfg.Layouts = map[string]config.Layout{"default": layout}
+	srv = srv.WithConfig(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	go c.Run(ctx)
 	go func() { _ = srv.Serve(ctx) }()
@@ -430,6 +489,27 @@ func browserTestServer(t *testing.T) (*Server, func()) {
 		cancel()
 		_ = srv.Close()
 	}
+}
+
+func idx(s []string, want string) int {
+	for i, v := range s {
+		if v == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func panelState(panel []struct {
+	F  string `json:"f"`
+	On bool   `json:"on"`
+}, field string) (on, listed bool) {
+	for _, p := range panel {
+		if p.F == field {
+			return p.On, true
+		}
+	}
+	return false, false
 }
 
 func lookChromium() string {

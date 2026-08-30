@@ -94,7 +94,7 @@ func TestLoadPartialFileKeepsDefaults(t *testing.T) {
 }
 
 func TestDefaultConfigIsValid(t *testing.T) {
-	if err := Default().validate(); err != nil {
+	if err := Default().Validate(); err != nil {
 		t.Fatalf("the built-in defaults must always validate: %v", err)
 	}
 }
@@ -321,7 +321,7 @@ func TestValidateRejectsCeilings(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Default()
 			tc.mutate(&cfg)
-			err := cfg.validate()
+			err := cfg.Validate()
 			if err == nil {
 				t.Fatalf("validate accepted it; a value this far outside any real configuration is a typo, and accepting it is how the program ends up behaving oddly with nothing to explain why")
 			}
@@ -336,7 +336,7 @@ func TestValidateRejectsCeilings(t *testing.T) {
 // honest: a bound tight enough to reject the shipped defaults would be a
 // bound that breaks the tool out of the box.
 func TestDefaultsSitInsideTheirOwnBounds(t *testing.T) {
-	if err := Default().validate(); err != nil {
+	if err := Default().Validate(); err != nil {
 		t.Fatalf("the built-in defaults do not pass validation: %v", err)
 	}
 }
@@ -573,6 +573,166 @@ func TestDashboardIgnoresAnUnknownGroup(t *testing.T) {
 	for _, g := range cfg.Dashboard() {
 		if g.Group == "no-such-group" {
 			t.Error("an unknown group survived resolution")
+		}
+	}
+}
+
+// ptr is a local helper: ViewColumn.Show is a pointer because "not
+// mentioned" and "mentioned as false" have to be different things.
+func ptr(b bool) *bool { return &b }
+
+func columnFields(cols []ViewColumn) []string {
+	out := make([]string, len(cols))
+	for i, c := range cols {
+		out[i] = c.Field
+	}
+	return out
+}
+
+func columnByField(cols []ViewColumn, field string) (ViewColumn, bool) {
+	for _, c := range cols {
+		if c.Field == field {
+			return c, true
+		}
+	}
+	return ViewColumn{}, false
+}
+
+// TestColumnsWithNoConfigurationAreTheCatalogue. A tool started with no file
+// at all has to draw a sensible grid, and the catalogue is the only place
+// that can say what that is.
+func TestColumnsWithNoConfigurationAreTheCatalogue(t *testing.T) {
+	got := Default().Columns("requests")
+	def, ok := model.ViewByID("requests")
+	if !ok {
+		t.Fatal("the catalogue has no requests view")
+	}
+	if len(got) != len(def.Columns) {
+		t.Fatalf("resolved %d columns, the catalogue has %d", len(got), len(def.Columns))
+	}
+	for i, c := range got {
+		if c.Field != def.Columns[i].Field {
+			t.Fatalf("resolved order %v, catalogue order %v", columnFields(got), fieldsOf(def))
+		}
+		if c.Show == nil || *c.Show != def.Columns[i].Default {
+			t.Errorf("%s resolved to show=%v, the catalogue default is %v", c.Field, c.Show, def.Columns[i].Default)
+		}
+	}
+}
+
+func fieldsOf(v model.ViewDef) []string {
+	out := make([]string, len(v.Columns))
+	for i, c := range v.Columns {
+		out[i] = c.Field
+	}
+	return out
+}
+
+// TestPartialColumnListKeepsEverythingItDoesNotMention is the rule that
+// keeps a column added by a later version from being invisible to everybody
+// who ever saved a layout. It is the same rule the dashboard follows, and
+// the opposite of what an earlier draft of the spec said.
+func TestPartialColumnListKeepsEverythingItDoesNotMention(t *testing.T) {
+	cfg := Default()
+	cfg.Layouts = map[string]Layout{"default": {Views: map[string]ViewLayout{
+		"requests": {Columns: []ViewColumn{
+			{Field: "sql_text"},
+			{Field: "cpu_ms", Width: 140},
+			{Field: "host", Show: ptr(false)},
+		}},
+	}}}
+	got := cfg.Columns("requests")
+
+	if got[0].Field != "sql_text" || got[1].Field != "cpu_ms" || got[2].Field != "host" {
+		t.Fatalf("the file's order did not win: %v", columnFields(got))
+	}
+	if len(got) != len(model.ViewCatalogue[0].Columns) {
+		t.Fatalf("resolved %d columns from a file naming 3; every catalogue column should still be there: %v", len(got), columnFields(got))
+	}
+	// Named only to be moved, with no switch of its own: it must stay on.
+	if c, _ := columnByField(got, "sql_text"); c.Show == nil || !*c.Show {
+		t.Error("sql_text was named only to move it and came back switched off")
+	}
+	if c, _ := columnByField(got, "host"); c.Show == nil || *c.Show {
+		t.Error("host was switched off in the file and came back on")
+	}
+	if c, _ := columnByField(got, "cpu_ms"); c.Width != 140 {
+		t.Errorf("cpu_ms width is %d, the file says 140", c.Width)
+	}
+	// Unmentioned, and off in the catalogue: the default is the catalogue's,
+	// not a blanket on.
+	if c, ok := columnByField(got, "percent_complete"); !ok || c.Show == nil || *c.Show {
+		t.Error("percent_complete is off by default in the catalogue and resolved to on")
+	}
+	// Unmentioned, and on in the catalogue.
+	if c, ok := columnByField(got, "database"); !ok || c.Show == nil || !*c.Show {
+		t.Error("database was not mentioned and did not keep its default, which is on")
+	}
+}
+
+// TestColumnsDropWhatTheCatalogueDoesNotKnow: a field left over from an
+// older version, or a typo, must not become an empty column on screen.
+func TestColumnsDropWhatTheCatalogueDoesNotKnow(t *testing.T) {
+	cfg := Default()
+	cfg.Layouts = map[string]Layout{"default": {Views: map[string]ViewLayout{
+		"requests": {Columns: []ViewColumn{
+			{Field: "cpu_ms"},
+			{Field: "no_such_column", Show: ptr(true)},
+			{Field: "cpu_ms", Show: ptr(false)},
+		}},
+	}}}
+	got := cfg.Columns("requests")
+	if _, ok := columnByField(got, "no_such_column"); ok {
+		t.Error("a column the catalogue does not know survived into the resolved list")
+	}
+	if got[0].Field != "cpu_ms" {
+		t.Errorf("resolved order %v, want cpu_ms first", columnFields(got))
+	}
+	// The second mention of cpu_ms is ignored, not merged: the first wins,
+	// so a duplicate cannot silently switch off what the first line moved.
+	if c, _ := columnByField(got, "cpu_ms"); c.Show == nil || !*c.Show {
+		t.Error("a duplicate line later in the file overrode the first one")
+	}
+	if n := countField(got, "cpu_ms"); n != 1 {
+		t.Errorf("cpu_ms appears %d times in the resolved list", n)
+	}
+}
+
+func countField(cols []ViewColumn, field string) int {
+	n := 0
+	for _, c := range cols {
+		if c.Field == field {
+			n++
+		}
+	}
+	return n
+}
+
+// TestColumnsOfAnUnknownViewAreEmpty rather than a panic or the requests
+// columns: a view the catalogue does not have is one nothing can draw.
+func TestColumnsOfAnUnknownViewAreEmpty(t *testing.T) {
+	if got := Default().Columns("nowhere"); got != nil {
+		t.Errorf("an unknown view resolved to %v", columnFields(got))
+	}
+}
+
+// TestWriteConfigListsEveryColumn is the request this whole mechanism came
+// from: the file has to show what exists so a column can be switched off
+// without knowing its name in advance.
+func TestWriteConfigListsEveryColumn(t *testing.T) {
+	l := DefaultLayout()
+	for _, v := range model.ViewCatalogue {
+		got := l.Views[v.ID].Columns
+		if len(got) != len(v.Columns) {
+			t.Fatalf("view %s: the default layout lists %d columns, the catalogue has %d", v.ID, len(got), len(v.Columns))
+		}
+		for i, c := range got {
+			if c.Field != v.Columns[i].Field {
+				t.Fatalf("view %s: order %v, catalogue %v", v.ID, columnFields(got), fieldsOf(v))
+			}
+			if c.Show == nil {
+				t.Errorf("view %s: %s is written without an explicit switch, which is the one thing this file is for", v.ID, c.Field)
+			}
 		}
 	}
 }

@@ -65,3 +65,44 @@ func between(s, begin, end string) string {
 	}
 	return rest[:j]
 }
+
+// TestShippedPageMatchesTheColumnCatalogue is the same bargain one level
+// down. model.ViewCatalogue decides which columns exist, what they are
+// called and what the configuration file may name; CELL in app.js decides
+// how each one is read and drawn. A column in the catalogue with no CELL
+// entry is one applyColumns silently drops, so it can be switched on in the
+// file and never appear; a CELL entry with no catalogue column is dead code
+// nobody can reach, since the drawn list only ever comes from the server.
+func TestShippedPageMatchesTheColumnCatalogue(t *testing.T) {
+	src, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := between(string(src), "const CELL = {", "\n};")
+	if block == "" {
+		t.Fatal("could not find the CELL table in assets/app.js")
+	}
+
+	inPage := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s{2}([a-z_0-9]+):`).FindAllStringSubmatch(block, -1) {
+		inPage[m[1]] = true
+	}
+	if len(inPage) == 0 {
+		t.Fatal("read no cell renderers out of app.js; the shape this is parsed from has changed")
+	}
+
+	inCatalogue := map[string]bool{}
+	for _, v := range model.ViewCatalogue {
+		for _, c := range v.Columns {
+			inCatalogue[c.Field] = true
+			if !inPage[c.Field] {
+				t.Errorf("column %q is in view %q of the catalogue and app.js cannot draw it, so switching it on in sqltop.yaml would do nothing", c.Field, v.ID)
+			}
+		}
+	}
+	for field := range inPage {
+		if !inCatalogue[field] {
+			t.Errorf("app.js can draw %q and no view in the catalogue offers it: dead code, since the drawn list only ever comes from the server", field)
+		}
+	}
+}
