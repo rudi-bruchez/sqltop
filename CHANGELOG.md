@@ -21,6 +21,13 @@ constant changes.
   one that was reported: headings and cells on one line, a row one line tall,
   the narrow columns coming out narrow, and the window's surplus landing on
   one column. It finds the reported defect on three views, not one.
+- `e` follows the selected request through its plan as it runs, one line per
+  operator, rows so far against the optimiser's estimate. It needs the
+  lightweight profiling that is on by default from SQL Server 2019 and on
+  Azure; below that it says so in one line and does nothing else.
+- `d` writes the selected request's plan to `plans/` beside the binary as a
+  `.sqlplan` file: the live plan with its row counts where the server keeps
+  them, and the plan as compiled otherwise, with the name saying which.
 - The throughput view of section 7 moves from `t` to `v`.
 
 ## 0.3.0, 30 August 2026

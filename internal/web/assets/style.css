@@ -406,3 +406,5 @@ th.dropTarget { box-shadow: inset 2px 0 0 #6fb3d2; }
 .sql .c { color: #6b7280; font-style: italic; } /* comment */
 .sql .v { color: #c9a0dc; }                    /* @variable */
 .sql .i { color: #d8dee9; }                    /* [bracketed identifier] */
+
+.planBody { flex: 1 1 auto; overflow: auto; padding: 4px 10px 10px; }

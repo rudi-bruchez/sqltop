@@ -38,6 +38,10 @@ type Source interface {
 	// aggregate walks the whole lock manager, and paying for that on a
 	// timer nobody is watching is exactly what section 2 rules out.
 	Sessions(ctx context.Context) ([]model.SessionSample, error)
+	// PlanProgress reports how far one running statement has got through
+	// its plan. On demand and per request, never on a tier, and never for
+	// a request nobody is watching.
+	PlanProgress(ctx context.Context, ref model.RequestRef) ([]model.PlanNode, error)
 	Transactions(ctx context.Context) ([]model.TransactionSample, []model.LockSample, error)
 	LogSpace(ctx context.Context) ([]model.LogSpaceSample, error)
 

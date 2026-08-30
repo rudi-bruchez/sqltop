@@ -88,11 +88,12 @@ func TestSnapshotNeverOverwritesOneFromTheSameSecond(t *testing.T) {
 	dir := t.TempDir()
 	at := time.Date(2026, 8, 30, 17, 4, 5, 0, time.UTC)
 
-	first, err := writeSnapshot(dir, at, []byte("one"))
+	base := at.Format("server-2006-01-02-150405")
+	first, err := writeUnique(dir, base, ".html", []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := writeSnapshot(dir, at, []byte("two"))
+	second, err := writeUnique(dir, base, ".html", []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}

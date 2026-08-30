@@ -531,6 +531,35 @@ out.commands.detail = await json(`(() => {
   return open;
 })()`);
 
+// The plan panel, and saving a plan. Both are on the selected request, and
+// both are on demand: nothing here runs unless a key was pressed.
+await ev(`(() => {
+  const rows = [...document.querySelectorAll("#gridBody tr")].filter((r) => r.children.length > 1 && !r.hidden);
+  rows[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+})()`);
+await ev(key("e"));
+await sleep(700);
+out.commands.plan = await json(`(() => {
+  const body = document.getElementById("planBody");
+  const trs = [...body.querySelectorAll("tbody tr")];
+  return {
+    shown: !document.getElementById("detail").hidden,
+    planVisible: !body.hidden,
+    sqlHidden: document.getElementById("sqlText").hidden,
+    who: document.getElementById("detailWho").textContent,
+    operators: trs.length,
+    headings: [...body.querySelectorAll("th")].map((th) => th.textContent),
+    rowLines: trs.length ? new Set([...trs[0].cells].map((td) => Math.round(td.getBoundingClientRect().top))).size : 0,
+    cells: trs.map((tr) => [...tr.cells].map((td) => td.textContent)),
+  };
+})()`);
+
+// d writes the plan beside the binary. The file itself is checked in Go.
+await ev(key("d"));
+await sleep(800);
+out.commands.planSaved = await ev(`document.getElementById("notice").textContent`);
+await ev(key("e"));
+
 await ev(key("s"));
 await sleep(900);
 out.commands.snapshotMessage = await ev(`document.getElementById("notice").textContent`);

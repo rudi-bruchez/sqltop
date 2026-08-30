@@ -459,6 +459,8 @@ commands instead of text.
 | `f` | Steps the refresh period through 1, 2, 5, 10 and 30 seconds |
 | `h` | Shows the list of commands |
 | `↑` `↓` | Move the selection one row up or down the grid |
+| `e` | Follows the selected request through its plan as it runs |
+| `d` | Writes the selected request's plan to `plans/` beside the binary |
 
 The list is generated from one table in the page, which the key handler also
 dispatches from, so a command cannot be bound without being listed or listed
@@ -472,6 +474,47 @@ key walks the list rather than dragging the viewport a row at a time, and
 the heading rows count twice in that arithmetic, once because they sit in
 the flow above the body and once because they are sticky and cover what is
 under them. The ends stop rather than wrapping.
+
+On `e`. It shows what `sys.dm_exec_query_profiles` reports for the selected
+request: one line per operator, what it has produced so far against what the
+optimiser expected, and how many workers are on it. A parallel plan reports
+each node once per worker, so the rows are folded by node: an operator seen
+eight times is one operator, not eight, and the worker count is worth more
+than eight identical lines. The ratio is deliberately not capped at a
+hundred per cent, because an operator at four times its estimate is the
+reading somebody opened this for.
+
+It needs the lightweight profiling that is on by default from SQL Server
+2019 and on both Azure engines. Below that it needs trace flag 7412, and
+this tool sets no trace flags on a server it is watching, so the panel says
+so in one line and does nothing else. It also stops asking after any error
+rather than retrying every second: the commonest one is a fact about the
+server, not something a retry changes, and pressing the key again asks once
+more.
+
+The times and the read counts that view carries are only maintained under
+full profiling, which this tool does not turn on either. Their columns exist
+and are off by default: a column reading zero on every server anybody will
+point this at is the plausible-looking wrong answer, not a measurement.
+
+On `d`. It writes the plan of the selected request to
+`plans/plan-<spid>-<kind>-yyyy-mm-dd-hhmmss.sqlplan` beside the binary. The
+extension is what makes a plan open as a plan rather than as text, which is
+the point of saving one.
+
+Two kinds, and the name says which arrived. The live plan first, from
+`sys.dm_exec_query_statistics_xml`, because it is the one worth having: an
+estimate that turned out wrong is only visible beside what actually
+happened. A server that cannot keep row counts, or a statement it is not
+profiling, falls back to the plan as the optimiser compiled it, from
+`sys.dm_exec_text_query_plan`, rather than to nothing.
+
+That second query uses the text form and the statement offsets rather than
+`sys.dm_exec_query_plan`. The offsets give the statement the request is on
+rather than the whole batch it came from, and the text form returns
+`nvarchar` rather than `xml`, which is what stops a plan more than a hundred
+and twenty-eight levels deep failing outright. Those are exactly the plans
+somebody wants to look at.
 
 On `s`. The grid is virtualised: the document holds about forty rows of
 however many the view has, so saving the document would save the scroll
@@ -832,8 +875,9 @@ environment, loaded from `.env` at startup.
 Selecting a row opens the detail panel. Selection must survive the refresh; that
 constraint drove the renderer decision and is measured in the bench.
 
-The statement half of that panel exists, toggled with `t`; see section 7.1.
-The plan half does not.
+Both halves of that panel exist, in one space so neither crowds the grid:
+`t` shows the statement and `e` follows the plan, and `d` writes the plan to
+a file. See section 7.1. What is not built is the plan drawn as a tree.
 
 The panel shows the full SQL text, the session context, the sample history for
 that request, and the execution plan.

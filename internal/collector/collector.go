@@ -340,6 +340,14 @@ func (c *Collector) LogSpace(ctx context.Context) ([]model.LogSpaceSample, error
 	return c.src.LogSpace(ctx)
 }
 
+func (c *Collector) PlanProgress(ctx context.Context, ref model.RequestRef) ([]model.PlanNode, error) {
+	return c.src.PlanProgress(ctx, ref)
+}
+
+func (c *Collector) Plan(ctx context.Context, ref model.RequestRef, live bool) (model.Plan, error) {
+	return c.src.Plan(ctx, ref, live)
+}
+
 func (c *Collector) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

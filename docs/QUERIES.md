@@ -444,6 +444,57 @@ LEFT JOIN (
 OPTION (MAXDOP 1)
 ```
 
+## planProgressQueryTemplate
+
+Runs on demand, once a second while somebody is watching one request's plan.
+
+How far a running statement has got through its plan, one row per operator. Grouped by node because a parallel plan reports each node once per worker: an operator seen eight times is one operator, not eight. Needs the lightweight profiling that is on by default from SQL Server 2019 and on both Azure engines; below that it needs a trace flag this tool will not set, so the feature is absent rather than switched on behind the operator's back. The two substitutions are a session id and a request id, integers by type before they reach the query.
+
+```sql
+SELECT p.node_id,
+       MAX(p.physical_operator_name),
+       MAX(ISNULL(OBJECT_NAME(p.object_id, p.database_id), N'')),
+       ISNULL(SUM(p.row_count), 0),
+       ISNULL(MAX(p.estimate_row_count), 0),
+       COUNT(*),
+       ISNULL(MAX(p.elapsed_time_ms), 0),
+       ISNULL(SUM(p.cpu_time_ms), 0),
+       ISNULL(SUM(p.logical_read_count), 0),
+       ISNULL(SUM(p.write_page_count), 0)
+FROM sys.dm_exec_query_profiles AS p
+WHERE p.session_id = 51 AND p.request_id = 0
+GROUP BY p.node_id
+ORDER BY p.node_id
+OPTION (MAXDOP 1)
+```
+
+## livePlanQueryTemplate
+
+Runs on demand, when somebody saves a plan.
+
+The plan of a running statement with the row counts it has produced so far, as showplan XML. Same gate as planProgressQueryTemplate. This is the artefact worth saving: an estimate that turned out wrong is only visible beside what actually happened.
+
+```sql
+SELECT ISNULL(CAST(x.query_plan AS nvarchar(max)), N'')
+FROM sys.dm_exec_query_statistics_xml(51) AS x
+WHERE x.request_id = 0
+OPTION (MAXDOP 1)
+```
+
+## estimatedPlanQueryTemplate
+
+Runs on demand, when somebody saves a plan and the server cannot produce a live one.
+
+The plan as the optimiser compiled it. sys.dm_exec_text_query_plan rather than sys.dm_exec_query_plan, and with the statement offsets: the offsets give the statement the request is on rather than the whole batch, and the text form returns nvarchar rather than xml, which is what stops a plan more than a hundred and twenty-eight levels deep failing outright. Those are exactly the plans somebody wants to look at.
+
+```sql
+SELECT ISNULL(p.query_plan, N'')
+FROM sys.dm_exec_requests AS r
+CROSS APPLY sys.dm_exec_text_query_plan(r.plan_handle, r.statement_start_offset, r.statement_end_offset) AS p
+WHERE r.session_id = 51 AND r.request_id = 0
+OPTION (MAXDOP 1)
+```
+
 ## costQuery
 
 Runs every tick, on whatever tier ran last.

@@ -2,7 +2,11 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+
+	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
 // The three views of spec section 7 that are not projections of the
@@ -140,4 +144,68 @@ func viewError(rw http.ResponseWriter, err error) {
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(http.StatusServiceUnavailable)
 	json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+}
+
+// planRow is one operator of a running statement's plan on the wire.
+type planRow struct {
+	Node      int     `json:"node"`
+	Operator  string  `json:"operator"`
+	Object    string  `json:"object"`
+	Rows      int64   `json:"rows"`
+	Estimated int64   `json:"estimated"`
+	Progress  float64 `json:"progress"`
+	Threads   int     `json:"threads"`
+	ElapsedMs int64   `json:"elapsed_ms"`
+	CPUMs     int64   `json:"cpu_ms"`
+	Reads     int64   `json:"reads"`
+}
+
+// plan reports how far the selected request has got through its plan. Spec
+// section 9. It is on demand and per request: it runs while somebody is
+// watching one statement and never otherwise, which is what keeps it out of
+// the observation budget's way.
+func (s *Server) plan(rw http.ResponseWriter, req *http.Request) {
+	ref, err := refFromQuery(req)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	nodes, err := s.col.PlanProgress(req.Context(), ref)
+	if err != nil {
+		viewError(rw, err)
+		return
+	}
+	out := make([]planRow, 0, len(nodes))
+	for _, n := range nodes {
+		// The ratio of what an operator has produced to what the optimiser
+		// expected. Blank rather than infinite where nothing was expected,
+		// and deliberately not capped at a hundred: an operator at four
+		// times its estimate is the thing worth seeing.
+		var progress float64
+		if n.Estimated > 0 {
+			progress = float64(n.Rows) / float64(n.Estimated) * 100
+		}
+		out = append(out, planRow{
+			Node: n.NodeID, Operator: n.Operator, Object: n.Object,
+			Rows: n.Rows, Estimated: n.Estimated, Progress: progress, Threads: n.Threads,
+			ElapsedMs: n.ElapsedMs, CPUMs: n.CPUMs, Reads: n.Reads,
+		})
+	}
+	writeJSON(rw, map[string]any{"rows": out})
+}
+
+// refFromQuery reads the request a client is asking about. Both halves are
+// parsed as integers rather than passed through, which is what keeps the
+// two query templates that interpolate them safe by construction.
+func refFromQuery(req *http.Request) (model.RequestRef, error) {
+	spid, err := strconv.ParseInt(req.URL.Query().Get("spid"), 10, 64)
+	if err != nil {
+		return model.RequestRef{}, errors.New("spid is not a number")
+	}
+	rqid, err := strconv.ParseInt(req.URL.Query().Get("rqid"), 10, 32)
+	if err != nil {
+		return model.RequestRef{}, errors.New("rqid is not a number")
+	}
+	return model.RequestRef{SessionID: spid, RequestID: int32(rqid)}, nil
 }

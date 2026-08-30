@@ -29,12 +29,17 @@ const maxSnapshotBody = 16 << 20
 // environment lookup, for the reason config's own seams are not: a variable
 // nobody can set from outside cannot silently redirect where a user's files
 // land.
-var snapshotDir = func() (string, error) {
+var snapshotDir = func() (string, error) { return besideBinary("snapshots") }
+
+// planDir is where the plan command writes, on the same terms.
+var planDir = func() (string, error) { return besideBinary("plans") }
+
+func besideBinary(name string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(exe), "snapshots"), nil
+	return filepath.Join(filepath.Dir(exe), name), nil
 }
 
 // snapshot writes the posted page to snapshots/server-yyyy-mm-dd-hhmmss.html.
@@ -69,7 +74,7 @@ func (s *Server) snapshot(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	path, err := writeSnapshot(dir, time.Now(), body)
+	path, err := writeUnique(dir, time.Now().Format("server-2006-01-02-150405"), ".html", body)
 	if err != nil {
 		http.Error(rw, "could not write the snapshot", http.StatusInternalServerError)
 		return
@@ -77,16 +82,66 @@ func (s *Server) snapshot(rw http.ResponseWriter, req *http.Request) {
 	writeJSON(rw, map[string]string{"path": path})
 }
 
-// writeSnapshot creates the file without ever overwriting one. The name has
-// one second of resolution, so two presses of s inside the same second
-// would otherwise land on each other; the suffix is not a feature, it is
-// the alternative to losing a file somebody asked for.
-func writeSnapshot(dir string, at time.Time, body []byte) (string, error) {
-	base := at.Format("server-2006-01-02-150405")
+// plansave writes the selected request's estimated plan to
+// plans/plan-<spid>-yyyy-mm-dd-hhmmss.sqlplan beside the binary. The
+// extension is what SQL Server Management Studio opens as a plan rather
+// than as text, which is the point of saving one at all.
+func (s *Server) plansave(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ref, err := refFromQuery(req)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The live plan first, because it is the one worth having: an estimate
+	// that turned out wrong is only visible beside what actually happened.
+	// A server that cannot keep row counts, or a statement it is not
+	// profiling, falls back to the plan as compiled rather than to nothing,
+	// and the answer says which arrived so a directory of saved plans is
+	// self-describing.
+	plan, err := s.col.Plan(req.Context(), ref, true)
+	if err != nil {
+		plan, err = s.col.Plan(req.Context(), ref, false)
+	}
+	if err != nil {
+		viewError(rw, err)
+		return
+	}
+	kind := "estimated"
+	if plan.Live {
+		kind = "live"
+	}
+
+	dir, err := planDir()
+	if err != nil {
+		http.Error(rw, "could not work out where the executable lives", http.StatusInternalServerError)
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		http.Error(rw, "could not create "+dir, http.StatusInternalServerError)
+		return
+	}
+	base := fmt.Sprintf("plan-%d-%s-%s", ref.SessionID, kind, time.Now().Format("2006-01-02-150405"))
+	path, err := writeUnique(dir, base, ".sqlplan", plan.Payload)
+	if err != nil {
+		http.Error(rw, "could not write the plan", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(rw, map[string]string{"path": path, "kind": kind})
+}
+
+// writeUnique creates the file without ever overwriting one. The names have
+// one second of resolution, so two presses inside the same second would
+// otherwise land on each other; the suffix is not a feature, it is the
+// alternative to losing a file somebody asked for.
+func writeUnique(dir, base, ext string, body []byte) (string, error) {
 	for n := 1; n <= 9; n++ {
-		name := base + ".html"
+		name := base + ext
 		if n > 1 {
-			name = fmt.Sprintf("%s-%d.html", base, n)
+			name = fmt.Sprintf("%s-%d%s", base, n, ext)
 		}
 		path := filepath.Join(dir, name)
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
@@ -102,7 +157,7 @@ func writeSnapshot(dir string, at time.Time, body []byte) (string, error) {
 		}
 		return path, f.Close()
 	}
-	return "", fmt.Errorf("web: nine snapshots already exist for %s", base)
+	return "", fmt.Errorf("web: nine files already exist for %s", base)
 }
 
 // periodRequest is what the f command posts: the new base period for the

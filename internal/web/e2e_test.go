@@ -245,7 +245,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 
 	// A command nobody can discover is a command nobody uses, so the keys
 	// are on the page rather than only behind h.
-	if want := []string{"t", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
+	if want := []string{"t", "e", "d", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
 		t.Errorf("the command strip shows %v, want %v", got.Views.Hints, want)
 	}
 	if got.Views.Blocking.Rows == 0 || got.Views.Blocking.Rows >= got.Views.Blocking.Total {
@@ -413,6 +413,30 @@ func TestEndToEndInABrowser(t *testing.T) {
 	}
 	if !strings.HasPrefix(d.Who, "spid ") {
 		t.Errorf("the panel's heading reads %q; it names the row it is showing", d.Who)
+	}
+
+	// The plan panel: e follows the selected request through its plan, in
+	// the same space the statement uses, and neither is shown at once.
+	pl := got.Commands.Plan
+	if !pl.Shown || !pl.PlanVisible || !pl.SQLHidden {
+		t.Errorf("e left the panel shown=%v with the plan visible=%v and the statement hidden=%v", pl.Shown, pl.PlanVisible, pl.SQLHidden)
+	}
+	if pl.Operators != 3 {
+		t.Errorf("the plan panel drew %d operators from a fixture of 3", pl.Operators)
+	}
+	if pl.RowLines != 1 {
+		t.Errorf("the plan panel's first row sits on %d lines", pl.RowLines)
+	}
+	if len(pl.Headings) == 0 || pl.Headings[0] != "node" {
+		t.Errorf("the plan panel's headings are %v", pl.Headings)
+	}
+	// An operator at three times its estimate has to read as three hundred
+	// per cent: capping it at a hundred would hide the thing worth seeing.
+	if len(pl.Cells) < 3 || !containsString(pl.Cells[2], "300 %") {
+		t.Errorf("the operator at 90000 rows against an estimate of 30000 reads %v", pl.Cells)
+	}
+	if !strings.HasPrefix(got.Commands.PlanSaved, "live plan written to ") {
+		t.Errorf("d reported %q", got.Commands.PlanSaved)
 	}
 
 	if !strings.HasPrefix(got.Commands.SnapshotMessage, "snapshot written to ") {
@@ -713,6 +737,17 @@ type e2eResult struct {
 			Scripts    int    `json:"scripts"`
 			Text       string `json:"text"`
 		} `json:"detail"`
+		Plan struct {
+			Shown       bool       `json:"shown"`
+			PlanVisible bool       `json:"planVisible"`
+			SQLHidden   bool       `json:"sqlHidden"`
+			Who         string     `json:"who"`
+			Operators   int        `json:"operators"`
+			Headings    []string   `json:"headings"`
+			RowLines    int        `json:"rowLines"`
+			Cells       [][]string `json:"cells"`
+		} `json:"plan"`
+		PlanSaved       string `json:"planSaved"`
 		SnapshotMessage string `json:"snapshotMessage"`
 		RowsWhenSaved   int    `json:"rowsWhenSaved"`
 		Rate            string `json:"rate"`
@@ -815,6 +850,13 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 			Mode: "IX", Status: "GRANT", Count: 1},
 		{SessionID: 51, Database: "alpha", ResourceType: "PAGE", Mode: "IX", Status: "GRANT", Count: 17},
 	}
+	src.PlanRows = []model.PlanNode{
+		{NodeID: 0, Operator: "Sort", Rows: 12000, Estimated: 40000, Threads: 1},
+		{NodeID: 1, Operator: "Clustered Index Scan", Object: "Orders", Rows: 40000, Estimated: 40000, Threads: 1},
+		// An operator well past its estimate, which is the reading this
+		// panel exists for and must not be capped at a hundred per cent.
+		{NodeID: 2, Operator: "Nested Loops", Rows: 90000, Estimated: 30000, Threads: 4},
+	}
 	src.LogRows = []model.LogSpaceSample{
 		{Database: "alpha", RecoveryModel: "FULL", ReuseWait: "LOG_BACKUP", State: "ONLINE",
 			SizeMB: 512, UsedMB: 480, UsedPercent: 93.75},
@@ -855,8 +897,14 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 	// The s command writes beside the executable, which during a test is
 	// wherever go test put the binary. Point it at a temporary directory
 	// instead, and hand the path back so the assertions can read the file.
-	snaps := filepath.Join(t.TempDir(), "snapshots")
+	dir := t.TempDir()
+	snaps := filepath.Join(dir, "snapshots")
 	snapshotsInto(t, snaps)
+	plans := filepath.Join(dir, "plans")
+	oldPlanDir := planDir
+	planDir = func() (string, error) { return plans, nil }
+	t.Cleanup(func() { planDir = oldPlanDir })
+	t.Cleanup(func() { checkPlanFile(t, plans) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go c.Run(ctx)
@@ -926,6 +974,36 @@ func equalStrings(a, b []string) bool {
 }
 
 func containsString(s []string, want string) bool { return idx(s, want) >= 0 }
+
+// checkPlanFile reads what the d command wrote. The extension is what makes
+// a plan open as a plan rather than as text, which is the point of saving
+// one, and the fake reports a live plan, so the name has to say so.
+func checkPlanFile(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Errorf("the d command created no plans directory: %v", err)
+		return
+	}
+	if len(entries) != 1 {
+		t.Errorf("the plans directory holds %d files, want 1", len(entries))
+		return
+	}
+	name := entries[0].Name()
+	if !strings.HasSuffix(name, ".sqlplan") {
+		t.Errorf("the plan is named %q; the extension is what opens it as a plan", name)
+	}
+	if !strings.Contains(name, "-live-") {
+		t.Errorf("the plan is named %q; the fake reports a live plan and the name has to say which arrived", name)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "ShowPlanXML") {
+		t.Errorf("the saved plan is not showplan XML: %.60q", b)
+	}
+}
 
 func idx(s []string, want string) int {
 	for i, v := range s {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/rudi-bruchez/sqltop/internal/model"
 )
@@ -323,6 +324,62 @@ func (s *Source) LogSpace(ctx context.Context) ([]model.LogSpaceSample, error) {
 		r.UsedMB = float64(usedKB) / 1024
 		r.UsedPercent = float64(percent)
 		out = append(out, r)
+		return nil
+	})
+	return out, err
+}
+
+// errNoPlanProgress is what PlanProgress returns on a server that cannot
+// answer. Spec section 9: live plan progress needs lightweight profiling,
+// which is on by default from SQL Server 2019 and on both Azure engines.
+// Below that it needs trace flag 7412, and this tool sets no trace flags on
+// a server it is watching, so the feature is simply absent rather than
+// something to switch on behind the operator's back.
+var errNoPlanProgress = errors.New("mssql: this server does not report live plan progress; it needs SQL Server 2019 or later, or Azure, where lightweight profiling is on by default")
+
+// planProgressQueryTemplate reads one running statement's progress through
+// its plan. The two substitutions are a session id and a request id, and
+// both are integers by type before they get here, never strings: this is
+// the one query in the tool whose shape depends on something a client
+// asked for.
+//
+// Grouped by node because a parallel plan reports each node once per
+// worker: an operator seen eight times is one operator, not eight, and the
+// thread count is worth more than eight identical rows. Row counts add
+// across workers, elapsed time does not.
+const planProgressQueryTemplate = `
+SELECT p.node_id,
+       MAX(p.physical_operator_name),
+       MAX(ISNULL(OBJECT_NAME(p.object_id, p.database_id), N'')),
+       ISNULL(SUM(p.row_count), 0),
+       ISNULL(MAX(p.estimate_row_count), 0),
+       COUNT(*),
+       ISNULL(MAX(p.elapsed_time_ms), 0),
+       ISNULL(SUM(p.cpu_time_ms), 0),
+       ISNULL(SUM(p.logical_read_count), 0),
+       ISNULL(SUM(p.write_page_count), 0)
+FROM sys.dm_exec_query_profiles AS p
+WHERE p.session_id = %d AND p.request_id = %d
+GROUP BY p.node_id
+ORDER BY p.node_id
+OPTION (MAXDOP 1)`
+
+// PlanProgress reports how far a running statement has got through its
+// plan. An empty result is the ordinary answer for a statement that has
+// finished between the click and the query, and is not an error.
+func (s *Source) PlanProgress(ctx context.Context, ref model.RequestRef) ([]model.PlanNode, error) {
+	if _, caps := s.snapshot(); !caps.Has(model.CapLivePlanProgress) {
+		return nil, errNoPlanProgress
+	}
+	q := fmt.Sprintf(planProgressQueryTemplate, ref.SessionID, ref.RequestID)
+	var out []model.PlanNode
+	err := s.query(ctx, q, func(rows *sql.Rows) error {
+		var n model.PlanNode
+		if err := rows.Scan(&n.NodeID, &n.Operator, &n.Object, &n.Rows, &n.Estimated,
+			&n.Threads, &n.ElapsedMs, &n.CPUMs, &n.Reads, &n.Writes); err != nil {
+			return err
+		}
+		out = append(out, n)
 		return nil
 	})
 	return out, err

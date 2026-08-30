@@ -147,6 +147,24 @@ func queryCatalogue() []catalogueEntry {
 			sql:  logSpaceQuery,
 		},
 		{
+			name: "planProgressQueryTemplate",
+			when: "on demand, once a second while somebody is watching one request's plan",
+			why:  "How far a running statement has got through its plan, one row per operator. Grouped by node because a parallel plan reports each node once per worker: an operator seen eight times is one operator, not eight. Needs the lightweight profiling that is on by default from SQL Server 2019 and on both Azure engines; below that it needs a trace flag this tool will not set, so the feature is absent rather than switched on behind the operator's back. The two substitutions are a session id and a request id, integers by type before they reach the query.",
+			sql:  fmt.Sprintf(planProgressQueryTemplate, 51, 0),
+		},
+		{
+			name: "livePlanQueryTemplate",
+			when: "on demand, when somebody saves a plan",
+			why:  "The plan of a running statement with the row counts it has produced so far, as showplan XML. Same gate as planProgressQueryTemplate. This is the artefact worth saving: an estimate that turned out wrong is only visible beside what actually happened.",
+			sql:  fmt.Sprintf(livePlanQueryTemplate, 51, 0),
+		},
+		{
+			name: "estimatedPlanQueryTemplate",
+			when: "on demand, when somebody saves a plan and the server cannot produce a live one",
+			why:  "The plan as the optimiser compiled it. sys.dm_exec_text_query_plan rather than sys.dm_exec_query_plan, and with the statement offsets: the offsets give the statement the request is on rather than the whole batch, and the text form returns nvarchar rather than xml, which is what stops a plan more than a hundred and twenty-eight levels deep failing outright. Those are exactly the plans somebody wants to look at.",
+			sql:  fmt.Sprintf(estimatedPlanQueryTemplate, 51, 0),
+		},
+		{
 			name: "costQuery",
 			when: "every tick, on whatever tier ran last",
 			why:  "The tool's own server CPU and logical reads, read from its own session. This is what the observation budget throttles against, and it is why the connection is pinned: a pooled connection would be reset between checkouts and zero these counters.",
@@ -238,7 +256,7 @@ func TestQueryCatalogueCoversEveryQueryInThePackage(t *testing.T) {
 		name, _, _ := strings.Cut(e.name, " ")
 		inCatalogue[name] = true
 	}
-	// The two templates are documented through the shapes they build.
+	// The templates are documented through the shapes they build.
 	inCatalogue["requestsQueryTemplate"] = true
 
 	files, err := filepath.Glob("*.go")

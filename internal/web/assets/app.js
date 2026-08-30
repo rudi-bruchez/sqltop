@@ -223,6 +223,22 @@ const CELL_LOCKS = {
   count: { num: true, text: (r) => n0(r.count) },
 };
 
+const CELL_PLAN = {
+  node: { num: true, text: (r) => n0(r.node) },
+  operator: { text: (r) => r.operator },
+  object: { text: (r) => r.object },
+  rows: { num: true, text: (r) => n0(r.rows) },
+  estimated: { num: true, text: (r) => n0(r.estimated) },
+  // Blank where the optimiser expected nothing, and deliberately not capped
+  // at a hundred: an operator at four times its estimate is the thing worth
+  // seeing.
+  progress: { num: true, text: (r) => (r.estimated ? fPct(r.progress) : "") },
+  threads: { num: true, text: (r) => n0(r.threads) },
+  elapsed_ms: { num: true, text: (r) => n0(r.elapsed_ms) },
+  cpu_ms: { num: true, text: (r) => n0(r.cpu_ms) },
+  reads: { num: true, text: (r) => n0(r.reads) },
+};
+
 const CELL_LOGS = {
   database: { text: (r) => r.database },
   size_mb: { num: true, text: (r) => n2(r.size_mb) },
@@ -242,6 +258,7 @@ const CELLS = {
   transactions: CELL_TRANSACTIONS,
   locks: CELL_LOCKS,
   logs: CELL_LOGS,
+  plan: CELL_PLAN,
 };
 
 // The columns actually drawn in the grid, in order. Built by applyColumns
@@ -595,6 +612,8 @@ function buildTabs(views) {
 // things you reach for and not for everything.
 const COMMANDS = [
   ["t", "show the selected row's statement under the grid", "text"],
+  ["e", "follow the selected request through its plan as it runs", "plan"],
+  ["d", "write the selected request's plan to plans/ beside the binary", "save plan"],
   ["s", "save the current state to snapshots/ beside the binary", "save"],
   ["p", "pause and resume the display", "pause"],
   ["f", "cycle the refresh period", "rate"],
@@ -711,7 +730,7 @@ function setView(id) {
   activeView = id;
   markTabs();
   document.querySelector(".gridScroll").hidden = !isGrid(id);
-  $("detail").hidden = !isGrid(id) || !detailOpen;
+  $("detail").hidden = !isGrid(id) || detailMode === null;
   for (const v of ["sessions", "transactions", "logs"]) $("panel-" + v).hidden = v !== id;
   buildColumnPanel();
   applyColumns();
@@ -849,7 +868,7 @@ function moveColumn(from, to) {
 // answers JSON and refuses anything but POST, so a failure is a body worth
 // showing rather than a status code to guess from.
 function post(path, body, type) {
-  return fetch(path + "?t=" + encodeURIComponent(token), {
+  return fetch(path + (path.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(token), {
     method: "POST",
     headers: { "Content-Type": type },
     body: body,
@@ -896,10 +915,11 @@ function togglePause() {
     return;
   }
   say("");
-  // pollView stops rescheduling itself while paused, so resuming has to
-  // start it again. Without this a paused list view stayed frozen after
+  // Both pollers stop rescheduling themselves while paused, so resuming has
+  // to start them again. Without this a paused list view stayed frozen after
   // resuming until the user switched tabs and back.
   if (!isGrid(activeView)) pollView();
+  else if (detailMode === "plan") pollPlan();
 }
 
 // The ladder the f command steps through. Fixed rather than typed in:
@@ -1031,23 +1051,89 @@ function sqlNodes(sql) {
   return frag;
 }
 
-// The statement panel. The text is already here: the server sends a
-// session's SQL once and the reference table holds it, so opening this
-// costs no request and no query.
-let detailOpen = false;
+// The panel under the grid, which shows one of two things about the selected
+// row. The statement is already here, sent once per session in the reference
+// table, so that half costs no request at all; the plan is a query per look
+// and runs only while somebody is looking.
+let detailMode = null; // null, "sql" or "plan"
 let detailShown = null;
 
-function toggleDetail() {
+function setDetail(mode) {
   if (!isGrid(activeView)) {
-    say("the statement panel follows the requests and blocking views");
+    say("the detail panel follows the requests and blocking views");
     return;
   }
-  detailOpen = !detailOpen;
-  $("detail").hidden = !detailOpen;
+  detailMode = detailMode === mode ? null : mode;
+  $("detail").hidden = detailMode === null;
+  $("sqlText").hidden = detailMode !== "sql";
+  $("planBody").hidden = detailMode !== "plan";
   detailShown = null;
+  clearTimeout(planTimer);
   renderDetail();
+  if (detailMode === "plan") pollPlan();
   // The grid gives up its height to the panel, so it has to be told.
   layout();
+}
+
+// pollPlan follows one running statement through its plan. It stops asking
+// after an error rather than retrying every second: the commonest error is
+// a server that cannot report progress at all, which is a fact about that
+// server and not something a retry will change. Pressing the key again
+// asks once more.
+let planTimer = 0;
+function pollPlan() {
+  clearTimeout(planTimer);
+  if (detailMode !== "plan" || !isGrid(activeView)) return;
+  const r = selectedKey === null ? null : view.find((x) => rowKey(x) === selectedKey);
+  if (!r) {
+    planNote("select a row to follow its plan");
+    return;
+  }
+  const spid = val(r, "spid"), rqid = val(r, "rqid");
+  fetch("/api/plan?t=" + encodeURIComponent(token) + "&spid=" + spid + "&rqid=" + rqid)
+    .then((res) => res.json().then((j) => (res.ok ? j : Promise.reject(new Error(j.error || res.statusText)))))
+    .then((j) => {
+      if (detailMode !== "plan") return;
+      const rows = j.rows || [];
+      $("detailWho").textContent = rows.length
+        ? "plan of spid " + spid + ", " + rows.length + " operators"
+        : "spid " + spid + " is not running a statement the engine is profiling";
+      const el = $("planBody");
+      el.textContent = "";
+      el.appendChild(listTable("plan", rows));
+      if (!paused) planTimer = setTimeout(pollPlan, Math.max(periodMs || 1000, 1000));
+    })
+    .catch((e) => planNote(e.message));
+}
+
+// savePlan writes the selected request's plan beside the binary, with the
+// row counts it has produced so far where the server can keep them and as
+// the optimiser compiled it otherwise. The .sqlplan extension is what makes
+// a plan open as a plan rather than as text, which is the point of saving
+// one at all.
+function savePlan() {
+  if (!isGrid(activeView)) {
+    say("a plan belongs to a request; the requests and blocking views are where they are");
+    return;
+  }
+  const r = selectedKey === null ? null : view.find((x) => rowKey(x) === selectedKey);
+  if (!r) {
+    say("select a row first: the plan saved is the selected request's");
+    return;
+  }
+  post("/api/plansave?spid=" + val(r, "spid") + "&rqid=" + val(r, "rqid"), "", "application/json")
+    .then((j) => say(j.kind + " plan written to " + j.path))
+    .catch((e) => say("could not save the plan: " + e.message));
+}
+
+function planNote(text) {
+  const el = $("planBody");
+  el.textContent = "";
+  const p = document.createElement("p");
+  p.className = "listError";
+  p.textContent = text;
+  el.appendChild(p);
+  $("detailWho").textContent = "plan progress";
 }
 
 // renderDetail runs on every tick while the panel is open, and does nothing
@@ -1056,7 +1142,7 @@ function toggleDetail() {
 // selection changing, and a panel still showing the previous one would be
 // the same lie as a stale figure on a tile.
 function renderDetail() {
-  if (!detailOpen) return;
+  if (detailMode !== "sql") return;
   const r = selectedKey === null ? null : view.find((x) => rowKey(x) === selectedKey);
   const sql = r ? ref(val(r, "ref")).sql : "";
   const label = r
@@ -1101,6 +1187,7 @@ function moveSelection(delta) {
   // layout marks the selected row itself, so there is nothing to toggle here.
   layout();
   renderDetail();
+  if (detailMode === "plan") pollPlan();
 }
 
 function toggleHelp() {
@@ -1112,7 +1199,9 @@ function toggleHelp() {
 // One entry per command, keyed the way the keyboard reports it. The keys
 // here and the keys in COMMANDS are checked against each other by a test.
 const KEYS = {
-  t: toggleDetail,
+  t: () => setDetail("sql"),
+  e: () => setDetail("plan"),
+  d: savePlan,
   s: saveSnapshot,
   p: togglePause,
   f: cycleFrequency,
@@ -1217,6 +1306,7 @@ function acquireRow() {
     selectedKey = tr._key;
     for (const e of pool) e.tr.classList.toggle("sel", e.tr._key === selectedKey);
     renderDetail();
+    if (detailMode === "plan") pollPlan();
   });
   const entry = { tr, tds, key: null, prev: {} };
   pool.push(entry);

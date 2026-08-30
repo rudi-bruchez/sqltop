@@ -35,6 +35,7 @@ type Source struct {
 	TranRows    []model.TransactionSample
 	LockRows    []model.LockSample
 	LogRows     []model.LogSpaceSample
+	PlanRows    []model.PlanNode
 
 	cost    model.Cost
 	flipped bool
@@ -128,4 +129,10 @@ func (s *Source) LogSpace(context.Context) ([]model.LogSpaceSample, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.LogRows, s.Err
+}
+
+func (s *Source) PlanProgress(context.Context, model.RequestRef) ([]model.PlanNode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.PlanRows, s.Err
 }

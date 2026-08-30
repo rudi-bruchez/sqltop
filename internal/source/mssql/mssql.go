@@ -750,6 +750,80 @@ func (s *Source) QueryText(context.Context, model.RequestRef) (string, error) {
 	return "", errNotInThisPlan
 }
 
-func (s *Source) Plan(context.Context, model.RequestRef, bool) (model.Plan, error) {
-	return model.Plan{}, errNotInThisPlan
+// estimatedPlanQueryTemplate reads the compiled plan of one running
+// statement, which is the estimated plan: the shape the optimiser chose,
+// with its estimates, before any of it ran.
+//
+// sys.dm_exec_text_query_plan rather than sys.dm_exec_query_plan, and with
+// the statement offsets rather than without. The offsets give the statement
+// the request is on rather than the whole batch it came from, and the text
+// form returns nvarchar rather than xml, which is what stops a deeply
+// nested plan failing outright: the xml form refuses a plan more than a
+// hundred and twenty-eight levels deep, and those are exactly the plans
+// somebody wants to look at.
+//
+// The two substitutions are a session id and a request id, integers by
+// type before they reach here.
+const estimatedPlanQueryTemplate = `
+SELECT ISNULL(p.query_plan, N'')
+FROM sys.dm_exec_requests AS r
+CROSS APPLY sys.dm_exec_text_query_plan(r.plan_handle, r.statement_start_offset, r.statement_end_offset) AS p
+WHERE r.session_id = %d AND r.request_id = %d
+OPTION (MAXDOP 1)`
+
+// livePlanQueryTemplate reads the plan of a running statement with the row
+// counts it has produced so far, which is what lightweight profiling keeps.
+// Same showplan XML as the estimated plan, with an actual next to every
+// estimate, and it is the artefact worth saving: an estimate that turned
+// out wrong is only visible beside what actually happened.
+//
+// It needs the same lightweight profiling PlanProgress does, so it is gated
+// on the same capability. The function takes a session id; the request id
+// narrows it to the statement under MARS, where one session runs several.
+const livePlanQueryTemplate = `
+SELECT ISNULL(CAST(x.query_plan AS nvarchar(max)), N'')
+FROM sys.dm_exec_query_statistics_xml(%d) AS x
+WHERE x.request_id = %d
+OPTION (MAXDOP 1)`
+
+// Plan returns a running request's plan as showplan XML: with the row
+// counts it has produced so far when live is asked for and the server can
+// keep them, and as the optimiser compiled it otherwise.
+// The two queries are built and sent in their own branches rather than
+// through a shared helper taking a query string. TestEveryQuerySentComesFromTheCatalogue
+// resolves one level of data flow, from a local assignment to a catalogued
+// name, and a query arriving as a function parameter is invisible to it.
+// That check refusing this is the check working.
+func (s *Source) Plan(ctx context.Context, ref model.RequestRef, live bool) (model.Plan, error) {
+	var xml string
+	var err error
+	if live {
+		if _, caps := s.snapshot(); !caps.Has(model.CapLivePlanProgress) {
+			return model.Plan{}, errNoPlanProgress
+		}
+		q := fmt.Sprintf(livePlanQueryTemplate, ref.SessionID, ref.RequestID)
+		err = s.queryRow(ctx, q, &xml)
+	} else {
+		q := fmt.Sprintf(estimatedPlanQueryTemplate, ref.SessionID, ref.RequestID)
+		err = s.queryRow(ctx, q, &xml)
+	}
+	return planResult(xml, err, ref, live)
+}
+
+// planResult turns what came back into a Plan or into an error a person can
+// act on.
+func planResult(xml string, err error, ref model.RequestRef, live bool) (model.Plan, error) {
+	switch {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		return model.Plan{}, fmt.Errorf("mssql: session %d is not running request %d any more", ref.SessionID, ref.RequestID)
+	case isCapabilityAbsent(err):
+		return model.Plan{}, fmt.Errorf("mssql: this login may not read execution plans: %w", err)
+	default:
+		return model.Plan{}, err
+	}
+	if xml == "" {
+		return model.Plan{}, fmt.Errorf("mssql: session %d has no plan to show; the engine keeps none for some statements, and drops one under memory pressure", ref.SessionID)
+	}
+	return model.Plan{Format: "showplan-xml", Payload: []byte(xml), Live: live}, nil
 }

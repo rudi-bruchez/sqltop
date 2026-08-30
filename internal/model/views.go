@@ -88,3 +88,26 @@ type LogSpaceSample struct {
 	UsedMB      float64
 	UsedPercent float64
 }
+
+// PlanNode is one operator of a running statement's plan, as the engine
+// reports its progress. One row per node, threads folded together: a
+// parallel plan reports the same node once per worker and an operator seen
+// eight times is one operator, not eight.
+//
+// The times and the read counts are only maintained under full profiling.
+// Lightweight profiling, which is what is on by default from SQL Server
+// 2019 and what this tool relies on, keeps row counts and leaves those at
+// zero. They travel anyway, for a server where somebody has turned full
+// profiling on, and the columns that show them are off by default.
+type PlanNode struct {
+	NodeID    int
+	Operator  string
+	Object    string
+	Rows      int64
+	Estimated int64
+	Threads   int
+	ElapsedMs int64
+	CPUMs     int64
+	Reads     int64
+	Writes    int64
+}

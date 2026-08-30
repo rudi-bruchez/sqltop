@@ -132,6 +132,27 @@ var ViewCatalogue = []ViewDef{
 		{"count", "locks", 70, true},
 	}},
 
+	// Part of the request view rather than a tab of its own: it describes
+	// one running statement, so it belongs under the row that named it.
+	{ID: "plan", Title: "plan progress", Columns: []Column{
+		{"node", "node", 56, true},
+		{"operator", "operator", 220, true},
+		{"object", "object", 160, true},
+		{"rows", "rows", 90, true},
+		{"estimated", "estimated", 90, true},
+		{"progress", "of estimate", 90, true},
+		{"threads", "threads", 70, false},
+		// Only maintained under full profiling. Lightweight profiling,
+		// which is what is on by default from SQL Server 2019 and what
+		// this feature relies on, keeps row counts and leaves these at
+		// zero, so they are off: a column that reads zero on every server
+		// anybody will point this at is the plausible-looking wrong
+		// answer, not a measurement.
+		{"elapsed_ms", "elapsed ms", 90, false},
+		{"cpu_ms", "cpu ms", 70, false},
+		{"reads", "reads", 70, false},
+	}},
+
 	{ID: "logs", Title: "transaction logs", Key: "l", Columns: []Column{
 		{"database", "database", 150, true},
 		{"size_mb", "size MB", 80, true},

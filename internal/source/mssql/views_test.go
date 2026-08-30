@@ -3,8 +3,11 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/rudi-bruchez/sqltop/internal/model"
 )
 
 // The three on-demand views of spec section 7, against a real engine. They
@@ -317,5 +320,119 @@ func identify(t *testing.T, s *Source, ctx context.Context) {
 	t.Helper()
 	if _, _, err := s.Identify(ctx); err != nil {
 		t.Fatalf("Identify: %v", err)
+	}
+}
+
+// slowStatement starts a statement that takes several seconds on a pinned
+// connection and returns its ref, so the plan tests have something the
+// engine is actually running. The sort is deliberate: it gives a plan with
+// a dozen operators rather than one, so a per-node reading has something to
+// say.
+func slowStatement(t *testing.T, ctx context.Context) (model.RequestRef, chan struct{}) {
+	t.Helper()
+	conn, spid := pinnedSession(t, ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = conn.ExecContext(ctx, `
+			SELECT TOP (400000) a.name, b.name AS b
+			FROM sys.all_columns AS a CROSS JOIN sys.all_objects AS b
+			ORDER BY a.name, b.name OPTION (MAXDOP 1)`)
+	}()
+	// Long enough for the request to exist and short enough not to slow the
+	// suite: the statement above runs for several seconds.
+	time.Sleep(1500 * time.Millisecond)
+	t.Cleanup(func() { <-done })
+	return model.RequestRef{SessionID: spid, RequestID: 0}, done
+}
+
+// TestPlanProgressFollowsARunningStatement is the point of the feature: the
+// row counts move while the statement runs, and they are read against the
+// optimiser's estimates.
+func TestPlanProgressFollowsARunningStatement(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+
+	ref, _ := slowStatement(t, ctx)
+	nodes, err := s.PlanProgress(ctx, ref)
+	if err != nil {
+		t.Fatalf("PlanProgress: %v", err)
+	}
+	if len(nodes) < 3 {
+		t.Fatalf("a sort over a cross join reported %d operators", len(nodes))
+	}
+
+	var withRows, withEstimate int
+	for _, n := range nodes {
+		if n.Operator == "" {
+			t.Errorf("node %d has no operator name", n.NodeID)
+		}
+		if n.Threads < 1 {
+			t.Errorf("node %d reports %d threads", n.NodeID, n.Threads)
+		}
+		if n.Rows > 0 {
+			withRows++
+		}
+		if n.Estimated > 0 {
+			withEstimate++
+		}
+	}
+	if withRows == 0 {
+		t.Error("no operator has produced a row; a statement that has been running for a second and a half has")
+	}
+	if withEstimate == 0 {
+		t.Error("no operator carries an estimate, and the whole reading is rows against estimate")
+	}
+}
+
+// TestPlanIsShowplanXMLBothWays. The live plan is the one worth saving, and
+// a server that cannot produce one still has to answer with the plan as
+// compiled rather than with nothing.
+func TestPlanIsShowplanXMLBothWays(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+
+	ref, _ := slowStatement(t, ctx)
+	for _, live := range []bool{true, false} {
+		plan, err := s.Plan(ctx, ref, live)
+		if err != nil {
+			t.Fatalf("Plan(live=%v): %v", live, err)
+		}
+		if plan.Format != "showplan-xml" {
+			t.Errorf("live=%v: format %q", live, plan.Format)
+		}
+		if plan.Live != live {
+			t.Errorf("live=%v: the plan reports Live=%v", live, plan.Live)
+		}
+		body := string(plan.Payload)
+		if !strings.Contains(body, "ShowPlanXML") {
+			t.Fatalf("live=%v: what came back is not showplan XML: %.120q", live, body)
+		}
+		// The one thing that separates the two: a live plan carries what
+		// each operator has actually produced.
+		if got := strings.Contains(body, "RunTimeCountersPerThread"); got != live {
+			t.Errorf("live=%v: runtime counters present=%v", live, got)
+		}
+	}
+}
+
+// TestPlanOfAFinishedRequestSaysSo rather than returning an empty file or a
+// bare error: a plan asked for a moment too late is the ordinary case.
+func TestPlanOfAFinishedRequestSaysSo(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	identify(t, s, ctx)
+
+	_, err := s.Plan(ctx, model.RequestRef{SessionID: 32000, RequestID: 0}, false)
+	if err == nil {
+		t.Fatal("a session that is not running anything returned a plan")
+	}
+	if !strings.Contains(err.Error(), "not running") {
+		t.Errorf("the error reads %q; it should say the request is gone", err)
 	}
 }
