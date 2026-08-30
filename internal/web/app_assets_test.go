@@ -2,6 +2,8 @@ package web
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -61,7 +63,14 @@ func TestGridUpdatePathNeverWritesMarkupOutsideItsSetupRegion(t *testing.T) {
 		t.Fatal("could not find the \"setup-region: begin\" / \"setup-region: end\" markers in assets/app.js; this test cannot tell setup work from the render path without them")
 	}
 
-	writeRE := regexp.MustCompile(`\.(innerHTML|outerHTML)\s*=|\.insertAdjacentHTML\s*\(`)
+	// The list is every API that turns a string into markup, not every API
+	// that adds a node. An external reviewer called the previous three-API
+	// list narrow, correctly; appendChild and insertAdjacentElement are
+	// deliberately still absent, because they take nodes rather than
+	// markup, they are how the pool is built in the first place, and
+	// banning them would fail on the renderer's own setup. What is added
+	// here are the remaining ways to write markup from a string.
+	writeRE := regexp.MustCompile(`\.(innerHTML|outerHTML)\s*=|\.(insertAdjacentHTML|createContextualFragment|write|writeln)\s*\(`)
 	allowedRE := regexp.MustCompile(`entry\.tds\[[^\]]*\]\.((innerHTML|outerHTML)\s*=|insertAdjacentHTML\s*\()`)
 
 	foundAllowed := false
@@ -100,4 +109,48 @@ func stripLineComment(line string) string {
 		}
 	}
 	return line
+}
+
+// TestShippedJavaScriptPassesTheLinter runs deno lint over the one
+// JavaScript file this binary serves. It is here rather than only in a
+// checklist because the checklist is a thing to remember and this is not.
+//
+// deno rather than eslint: a single static binary, no package.json, no
+// node_modules and no configuration file, in a repository that otherwise
+// has no JavaScript toolchain at all. It skips when deno is absent, so a
+// machine without it still builds and tests; the cost of that is that the
+// gate is only as good as the machines that have the binary, which is the
+// same bargain the integration tests make with a running SQL Server.
+//
+// What it earns: a hand-written scan for dead identifiers found one real
+// unused formatter here and three false positives, because a correct
+// JavaScript scan needs a parser and a regular expression is not one.
+func TestShippedJavaScriptPassesTheLinter(t *testing.T) {
+	deno, err := exec.LookPath("deno")
+	if err != nil {
+		// deno's own installer puts the binary here and adds it to the
+		// PATH from the shell profile, which a non-login shell running
+		// go test never sources. Looking in the documented default
+		// location is the difference between this gate running and this
+		// gate skipping on the machine that installed the linter.
+		home, herr := os.UserHomeDir()
+		if herr == nil {
+			if p := filepath.Join(home, ".deno", "bin", "deno"); fileExists(p) {
+				deno = p
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		t.Skip("deno not installed; install it to run this gate (https://deno.com), or run deno lint internal/web/assets/app.js by hand")
+	}
+	out, err := exec.Command(deno, "lint", "assets/app.js").CombinedOutput()
+	if err != nil {
+		t.Errorf("deno lint failed on assets/app.js:\n%s", out)
+	}
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }

@@ -2,7 +2,10 @@
 package web
 
 import (
+	"encoding/json"
+	"fmt"
 	"hash/fnv"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -41,6 +44,15 @@ import (
 // wait_resource, change tick to tick and belong here on Row. Writing this
 // down now is what keeps the omission a decision for whoever adds the rest
 // of the grid, not something they have to rediscover.
+// Row marshals as a positional array, not an object, and rowFields below
+// is the order. Measured at 800 rows: the eighteen key names, their quotes
+// and their colons came to 98 bytes of every 298 byte row, a third of the
+// steady-state payload spent restating the same eighteen words 800 times a
+// second. The client is told the order once per connection in
+// SnapshotPayload.Cols rather than hard-coding it, so the two halves cannot
+// drift apart: a field added here and forgotten there would otherwise shift
+// every column after it silently, which is the failure mode that makes
+// positional formats a bad idea when nobody sends the header.
 type Row struct {
 	SPID      int64   `json:"spid"`
 	RequestID int32   `json:"rqid"`
@@ -67,6 +79,181 @@ type Row struct {
 	Percent float64 `json:"pct"`
 }
 
+// rowFields is the wire order of Row's columns and the value sent as
+// SnapshotPayload.Cols. TestRowFieldsMatchTheStruct checks it against Row's
+// own json tags by reflection, in declaration order, so this list cannot
+// fall behind the struct.
+var rowFields = []string{
+	"spid", "rqid", "ref", "st", "db", "cmd", "by", "d",
+	"el", "cpu", "rd", "wr", "tdb", "gr", "dop", "w", "wms", "pct",
+}
+
+const hexDigits = "0123456789abcdef"
+
+// appendJSONString writes one JSON string. Hand-rolled because this runs
+// five times per row, 800 rows a second, and encoding/json's own path
+// allocates a fresh []byte for each one. It matches encoding/json byte for
+// byte, including the HTML escaping of < > and & that Go does by default
+// and the U+FFFD substitution for invalid UTF-8; FuzzAppendJSONString
+// checks that equivalence against encoding/json rather than trusting this
+// comment.
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		if c := s[i]; c < utf8.RuneSelf {
+			if c >= 0x20 && c != '"' && c != '\\' && c != '<' && c != '>' && c != '&' {
+				i++
+				continue
+			}
+			dst = append(dst, s[start:i]...)
+			switch c {
+			case '"':
+				dst = append(dst, '\\', '"')
+			case '\\':
+				dst = append(dst, '\\', '\\')
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xF])
+			}
+			i++
+			start = i
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// Invalid UTF-8. encoding/json substitutes the replacement
+			// character itself, not its escape, rather than emitting bytes
+			// no JSON parser would accept. So does this.
+			dst = append(dst, s[start:i]...)
+			dst = utf8.AppendRune(dst, utf8.RuneError)
+			i += size
+			start = i
+			continue
+		}
+		// U+2028 and U+2029 are valid JSON but are line terminators in
+		// JavaScript source, so encoding/json escapes them; a payload that
+		// is only ever handed to JSON.parse would not need it, but matching
+		// the standard library exactly is what lets the fuzz test be a
+		// simple comparison.
+		if r == '\u2028' || r == '\u2029' {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, '\\', 'u', '2', '0', '2', hexDigits[r&0xF])
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
+}
+
+// appendJSONFloat writes one float the way encoding/json would, with the
+// one difference that a NaN or an infinity becomes 0 instead of an error.
+// encoding/json refuses them, which would fail the whole snapshot and blank
+// the grid over one unrepresentable cell; a dashboard that loses a tick
+// because one tempdb figure divided by zero somewhere upstream is a worse
+// answer than a zero in that cell.
+func appendJSONFloat(dst []byte, f float64) []byte {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return append(dst, '0')
+	}
+	abs := math.Abs(f)
+	format := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = 'e'
+	}
+	dst = strconv.AppendFloat(dst, f, format, -1, 64)
+	if format == 'e' {
+		// Go prints e+09 where JSON wants e+9; encoding/json does this
+		// same trim.
+		n := len(dst)
+		if n >= 4 && dst[n-4] == 'e' && dst[n-3] == '-' && dst[n-2] == '0' {
+			dst[n-2] = dst[n-1]
+			dst = dst[:n-1]
+		}
+	}
+	return dst
+}
+
+// MarshalJSON writes the row as the positional array rowFields describes.
+func (r Row) MarshalJSON() ([]byte, error) {
+	b := make([]byte, 0, 160)
+	b = append(b, '[')
+	b = strconv.AppendInt(b, r.SPID, 10)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, int64(r.RequestID), 10)
+	b = append(b, ',')
+	b = appendJSONString(b, r.RefKey)
+	b = append(b, ',')
+	b = appendJSONString(b, r.Status)
+	b = append(b, ',')
+	b = appendJSONString(b, r.Database)
+	b = append(b, ',')
+	b = appendJSONString(b, r.Command)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, r.BlockedBy, 10)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, int64(r.Depth), 10)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, r.ElapsedMs, 10)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, r.CPUMs, 10)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, r.Reads, 10)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, r.Writes, 10)
+	b = append(b, ',')
+	b = appendJSONFloat(b, r.TempdbMB)
+	b = append(b, ',')
+	b = appendJSONFloat(b, r.GrantMB)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, int64(r.DOP), 10)
+	b = append(b, ',')
+	b = appendJSONString(b, r.WaitType)
+	b = append(b, ',')
+	b = strconv.AppendInt(b, r.WaitMs, 10)
+	b = append(b, ',')
+	b = appendJSONFloat(b, r.Percent)
+	return append(b, ']'), nil
+}
+
+// UnmarshalJSON reads the array form back. Nothing in the product needs it
+// (the browser is the only consumer and it does not speak Go), but a type
+// with a custom MarshalJSON and no inverse is one no test can round-trip,
+// and a wire format nobody can decode in tests is a wire format nobody
+// checks.
+func (r *Row) UnmarshalJSON(b []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if len(raw) != len(rowFields) {
+		return fmt.Errorf("web: row has %d columns, want %d", len(raw), len(rowFields))
+	}
+	targets := []any{
+		&r.SPID, &r.RequestID, &r.RefKey, &r.Status, &r.Database, &r.Command,
+		&r.BlockedBy, &r.Depth, &r.ElapsedMs, &r.CPUMs, &r.Reads, &r.Writes,
+		&r.TempdbMB, &r.GrantMB, &r.DOP, &r.WaitType, &r.WaitMs, &r.Percent,
+	}
+	for i, t := range targets {
+		if err := json.Unmarshal(raw[i], t); err != nil {
+			return fmt.Errorf("web: row column %s: %w", rowFields[i], err)
+		}
+	}
+	return nil
+}
+
 // Ref holds what stays constant for one session's current statement: sent
 // once, referenced afterwards by every row that shares this key.
 type Ref struct {
@@ -90,11 +277,33 @@ type Ref struct {
 // so a JavaScript consumer can test capability membership without knowing
 // Go's bit layout for model.Capabilities.
 type StatusPayload struct {
-	Sqltop    string   `json:"sqltop"`
-	Connected bool     `json:"connected"`
-	Message   string   `json:"message,omitempty"`
-	Instance  string   `json:"instance"`
-	Version   string   `json:"version"`
+	Sqltop    string `json:"sqltop"`
+	Connected bool   `json:"connected"`
+	Message   string `json:"message,omitempty"`
+	Instance  string `json:"instance"`
+	Version   string `json:"version"`
+	// Host, Edition and StartedAt complete the first row of spec section
+	// 6's dashboard table, "instance, host, edition, version, uptime,
+	// once at connection". They are per-connection invariants and by the
+	// logic of Ref above they ought to travel once rather than on every
+	// tick. They do not, because the mechanism that would deliver them
+	// once is the reference table, which is keyed per session of the
+	// monitored server and has nothing to do with the client's own
+	// connection, so this would need a second delivery mechanism built
+	// for three strings. Measured at 74 bytes of a 22 kB snapshot, 0.3 %.
+	// The reference table exists because SQL text and program name were
+	// 31 % of the payload; this is three orders of magnitude away from
+	// that and buying it a mechanism would be the abstraction rule's
+	// exact failure case.
+	Host    string `json:"host,omitempty"`
+	Edition string `json:"edition,omitempty"`
+	// StartedAt is the instance's start time in Unix milliseconds, zero
+	// when unknown. Sent as an instant rather than as an uptime duration
+	// so the page can count the uptime up between ticks instead of
+	// freezing it at whatever the last snapshot said, and so a throttled
+	// tier that slows the stream to eight seconds does not make the
+	// uptime visibly stutter.
+	StartedAt int64    `json:"startedAt,omitempty"`
 	Caps      []string `json:"caps,omitempty"`
 	// CostMsPerSecond is collector.Status.CostMsPerSecond: the tool's own
 	// server CPU cost, averaged over the observation budget's sliding
@@ -104,6 +313,41 @@ type StatusPayload struct {
 	// inside the throttle message, which only renders once the tool is
 	// already throttled.
 	CostMsPerSecond float64 `json:"costMsPerSecond"`
+}
+
+// startedAtMillis converts the instance start time for the wire, mapping
+// the zero time to zero rather than to the year 1 in milliseconds. The
+// client shows an uptime only for a nonzero value: a server whose start
+// time was not read is one whose uptime is unknown, and "up 2025 years" is
+// the plausible-looking lie the whole Available convention exists to stop.
+func startedAtMillis(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
+// newStatusPayload is the single place a collector.Status becomes a
+// StatusPayload. It exists because there were two: Encoder.Snapshot built
+// one for the stream and Server.status built another for /api/status, and
+// the day host, edition and the start time were added to the struct only
+// the first one learned about them, so the same tool reported different
+// facts about the same server on two of its own endpoints. Adding a field
+// to StatusPayload must not require remembering where else it is
+// assembled.
+func newStatusPayload(st collector.Status) StatusPayload {
+	return StatusPayload{
+		Sqltop:          buildinfo.String(),
+		Connected:       st.Connected,
+		Message:         st.Message,
+		Instance:        st.Info.Instance,
+		Version:         st.Info.ProductVersion,
+		Host:            st.Info.Host,
+		Edition:         st.Info.Edition,
+		StartedAt:       startedAtMillis(st.Info.StartedAt),
+		Caps:            capNames(st.Caps),
+		CostMsPerSecond: st.CostMsPerSecond,
+	}
 }
 
 // capName is checked against every bit in model.Capabilities in this fixed
@@ -140,12 +384,20 @@ type SnapshotPayload struct {
 	TS   int64          `json:"ts"`
 	Rows []Row          `json:"rows"`
 	Refs map[string]Ref `json:"refs,omitempty"`
-	// Figures is also ahead of its consumer: no dashboard ships with task
-	// 14's request grid (that is UI-plan work, spec section 6), so the
-	// client never reads this today. About 1.2 kB of a typical 22 kB
-	// snapshot. Kept on the wire now for the same reason as Row.Percent
-	// above: the collector already produces it, and the alternative is
-	// adding it back later as its own wire-format change.
+	// Cols names the columns of every Row array, in order. Sent once per
+	// connection, on the first snapshot, for the same reason the reference
+	// table exists: it never changes for the life of a connection, and a
+	// client that reconnects gets a fresh Encoder and is told again.
+	Cols []string `json:"cols,omitempty"`
+	// Figures carries the dashboard of spec section 6. It was on the wire
+	// for a release before anything read it, which is why it is a map of
+	// model.Figure rather than a struct: the collector merges four tiers
+	// into one keyed set at different periods, and a fixed struct would
+	// have to invent a zero for every tier that has not reported yet,
+	// which is the one thing model.Figure.Available exists to prevent. A
+	// key absent from this map and a key present with Available false are
+	// deliberately different things, and the page treats them the same
+	// way: no number.
 	Figures map[string]model.Figure `json:"figures,omitempty"`
 	Status  StatusPayload           `json:"status"`
 }
@@ -163,6 +415,12 @@ type Encoder struct {
 	seq  uint64
 	sent map[string]struct{} // ref keys already delivered to this client
 }
+
+// firstSnapshot reports whether the column header still has to go out. It
+// is derived from seq rather than kept as its own flag: two pieces of state
+// that must agree about the same thing are two pieces of state that can
+// disagree.
+func (e *Encoder) firstSnapshot() bool { return e.seq == 1 }
 
 func NewEncoder() *Encoder { return &Encoder{sent: map[string]struct{}{}} }
 
@@ -265,17 +523,12 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 		// sampled: rows can be empty (a session churn with nothing running)
 		// or span more than one sample time, and the client only needs a
 		// single instant to measure its own staleness against.
-		TS:   time.Now().UnixMilli(),
-		Rows: make([]Row, 0, len(rows)),
-		Status: StatusPayload{
-			Sqltop:          buildinfo.String(),
-			Connected:       st.Connected,
-			Message:         st.Message,
-			Instance:        st.Info.Instance,
-			Version:         st.Info.ProductVersion,
-			Caps:            capNames(st.Caps),
-			CostMsPerSecond: st.CostMsPerSecond,
-		},
+		TS:     time.Now().UnixMilli(),
+		Rows:   make([]Row, 0, len(rows)),
+		Status: newStatusPayload(st),
+	}
+	if e.firstSnapshot() {
+		out.Cols = rowFields
 	}
 
 	if figures != nil {

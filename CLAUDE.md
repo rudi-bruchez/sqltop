@@ -24,6 +24,29 @@ rules; read it before writing code. In short:
 - Debt is written down where it lives, with the reason and the way out.
 - Measure before optimising. Guessing at performance here has a poor record.
 
+## Comments
+
+Say why, in as few words as it can be said. A comment earns its place by
+explaining something the code cannot; anything else is a second copy of the
+code that will fall out of date.
+
+- No archaeology. No "fix round 2", no task numbers, no account of what the
+  code used to do or which review found what. Git has all of that, keeps it
+  accurate, and does not make the next reader scroll past it.
+- Do not restate a measurement that lives in `docs/SPECS.md`. Name the
+  section and give the one number that matters.
+- JavaScript especially. `internal/web/assets/app.js` is served inline in
+  every page, so its comments are read far more often than they are useful.
+  They were 43 % of the file once. Keep them near a quarter.
+- The exception, and it is the only one: the `setup-region: begin` and
+  `setup-region: end` markers in `app.js` are read verbatim by
+  `app_assets_test.go` to tell setup work from the render path. They are
+  code, not commentary. Read that test before touching them.
+
+The pass that produced this rule was applied to `app.js`. The Go files have
+not had it, and several still carry essays and review history. Trimming them
+is worth doing and has not been done.
+
 ## Hard constraints
 
 - Pure Go, no CGO. The binary is static and cross-compiles in one command.
@@ -62,6 +85,13 @@ only so an agent reading this file alone does not have to guess.
 ## Before committing
 
 `gofmt` clean and `go vet ./...` clean.
+
+`deno lint internal/web/assets/app.js` clean. Deno rather than eslint: one
+static binary, no `package.json`, no `node_modules` and no configuration
+file, in a repository that otherwise has no JavaScript toolchain. The gate
+also runs from `go test ./internal/web`, which finds the binary on the PATH
+or in deno's default install directory and skips when it finds neither, so
+a machine without it still builds and tests.
 
 `bench/` is a local rendering harness and is deliberately not tracked in git.
 It still has to build when the tree does, but only on a machine that has it.

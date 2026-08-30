@@ -54,6 +54,19 @@ var counterDefs = []counterDef{
 	{key: "target_server_memory_kb", object: "Memory Manager", name: "Target Server Memory (KB)", kind: kindRaw, unit: "KB"},
 	{key: "total_server_memory_kb", object: "Memory Manager", name: "Total Server Memory (KB)", kind: kindRaw, unit: "KB"},
 	{key: "memory_grants_pending", object: "Memory Manager", name: "Memory Grants Pending", kind: kindRaw, unit: ""},
+	// Spec section 6 names sys.dm_exec_query_resource_semaphores as the
+	// source for grants pending and outstanding. Both numbers are also
+	// Memory Manager counters, which means this catalogue's existing round
+	// trip already carries them: reading the semaphore view instead would
+	// add a query per tick to fetch what is arriving anyway, and reading
+	// pending from the counter while reading outstanding from the view
+	// would be the two-sources-for-one-figure mistake the tempdb comment
+	// above warns about. Taken from the counters, both of them, and noted
+	// here because it is a deliberate deviation from the source the spec
+	// names rather than an oversight. The semaphore view earns itself the
+	// day the dashboard wants the per-resource-pool breakdown, which the
+	// counters genuinely cannot give.
+	{key: "memory_grants_outstanding", object: "Memory Manager", name: "Memory Grants Outstanding", kind: kindRaw, unit: ""},
 }
 
 // baseKey is the map key under which a ratio's denominator is delivered.
@@ -133,6 +146,38 @@ func (s *counterState) apply(at time.Time, raw map[string]int64) map[string]mode
 	s.prevAt = at
 	s.seeded = true
 	return out
+}
+
+// rateState differentiates one figure between two samples of a tier that is
+// not the counters tier. It has exactly one user today, the version store's
+// growth rate, and is deliberately not folded into counterState: that type
+// differentiates a whole catalogue of int64 performance counters on the
+// counters tier's goroutine, while this one carries a single float sampled
+// on the space tier's, five seconds apart. Sharing the state between two
+// goroutines to save fifteen lines is how a data race gets written.
+//
+// Unlike a cumulative performance counter, the value here can legitimately
+// go down: a version store shrinks when the transactions holding it end,
+// and reporting that as unavailable would hide the recovery an operator is
+// waiting for. So a negative rate is returned as a real reading, and only
+// an unseeded or non-advancing clock makes it unavailable.
+type rateState struct {
+	prev   float64
+	prevAt time.Time
+	seeded bool
+}
+
+func (r *rateState) rate(at time.Time, cur float64) (float64, bool) {
+	prev, prevAt, seeded := r.prev, r.prevAt, r.seeded
+	r.prev, r.prevAt, r.seeded = cur, at, true
+	if !seeded {
+		return 0, false
+	}
+	elapsed := at.Sub(prevAt).Seconds()
+	if elapsed <= 0 {
+		return 0, false
+	}
+	return (cur - prev) / elapsed, true
 }
 
 // applyLongestTransactionGate overrides longest_transaction_s, which the

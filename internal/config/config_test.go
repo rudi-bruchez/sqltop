@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -294,5 +295,47 @@ func TestSaveRoundTripsThroughTheUserDirectory(t *testing.T) {
 	}
 	if time.Duration(back.Retention) != 7*time.Minute {
 		t.Fatalf("round trip lost the value: %v", back.Retention)
+	}
+}
+
+// TestValidateRejectsCeilings is the other half of the bounds check. An
+// external review found that validate had floors and no ceilings, which
+// leaves the same shape of hole the missing floors left: a value nobody
+// types on purpose, accepted, after which the program behaves strangely for
+// a reason nothing explains. A budget of a million milliseconds a second is
+// the zero-period bug from the other end, since a throttle that can never
+// be exceeded never intervenes.
+func TestValidateRejectsCeilings(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"tier period", func(c *Config) { c.Tiers.Requests = Duration(2 * time.Hour) }, "tiers.requests"},
+		{"cpu history period", func(c *Config) { c.Tiers.CPUHistory = Duration(48 * time.Hour) }, "tiers.cpuHistory"},
+		{"retention", func(c *Config) { c.Retention = Duration(365 * 24 * time.Hour) }, "retention"},
+		{"max samples", func(c *Config) { c.Budget.MaxSamples = 1 << 40 }, "budget.maxSamples"},
+		{"budget", func(c *Config) { c.Budget.ServerCPUMsPerSecond = 1_000_000 }, "budget.serverCpuMsPerSecond"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("validate accepted it; a value this far outside any real configuration is a typo, and accepting it is how the program ends up behaving oddly with nothing to explain why")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name the field %q that caused it", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultsSitInsideTheirOwnBounds is the check that keeps the ceilings
+// honest: a bound tight enough to reject the shipped defaults would be a
+// bound that breaks the tool out of the box.
+func TestDefaultsSitInsideTheirOwnBounds(t *testing.T) {
+	if err := Default().validate(); err != nil {
+		t.Fatalf("the built-in defaults do not pass validation: %v", err)
 	}
 }

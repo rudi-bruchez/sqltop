@@ -317,7 +317,24 @@ func (c *Collector) Status() Status {
 	defer c.mu.RUnlock()
 	used, _, _ := c.bud.State()
 	return Status{
-		Connected:       c.identifyErr == "" && len(c.tierErr) == 0,
+		// Connected answers "is there a working connection to this
+		// server", not "is every tier healthy". Those were the same
+		// question while the grid was the only thing on the page and
+		// stopped being the same one when the dashboard arrived: a login
+		// that may read sys.dm_exec_requests but not the instance-wide
+		// views has a live grid and three failing server tiers, and the
+		// old test showed the connection indicator red over rows that were
+		// visibly updating. The tool contradicting itself about its own
+		// state is the same defect as a figure that shows a plausible
+		// zero, and it is caught by the same rule.
+		//
+		// The tier failures are not hidden by this: each one is in
+		// Message, and every figure it would have produced is greyed by
+		// its own Available flag. What changes is only the claim about the
+		// connection, which is what identifyErr actually measures. Found
+		// by an external reviewer looking at the dashboard rather than at
+		// the grid it was written for.
+		Connected:       c.identifyErr == "",
 		Message:         c.messageLocked(),
 		Info:            c.info,
 		Caps:            c.caps,

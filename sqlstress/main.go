@@ -82,7 +82,11 @@ func run() error {
 	duration := flag.Duration("duration", 0, "override the configured duration")
 	flag.Parse()
 
-	if err := dotenv.Load(*envPath); err != nil {
+	envWarnings, err := dotenv.Load(*envPath)
+	for _, w := range envWarnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	if err != nil {
 		return err
 	}
 

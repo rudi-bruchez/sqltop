@@ -653,10 +653,106 @@ bytes per row:
 That is 47 % of the payload repeated every second for nothing, which is what
 the per-session reference table removes.
 
-One caveat carried forward: these runs measured a grid that only displayed. The
-16 ms budget has not been verified with sorting and filtering active, and both
-change the per-refresh work. It has to be re-measured when they arrive rather
-than assumed to hold.
+The second half of the payload work came later, once the grid was running
+against a real server rather than a generator. With the reference table in
+place, a snapshot at 800 rows still weighed 239 kB and left every second, and
+a row cost 298 bytes. Ninety-eight of those bytes were the eighteen JSON key
+names, their quotes and their colons: a third of everything sent, spent
+restating the same eighteen words eight hundred times a second.
+
+| Row encoding | Bytes per row | Snapshot at 800 rows | Per second |
+|---|---|---|---|
+| Object, one key per column | 298 | 239 kB | 239 kB |
+| Positional array | 191 | 153 kB | 153 kB |
+
+A positional format is a bad idea when nobody sends the header: a column
+added on one side shifts every column after it on the other, nothing fails,
+and reads appear under writes. So the column order travels once per
+connection, on the same terms as the reference table, and the client indexes
+by name through it. The order is checked against the row struct's own field
+tags by reflection, so the two cannot drift.
+
+For comparison, and because it was asked: minifying the page itself, which
+carries the whole interface inline, takes it from 32.0 kB to 18.8 kB. Over
+loopback that is 0.9 ms of transfer and 0.3 ms of JavaScript compilation
+becoming roughly half of each, once, at page load. The stream spends the
+saving in a sixteenth of one tick. The page is left readable.
+
+### Where sorting and filtering belong
+
+The caveat that used to stand here said the 16 ms budget had been measured on
+a grid that only displayed, and had to be re-measured before sorting and
+filtering were built rather than assumed to hold. It has been.
+
+The worry was specific, and it was not about whether JavaScript can sort 800
+rows. The recycled row pool is keyed on session and request id. A sort on a
+column that moves every tick gives almost every pooled row a new identity
+every tick, which throws away the "rewrite only the cells that changed"
+optimisation the 4.8 ms figure depends on. If that were where the cost sat,
+moving the sort into the server would change nothing, because the browser
+would still have to repaint reordered rows.
+
+So every client-side candidate was measured against a server-side twin
+delivering the identical row order, already sorted and filtered in Go, with
+the page doing nothing. The gap inside a pair is what the JavaScript costs;
+what both members share is the cost of the reordering itself. Two sort keys:
+session id, which barely reorders between ticks, and CPU, which moves by a
+different amount on every row every tick and genuinely scrambles the order.
+
+Chrome 151, Linux x86_64, 800 rows, 1 Hz, 5 % churn, 1600 by 1000 viewport,
+122 ticks per mode, against the shipped renderer rather than a copy of it:
+
+| Mode | apply p50 | apply p95 | sort/filter p50 | frame p95 | Time frozen | Scroll lost | Selection lost |
+|---|---|---|---|---|---|---|---|
+| No sort, no filter | 3.7 ms | 6.0 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client sort, stable key | 3.3 ms | 5.6 ms | 0.0 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server sort, stable key | 2.7 ms | 5.5 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client sort, volatile key | 3.7 ms | 6.3 ms | 0.2 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server sort, volatile key | 3.1 ms | 6.3 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client filter | 3.9 ms | 6.9 ms | 0.0 ms | 16.7 ms | 0 % | 5 | 0 |
+| Server filter | 4.3 ms | 6.1 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client filter and volatile sort | 3.6 ms | 5.9 ms | 0.1 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server filter and volatile sort | 4.3 ms | 6.1 ms | - | 16.7 ms | 0 % | 0 | 0 |
+
+Three things settle it.
+
+The pairs do not separate. Every mode sits between 2.7 and 4.3 ms against a
+16 ms budget, and the spread inside a client/server pair is smaller than the
+spread between repeats of the same mode. The direction is the argument, not
+the size: if doing the work in Go helped, the server twin would be
+consistently faster, and it is faster on two of the four pairs and slower on
+the other two, which is what noise looks like. Sorting 800 rows in
+JavaScript costs 0.2 ms.
+
+The frame time does not move at all. 16.7 ms on every mode is one frame at
+60 Hz: the page is hitting the display's own cadence and dropping nothing,
+with no frozen time and no lost selection anywhere.
+
+The feared cost did not materialise, and the reason is worth writing down so
+nobody re-derives the fear. The renderer only paints the visible window,
+about 33 rows, and under a volatile sort the changed-cells optimisation was
+already barely helping: CPU, reads and elapsed move on every row every tick
+regardless. Reordering raises the changed cells per painted row from roughly
+eight to eighteen, which is a few hundred writes a second, not a few
+thousand.
+
+So sorting and filtering are client-side work on data already in the browser.
+That is also the answer that keeps the properties worth keeping: a filter per
+viewer rather than per server, a filter that applies to the retention window
+rather than deciding what was ever collected, and rows that leave the grid
+because they ended rather than because they stopped matching, which the
+protocol cannot otherwise tell apart.
+
+One real finding to carry into the implementation: filtering 800 rows down to
+110 while scrolled toward the bottom cost five scroll positions out of 122
+ticks, and none of the other eight modes lost any. That is the list shrinking
+under the viewport, not the filter running in the wrong place, and it needs
+an answer when the filter ships rather than another measurement.
+
+These figures were taken after the number formatter was fixed. The same nine
+modes measured beforehand ran 5.2 to 6.4 ms, uniformly about 1.4 ms slower,
+with the same conclusion: the whole table moved together, which is what a
+change in a function every mode calls should do.
 
 ## 11. Versioning
 

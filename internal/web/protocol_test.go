@@ -2,6 +2,10 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -506,4 +510,269 @@ func TestReferenceTableSavingsOnARealisticRow(t *testing.T) {
 	if saved < 0.30 {
 		t.Fatalf("steady-state payload is only %.0f%% smaller on a realistic row; the reference table's payoff is sensitive to statement length and should not collapse this far", saved*100)
 	}
+}
+
+// TestBothEndpointsReportTheSameServerFacts closes a drift that had already
+// happened once: /api/status and /api/stream each built their own
+// StatusPayload, so when host, edition and the instance start time were
+// added to the struct only the stream learned about them, and the same tool
+// answered two different things about the same server depending on which of
+// its own endpoints you asked. Comparing the two payloads field by field
+// through the JSON they actually serialise means a field added to
+// StatusPayload and wired into only one of them fails here, without anybody
+// having to remember this file exists.
+func TestBothEndpointsReportTheSameServerFacts(t *testing.T) {
+	st := collector.Status{
+		Connected: true,
+		Message:   "a message",
+		Info: model.ServerInfo{
+			Instance:       "SQL01\\PROD",
+			Host:           "host01",
+			Edition:        "Developer Edition (64-bit)",
+			ProductVersion: "16.0.4265.3",
+			StartedAt:      time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
+		},
+		Caps:            model.Caps(model.CapInstanceWideView),
+		CostMsPerSecond: 12.5,
+	}
+
+	fromStream := NewEncoder().Snapshot(nil, nil, st).Status
+	fromStatus := newStatusPayload(st)
+
+	a, err := json.Marshal(fromStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(fromStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Errorf("the two endpoints disagree about the same server:\n stream: %s\n status: %s", a, b)
+	}
+
+	// Every field the dashboard's first row needs has to survive the trip,
+	// which a comparison of two equally empty payloads would not catch.
+	var got map[string]any
+	if err := json.Unmarshal(a, &got); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]any{
+		"instance":  "SQL01\\PROD",
+		"host":      "host01",
+		"edition":   "Developer Edition (64-bit)",
+		"version":   "16.0.4265.3",
+		"startedAt": float64(st.Info.StartedAt.UnixMilli()),
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %v, want %v", k, got[k], want)
+		}
+	}
+}
+
+// TestUnknownStartTimeIsNotSentAsAnInstant pins the honesty rule on the one
+// field where the zero value is a plausible-looking number rather than an
+// obviously empty string: an unset time.Time marshalled through UnixMilli
+// is a large negative integer, which the page would happily render as an
+// uptime of roughly two thousand years.
+func TestUnknownStartTimeIsNotSentAsAnInstant(t *testing.T) {
+	p := newStatusPayload(collector.Status{Info: model.ServerInfo{Instance: "x"}})
+	if p.StartedAt != 0 {
+		t.Fatalf("StartedAt = %d for a source that could not read it, want 0", p.StartedAt)
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "startedAt") {
+		t.Errorf("payload = %s; an unknown start time must be omitted, not sent as a number the page could render", b)
+	}
+}
+
+// TestRowFieldsMatchTheStruct is what makes the positional row format safe.
+// The client is told the column order once and then indexes by position, so
+// a field added to Row without a matching entry in rowFields would shift
+// every column after it and put reads under writes with nothing failing.
+// Reflection over the json tags, in declaration order, is the only check
+// that cannot itself be forgotten.
+func TestRowFieldsMatchTheStruct(t *testing.T) {
+	rt := reflect.TypeOf(Row{})
+	var tags []string
+	for i := 0; i < rt.NumField(); i++ {
+		tag, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
+		if tag == "" || tag == "-" {
+			t.Fatalf("Row.%s has no json tag; every column has to be nameable on the wire", rt.Field(i).Name)
+		}
+		tags = append(tags, tag)
+	}
+	if !slices.Equal(tags, rowFields) {
+		t.Errorf("rowFields does not match Row's json tags in order:\n struct: %v\n rowFields: %v", tags, rowFields)
+	}
+}
+
+// TestRowRoundTripsThroughTheArrayForm checks the format end to end: every
+// field arrives back in its own place. A transposition of two same-typed
+// neighbours is the defect this format invites and the one a size check
+// alone would miss, so every value here is distinct.
+func TestRowRoundTripsThroughTheArrayForm(t *testing.T) {
+	want := Row{
+		SPID: 51, RequestID: 2, RefKey: "51:abc", Status: "suspended",
+		Database: "OLTP_Main", Command: "SELECT", BlockedBy: 47, Depth: 3,
+		ElapsedMs: 12345, CPUMs: 678, Reads: 90123, Writes: 456,
+		TempdbMB: 7.25, GrantMB: 1024.5, DOP: 8, WaitType: "LCK_M_X",
+		WaitMs: 999, Percent: 42.5,
+	}
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b[0] != '[' {
+		t.Fatalf("row marshalled as %s; the wire format is a positional array, not an object", b)
+	}
+	var got Row
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("%v (from %s)", err, b)
+	}
+	if got != want {
+		t.Errorf("round trip lost or moved a value:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestFirstSnapshotCarriesTheColumnHeaderAndLaterOnesDoNot pins the "sent
+// once" half of the format. Without the header the client cannot read a
+// single row; with it on every tick it would cost the bytes the format was
+// changed to save.
+func TestFirstSnapshotCarriesTheColumnHeaderAndLaterOnesDoNot(t *testing.T) {
+	e := NewEncoder()
+	first := e.Snapshot(nil, nil, collector.Status{})
+	if !slices.Equal(first.Cols, rowFields) {
+		t.Fatalf("first snapshot Cols = %v, want %v", first.Cols, rowFields)
+	}
+	second := e.Snapshot(nil, nil, collector.Status{})
+	if second.Cols != nil {
+		t.Errorf("second snapshot repeats the column header: %v", second.Cols)
+	}
+	// A reconnecting client gets a new encoder and has to be told again,
+	// or its grid would be unreadable for the life of the connection.
+	if again := NewEncoder().Snapshot(nil, nil, collector.Status{}); !slices.Equal(again.Cols, rowFields) {
+		t.Errorf("a fresh encoder did not send the header: %v", again.Cols)
+	}
+}
+
+// FuzzAppendJSONString is why the hand-rolled string writer is allowed to
+// exist. It runs five times per row, 800 rows a second, which is what
+// justifies not calling encoding/json; this proves it produces exactly what
+// encoding/json would, invalid UTF-8, control characters, HTML escaping and
+// the JavaScript line terminators included.
+func FuzzAppendJSONString(f *testing.F) {
+	for _, seed := range []string{
+		"", "plain", `quote " backslash \`, "<script>&amp;", "tab\tnewline\nreturn\r",
+		"\x00\x01\x1f", "café", "日本語", "\xff\xfe invalid", "  ",
+		"emoji 🐢 and a lone surrogate byte \xed\xa0\x80",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		want, err := json.Marshal(s)
+		if err != nil {
+			t.Skip("encoding/json refuses it, so there is nothing to match")
+		}
+		got := appendJSONString(nil, s)
+		if string(got) != string(want) {
+			t.Errorf("appendJSONString(%q)\n got %s\nwant %s", s, got, want)
+		}
+	})
+}
+
+// FuzzAppendJSONFloat holds the number writer to the same standard, with
+// the one documented exception: encoding/json refuses NaN and infinity,
+// and this writes 0 rather than failing a whole snapshot over one cell.
+func FuzzAppendJSONFloat(f *testing.F) {
+	for _, seed := range []float64{0, 1, -1, 0.5, 1e-7, 1e21, 1e-320, 123456.789, math.MaxFloat64} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, v float64) {
+		got := string(appendJSONFloat(nil, v))
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			if got != "0" {
+				t.Errorf("appendJSONFloat(%v) = %s, want 0", v, got)
+			}
+			return
+		}
+		want, err := json.Marshal(v)
+		if err != nil {
+			t.Skip()
+		}
+		if got != string(want) {
+			t.Errorf("appendJSONFloat(%v)\n got %s\nwant %s", v, got, want)
+		}
+	})
+}
+
+// TestMarshalledOrderMatchesTheAdvertisedColumns closes the hole an external
+// review opened by driving it: transposing two same-typed fields in both
+// MarshalJSON and UnmarshalJSON leaves every other test in this package
+// green, because the round trip uses the same wrong order on both sides,
+// while the wire now disagrees with the column header the client indexes
+// by. The browser shows reads under writes and nothing anywhere fails.
+//
+// TestRowFieldsMatchTheStruct checks rowFields against the struct and
+// TestRowRoundTripsThroughTheArrayForm checks Marshal against Unmarshal.
+// Neither checks the one thing that matters: that the order MarshalJSON
+// actually writes is the order rowFields advertises. This does, by filling
+// every field with a value no other field has and reading the marshalled
+// array back position by position.
+func TestMarshalledOrderMatchesTheAdvertisedColumns(t *testing.T) {
+	rt := reflect.TypeOf(Row{})
+	rv := reflect.New(rt).Elem()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rv.Field(i)
+		switch f.Kind() {
+		case reflect.Int, reflect.Int32, reflect.Int64:
+			f.SetInt(int64(100 + i))
+		case reflect.Float64:
+			f.SetFloat(float64(100+i) + 0.5)
+		case reflect.String:
+			f.SetString(fmt.Sprintf("f%d", i))
+		default:
+			t.Fatalf("Row.%s is a %s, which this test cannot fill with a distinguishable value; teach it that kind before adding the field", rt.Field(i).Name, f.Kind())
+		}
+	}
+
+	b, err := json.Marshal(rv.Interface().(Row))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("%v (from %s)", err, b)
+	}
+	if len(got) != len(rowFields) {
+		t.Fatalf("MarshalJSON wrote %d columns, rowFields advertises %d", len(got), len(rowFields))
+	}
+
+	for i, name := range rowFields {
+		field, ok := fieldByJSONTag(rt, rv, name)
+		if !ok {
+			t.Errorf("rowFields[%d] is %q, which is not a json tag on Row", i, name)
+			continue
+		}
+		want, err := json.Marshal(field.Interface())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got[i]) != string(want) {
+			t.Errorf("position %d is advertised as %q but MarshalJSON wrote %s there, and %q holds %s; the wire order and the column header disagree, so the browser will show one column's values under another's label",
+				i, name, got[i], name, want)
+		}
+	}
+}
+
+func fieldByJSONTag(rt reflect.Type, rv reflect.Value, tag string) (reflect.Value, bool) {
+	for i := 0; i < rt.NumField(); i++ {
+		if name, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ","); name == tag {
+			return rv.Field(i), true
+		}
+	}
+	return reflect.Value{}, false
 }

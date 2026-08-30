@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/window"
@@ -261,16 +260,8 @@ func (s *Server) status(rw http.ResponseWriter, _ *http.Request) {
 	st := s.col.Status()
 	oldest, samples, capped := s.win.Depth()
 	writeJSON(rw, statusResponse{
-		StatusPayload: StatusPayload{
-			Sqltop:          buildinfo.String(),
-			Connected:       st.Connected,
-			Message:         st.Message,
-			Instance:        st.Info.Instance,
-			Version:         st.Info.ProductVersion,
-			Caps:            capNames(st.Caps),
-			CostMsPerSecond: st.CostMsPerSecond,
-		},
-		Window: windowInfo{Oldest: oldest, Samples: samples, Capped: capped},
+		StatusPayload: newStatusPayload(st),
+		Window:        windowInfo{Oldest: oldest, Samples: samples, Capped: capped},
 	})
 }
 
