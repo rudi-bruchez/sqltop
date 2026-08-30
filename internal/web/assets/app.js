@@ -41,6 +41,15 @@ function fDur(sec) {
   return s + "s";
 }
 
+// A capture spans minutes at most, so a clock reading, not a date, is what
+// tells one row from the next.
+function fClockMs(iso) {
+  const d = new Date(iso);
+  const p2 = (x) => String(x).padStart(2, "0");
+  const p3 = (x) => String(x).padStart(3, "0");
+  return p2(d.getHours()) + ":" + p2(d.getMinutes()) + ":" + p2(d.getSeconds()) + "." + p3(d.getMilliseconds());
+}
+
 const token = new URLSearchParams(location.search).get("t") || "";
 
 // Per-session invariants, sent once. A row carries only the key; the SQL
@@ -256,6 +265,23 @@ const CELL_SESSIONWAITS = {
   signal_ms: { num: true, text: (r) => n0(r.signal_ms) },
 };
 
+const CELL_CAPTURE = {
+  at: { text: (r) => fClockMs(r.at) },
+  kind: { text: (r) => r.kind },
+  database: { text: (r) => r.database || "" },
+  // Microseconds in, milliseconds out, with decimals kept.
+  duration_ms: { num: true, text: (r) => (r.duration_us / 1000).toFixed(2) },
+  cpu_ms: { num: true, text: (r) => (r.cpu_us / 1000).toFixed(2) },
+  logical_reads: { num: true, text: (r) => n0(r.logical_reads) },
+  writes: { num: true, text: (r) => n0(r.writes) },
+  rows: { num: true, text: (r) => n0(r.row_count) },
+  result: { text: (r) => r.result || "" },
+  object: { text: (r) => r.object || "" },
+  application: { text: (r) => r.application || "" },
+  user: { text: (r) => r.user || "" },
+  text: { text: (r) => r.text || "" },
+};
+
 const CELL_LOGS = {
   database: { text: (r) => r.database },
   size_mb: { num: true, text: (r) => n2(r.size_mb) },
@@ -278,6 +304,7 @@ const CELLS = {
   plan: CELL_PLAN,
   history: CELL_HISTORY,
   sessionwaits: CELL_SESSIONWAITS,
+  capture: CELL_CAPTURE,
 };
 
 // The columns actually drawn in the grid, in order. Built by applyColumns
