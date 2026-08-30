@@ -702,25 +702,27 @@ different amount on every row every tick and genuinely scrambles the order.
 Chrome 151, Linux x86_64, 800 rows, 1 Hz, 5 % churn, 1600 by 1000 viewport,
 122 ticks per mode, against the shipped renderer rather than a copy of it:
 
-| Mode | apply p50 | apply p95 | sort/filter p50 | frame p95 | Time frozen | Selection lost |
-|---|---|---|---|---|---|---|
-| No sort, no filter | 5.2 ms | 7.0 ms | - | 16.7 ms | 0 % | 0 |
-| Client sort, stable key | 5.2 ms | 7.9 ms | 0.0 ms | 16.7 ms | 0 % | 0 |
-| Server sort, stable key | 4.6 ms | 6.6 ms | - | 16.7 ms | 0 % | 0 |
-| Client sort, volatile key | 4.3 ms | 6.6 ms | 0.2 ms | 16.7 ms | 0 % | 0 |
-| Server sort, volatile key | 5.2 ms | 7.3 ms | - | 16.7 ms | 0 % | 0 |
-| Client filter | 5.5 ms | 8.4 ms | 0.0 ms | 16.7 ms | 0 % | 0 |
-| Server filter | 4.9 ms | 7.5 ms | - | 16.7 ms | 0 % | 0 |
-| Client filter and volatile sort | 5.0 ms | 7.4 ms | 0.0 ms | 16.7 ms | 0 % | 0 |
-| Server filter and volatile sort | 6.4 ms | 9.8 ms | - | 16.8 ms | 0 % | 0 |
+| Mode | apply p50 | apply p95 | sort/filter p50 | frame p95 | Time frozen | Scroll lost | Selection lost |
+|---|---|---|---|---|---|---|---|
+| No sort, no filter | 3.7 ms | 6.0 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client sort, stable key | 3.3 ms | 5.6 ms | 0.0 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server sort, stable key | 2.7 ms | 5.5 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client sort, volatile key | 3.7 ms | 6.3 ms | 0.2 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server sort, volatile key | 3.1 ms | 6.3 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client filter | 3.9 ms | 6.9 ms | 0.0 ms | 16.7 ms | 0 % | 5 | 0 |
+| Server filter | 4.3 ms | 6.1 ms | - | 16.7 ms | 0 % | 0 | 0 |
+| Client filter and volatile sort | 3.6 ms | 5.9 ms | 0.1 ms | 16.7 ms | 0 % | 0 | 0 |
+| Server filter and volatile sort | 4.3 ms | 6.1 ms | - | 16.7 ms | 0 % | 0 | 0 |
 
 Three things settle it.
 
-The pairs do not separate. Every mode sits between 4.3 and 6.4 ms against a
+The pairs do not separate. Every mode sits between 2.7 and 4.3 ms against a
 16 ms budget, and the spread inside a client/server pair is smaller than the
-spread between repeats. The direction is the argument, not the size: if
-doing the work in Go helped, the server twin would be consistently faster,
-and twice it is slower. Sorting 800 rows in JavaScript costs 0.2 ms.
+spread between repeats of the same mode. The direction is the argument, not
+the size: if doing the work in Go helped, the server twin would be
+consistently faster, and it is faster on two of the four pairs and slower on
+the other two, which is what noise looks like. Sorting 800 rows in
+JavaScript costs 0.2 ms.
 
 The frame time does not move at all. 16.7 ms on every mode is one frame at
 60 Hz: the page is hitting the display's own cadence and dropping nothing,
@@ -742,10 +744,15 @@ because they ended rather than because they stopped matching, which the
 protocol cannot otherwise tell apart.
 
 One real finding to carry into the implementation: filtering 800 rows down to
-110 while scrolled toward the bottom cost three scroll positions out of 122
-ticks. That is the list shrinking under the viewport, not the filter running
-in the wrong place, and it needs an answer when the filter ships rather than
-a measurement.
+110 while scrolled toward the bottom cost five scroll positions out of 122
+ticks, and none of the other eight modes lost any. That is the list shrinking
+under the viewport, not the filter running in the wrong place, and it needs
+an answer when the filter ships rather than another measurement.
+
+These figures were taken after the number formatter was fixed. The same nine
+modes measured beforehand ran 5.2 to 6.4 ms, uniformly about 1.4 ms slower,
+with the same conclusion: the whole table moved together, which is what a
+change in a function every mode calls should do.
 
 ## 11. Versioning
 

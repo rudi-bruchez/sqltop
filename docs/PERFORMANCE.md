@@ -142,6 +142,7 @@ One reused `Intl.NumberFormat` instead:
 |---|---|---|
 | `n0` self time over 45 s | 115.5 ms | 9.6 ms |
 | apply p50 at 800 rows | 5.2 ms | 3.7 ms |
+| apply p50, slowest of nine modes | 6.4 ms | 4.3 ms |
 
 A 27 % cut in the cost of a refresh, from one line, with formatting verified
 byte for byte against what it replaced.
