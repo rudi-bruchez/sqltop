@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sqltop</title>
+<!-- An inline icon, so the browser never asks for /favicon.ico. Without it
+     every page load put two "401 Unauthorized" lines in the console: the
+     favicon request carries no token, and every route on this server
+     requires one by design. Answering it outside the authentication wrapper
+     would have been the wrong fix, since a single unauthenticated route is
+     exactly what TestEveryRouteRequiresTheToken exists to prevent. Not
+     asking is better than answering. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2314161a'/%3E%3Crect x='3' y='9' width='2' height='4' fill='%236fb3d2'/%3E%3Crect x='7' y='5' width='2' height='8' fill='%238fbf7f'/%3E%3Crect x='11' y='7' width='2' height='6' fill='%23d08770'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,7 +27,24 @@
   <div id="build" class="build"></div>
 </header>
 
+<!-- The instance identity of spec section 6's first row: read once at
+     connection and shown above everything else, because every other number
+     on this page is meaningless without knowing which server produced it.
+     Each item is hidden until it has a value rather than showing an empty
+     label, so a source that cannot answer one of them leaves no gap. -->
+<dl id="serverInfo" class="serverInfo">
+  <div class="si" id="siHost" hidden><dt>host</dt><dd id="infoHost"></dd></div>
+  <div class="si" id="siEdition" hidden><dt>edition</dt><dd id="infoEdition"></dd></div>
+  <div class="si" id="siUptime" hidden><dt>uptime</dt><dd id="infoUptime"></dd></div>
+  <div class="si"><dt>active requests</dt><dd id="infoRequests">0</dd></div>
+</dl>
+
 <p id="message" class="message" role="status" aria-live="polite"></p>
+
+<details id="dashboard" class="dashboard" open>
+  <summary>server<span id="dashSpan" class="dashSpan"></span></summary>
+  <div id="dashBody" class="dashBody"></div>
+</details>
 
 <div class="gridScroll">
   <table id="grid" aria-describedby="rowCount">

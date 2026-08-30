@@ -11,6 +11,39 @@ const n0 = (v) => Math.round(v).toLocaleString("en-US");
 const n2 = (v) => Number(v).toFixed(2);
 const NA = '<span class="num na">n/a</span>';
 
+// Dashboard formatters. Each one takes the raw number a model.Figure
+// carries and returns what the tile shows; none of them is ever called for
+// an unavailable figure, so none has to invent a reading.
+const fInt = (v) => n0(v);
+const fNum1 = (v) => Number(v).toFixed(1);
+const fNum2 = (v) => Number(v).toFixed(2);
+const fPct = (v) => Math.round(v) + " %";
+const fPct1 = (v) => Number(v).toFixed(1) + " %";
+const fMB = (v) => (Math.abs(v) >= 1024 ? (v / 1024).toFixed(1) + " GB" : Number(v).toFixed(1) + " MB");
+const fKB = (v) => fMB(v / 1024);
+// Rates lose their decimal once they are large enough for it to be noise.
+const fRate = (v) => (Math.abs(v) >= 100 ? n0(v) + "/s" : Number(v).toFixed(1) + "/s");
+// Signed, because a version store that is shrinking is the answer an
+// operator waiting for a long snapshot reader to finish is looking for, and
+// an unsigned 0.42 would read as still growing.
+const fSigned = (v) => (v >= 0 ? "+" : "") + Number(v).toFixed(2) + " MB/s";
+
+// fDur renders a count of seconds the way a person reads a duration. Used
+// for page life expectancy, the longest running transaction and the
+// instance uptime, all three of which span seconds to weeks.
+function fDur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const p2 = (x) => String(x).padStart(2, "0");
+  if (d) return d + "d " + p2(h) + "h";
+  if (h) return h + "h " + p2(m) + "m";
+  if (m) return m + "m " + p2(s) + "s";
+  return s + "s";
+}
+
 const token = new URLSearchParams(location.search).get("t") || "";
 
 // refs accumulates the per-session invariants the server sends once. A row
@@ -38,6 +71,103 @@ function rowKey(r) { return r.spid + ":" + r.rqid; }
 // 14). hasCap greys the column instead.
 let caps = new Set();
 function hasCap(name) { return caps.has(name); }
+
+// FIG_GROUPS is spec section 6's dashboard, in the order an operator reads
+// a server that is misbehaving: what the CPU is doing, then what memory is
+// doing, then how much work is arriving, then what is holding on to things.
+//
+// Every key here is a key in SnapshotPayload.Figures. A key this list names
+// and the server never sends renders exactly like one the server sends with
+// available false: no number. That is deliberate. The distinction between
+// "this build does not collect it" and "this server cannot answer it"
+// matters to whoever is changing the code and not at all to whoever is
+// looking at a server at three in the morning, and inventing a third visual
+// state for it would only make the page harder to read.
+const FIG_GROUPS = [
+  {
+    title: "cpu and schedulers",
+    tiles: [
+      { key: "sql_cpu_percent", label: "sql server cpu", fmt: fPct },
+      { key: "other_cpu_percent", label: "other processes", fmt: fPct },
+      { key: "runnable_tasks", label: "runnable tasks", fmt: fInt },
+      { key: "current_tasks", label: "current tasks", fmt: fInt },
+      { key: "scheduler_load_factor", label: "load factor", fmt: fNum1 },
+      { key: "schedulers_online", label: "schedulers", fmt: fInt },
+    ],
+  },
+  {
+    title: "memory",
+    tiles: [
+      { key: "total_server_memory_kb", label: "total server memory", fmt: fKB },
+      { key: "target_server_memory_kb", label: "target server memory", fmt: fKB },
+      { key: "buffer_pool_mb", label: "buffer pool", fmt: fMB },
+      { key: "plan_cache_mb", label: "plan cache", fmt: fMB },
+      { key: "query_memory_mb", label: "query memory", fmt: fMB },
+      { key: "page_life_expectancy", label: "page life expectancy", fmt: fDur },
+      // Read windowed, not raw. Spec section 6: the raw counter sits at
+      // 99-point-something on every server forever and says nothing, so
+      // the server differentiates it against its base counter and the
+      // figure below is the reading for the last interval. Page life
+      // expectancy sits next to it because it is the one to trust.
+      { key: "buffer_cache_hit_ratio", label: "cache hit ratio", fmt: fPct1 },
+      { key: "memory_grants_pending", label: "grants pending", fmt: fInt },
+      { key: "memory_grants_outstanding", label: "grants outstanding", fmt: fInt },
+    ],
+  },
+  {
+    title: "throughput",
+    tiles: [
+      { key: "active_requests", label: "active requests", fmt: fInt },
+      { key: "batch_requests_sec", label: "batch requests", fmt: fRate },
+      { key: "compilations_sec", label: "compilations", fmt: fRate },
+      { key: "recompilations_sec", label: "recompilations", fmt: fRate },
+      { key: "full_scans_sec", label: "full scans", fmt: fRate },
+      { key: "page_reads_sec", label: "page reads", fmt: fRate },
+      { key: "page_writes_sec", label: "page writes", fmt: fRate },
+      { key: "lazy_writes_sec", label: "lazy writes", fmt: fRate },
+    ],
+  },
+  {
+    title: "transactions and tempdb",
+    tiles: [
+      { key: "open_transactions", label: "open transactions", fmt: fInt },
+      { key: "longest_transaction_s", label: "longest transaction", fmt: fDur },
+      { key: "tempdb_used_mb", label: "tempdb used", fmt: fMB },
+      { key: "tempdb_free_mb", label: "tempdb free", fmt: fMB },
+      { key: "tempdb_user_objects_mb", label: "tempdb user objects", fmt: fMB },
+      { key: "tempdb_internal_objects_mb", label: "tempdb internal", fmt: fMB },
+      { key: "tempdb_version_store_mb", label: "tempdb version store", fmt: fMB },
+      { key: "version_store_mb", label: "version store", fmt: fMB },
+      { key: "version_store_growth_mb_s", label: "version store growth", fmt: fSigned },
+    ],
+  },
+];
+
+// HISTORY_MAX is how many ticks of history a sparkline keeps. Spec section
+// 6 asks for a sparkline "over the retention window", and this is not that:
+// the retention window is fifteen minutes, which at one tick a second is
+// nine hundred points, and a sparkline a hundred pixels wide cannot draw
+// nine hundred points as anything but a smear. So it keeps what it can
+// actually render, and the panel heading states the span it is showing
+// rather than letting the reader assume it matches the grid's window. The
+// way out, when someone wants the full window, is a real chart in a view of
+// its own (spec section 7), not a wider tile.
+const HISTORY_MAX = 120;
+
+// history holds one series per figure key: parallel arrays of the tick
+// number a reading came from and the reading itself. Unavailable ticks
+// append nothing, so a figure that drops out for a while draws one long
+// straight segment across the gap rather than silently compressing its own
+// time axis, and every sparkline on the page shares one x scale so two
+// tiles side by side can be compared.
+const history = new Map();
+const tiles = new Map();
+// span tracks wall clock against tick numbers, purely so the panel heading
+// can say how much time it is showing. The tick period is not fixed: the
+// observation budget slows the collector down under load, so a hundred and
+// twenty ticks is two minutes on a healthy server and rather more on one
+// that made the tool throttle itself.
+const span = [];
 
 const COLUMNS = [
   { field: "spid", title: "spid", width: 60, html: (r) => `<span class="num">${r.spid}</span>` },
@@ -82,18 +212,105 @@ let spacerTop = null, spacerBottom = null;
 
 // setup-region: begin
 //
-// head() below is the one place this file writes innerHTML outside the
-// per-cell rewrite layout() performs, and it is legitimate: building the
-// header row once, from a fixed column list, is setup work, not the
-// per-tick update path app_assets_test.go's regression guard is
-// protecting. The guard reads the two marker comments around this
-// function, verbatim, to tell setup work apart from the render path; see
-// that file before moving, renaming or removing either marker.
+// The two functions below are the only places this file writes innerHTML
+// outside the per-cell rewrite layout() performs, and both are legitimate:
+// building the header row and the dashboard tiles once, from fixed lists,
+// is setup work, not the per-tick update path app_assets_test.go's
+// regression guard is protecting. The guard reads the two marker comments
+// around them, verbatim, to tell setup work apart from the render path,
+// and it takes the last marker of each kind it finds, so there must be
+// exactly one region: see that file before moving, renaming, splitting or
+// removing either marker.
 function head() {
   $("gridHead").innerHTML = COLUMNS.map((c) => `<th scope="col" style="min-width:${c.width}px">${esc(c.title)}</th>`).join("");
 }
+
+// buildDashboard lays the tiles out once and remembers the two nodes each
+// one updates: the value text and the sparkline's polyline. After this runs
+// the dashboard's per-tick path writes textContent and one attribute per
+// tile and never touches markup again, which is the same discipline the
+// grid is held to and for the same reason.
+function buildDashboard() {
+  $("dashBody").innerHTML = FIG_GROUPS.map((g) => `<section class="figGroup"><h2>${esc(g.title)}</h2><div class="figTiles">` +
+    g.tiles.map((t) => `<div class="tile"><span class="tileLabel">${esc(t.label)}</span>` +
+      `<span class="tileValue na" id="v-${esc(t.key)}">n/a</span>` +
+      `<svg class="spark" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">` +
+      `<polyline id="s-${esc(t.key)}" points=""></polyline></svg></div>`).join("") +
+    `</div></section>`).join("");
+
+  for (const g of FIG_GROUPS) {
+    for (const t of g.tiles) {
+      tiles.set(t.key, { def: t, value: $("v-" + t.key), spark: $("s-" + t.key) });
+    }
+  }
+}
 //
 // setup-region: end
+
+// sparkPoints turns one series into an SVG polyline. The y scale is the
+// series' own minimum to maximum, not an absolute one: a sparkline exists
+// to show a slope, and a cache hit ratio pinned to a 0-100 axis would be a
+// flat line at the top of the tile on every server ever built. A series
+// that genuinely does not move draws through the middle rather than along
+// the floor, where it would read as zero.
+function sparkPoints(h, oldest, newest) {
+  if (h.v.length < 2) return "";
+  let min = Infinity, max = -Infinity;
+  for (const v of h.v) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  const width = Math.max(1, newest - oldest);
+  const range = max - min;
+  const out = new Array(h.v.length);
+  for (let i = 0; i < h.v.length; i++) {
+    const x = ((h.t[i] - oldest) / width) * 100;
+    const y = range > 0 ? 18 - ((h.v[i] - min) / range) * 16 : 10;
+    out[i] = x.toFixed(1) + "," + y.toFixed(1);
+  }
+  return out.join(" ");
+}
+
+// updateDashboard is the dashboard's whole render path. Like layout(), it
+// writes only what changed, and it writes text and attributes, never
+// markup.
+function updateDashboard(figures, seq, ts) {
+  const oldest = seq - HISTORY_MAX + 1;
+
+  span.push({ seq: seq, ts: ts });
+  while (span.length && span[0].seq < oldest) span.shift();
+  const seconds = span.length > 1 ? (span[span.length - 1].ts - span[0].ts) / 1000 : 0;
+  const label = seconds > 0 ? " \u00b7 last " + fDur(seconds) : "";
+  if ($("dashSpan").textContent !== label) $("dashSpan").textContent = label;
+
+  for (const [key, t] of tiles) {
+    const f = figures[key];
+    const ok = !!(f && f.available);
+    // An unavailable figure says so. It never falls back to the last value
+    // it had, which would be the most convincing lie this page could tell:
+    // a stale number that looks live is worse than no number, and the whole
+    // Available flag exists to keep that from happening at any layer.
+    const text = ok ? t.def.fmt(f.value) : "n/a";
+    if (t.value.textContent !== text) t.value.textContent = text;
+    t.value.classList.toggle("na", !ok);
+
+    let h = history.get(key);
+    if (!h) {
+      h = { t: [], v: [] };
+      history.set(key, h);
+    }
+    if (ok) {
+      h.t.push(seq);
+      h.v.push(f.value);
+    }
+    while (h.t.length && h.t[0] < oldest) {
+      h.t.shift();
+      h.v.shift();
+    }
+    const pts = sparkPoints(h, oldest, seq);
+    if (t.spark.getAttribute("points") !== pts) t.spark.setAttribute("points", pts);
+  }
+}
 
 function ensureSpacers() {
   const body = $("gridBody");
@@ -174,6 +391,27 @@ function layout() {
   }
 }
 
+// startedAt is the instance start time in Unix milliseconds, zero when the
+// source could not read it. The uptime ticks locally off this instant
+// rather than being recomputed from each snapshot, so it keeps counting at
+// one second even when the observation budget has slowed the stream down.
+let startedAt = 0;
+
+function infoRow(rowID, valueID, text) {
+  const has = !!text;
+  $(rowID).hidden = !has;
+  if (has && $(valueID).textContent !== text) $(valueID).textContent = text;
+}
+
+function updateUptime() {
+  if (!startedAt) {
+    $("siUptime").hidden = true;
+    return;
+  }
+  $("siUptime").hidden = false;
+  $("infoUptime").textContent = fDur((Date.now() - startedAt) / 1000);
+}
+
 function applyStatus(st, seq) {
   const live = !!st.connected;
   $("dot").classList.toggle("live", live);
@@ -187,6 +425,11 @@ function applyStatus(st, seq) {
   if (st.sqltop) $("build").textContent = st.sqltop;
   $("instance").textContent = st.instance || "connecting...";
   $("version").textContent = st.version || "";
+  infoRow("siHost", "infoHost", st.host || "");
+  infoRow("siEdition", "infoEdition", st.edition || "");
+  startedAt = st.startedAt || 0;
+  updateUptime();
+  $("infoRequests").textContent = n0(data.length);
   $("message").textContent = st.message || "";
   $("rowCount").textContent = data.length + " requests";
   $("seq").textContent = "tick " + seq;
@@ -217,6 +460,15 @@ es.addEventListener("snapshot", (e) => {
 
   layout();
   applyStatus(p.status || {}, p.seq);
+
+  // Active requests is the one dashboard figure the server does not send.
+  // Spec section 6 lists it as "counted from the grid data, free", and it
+  // genuinely is: the rows are already here, so putting it on the wire
+  // would be paying for a number we can read off what just arrived. It is
+  // injected into a copy of the figures rather than into p.figures so
+  // nothing downstream can mistake it for something the collector measured.
+  const figures = Object.assign({ active_requests: { value: data.length, unit: "", available: true } }, p.figures || {});
+  updateDashboard(figures, p.seq, p.ts || Date.now());
 });
 es.addEventListener("error", () => {
   $("dot").classList.remove("live");
@@ -230,3 +482,9 @@ document.querySelector(".gridScroll").addEventListener("scroll", layout, { passi
 // 1, task 14).
 window.addEventListener("resize", layout);
 head();
+buildDashboard();
+// The uptime counts locally rather than waiting for the next snapshot, so
+// it moves at one second on a throttled stream and keeps moving while the
+// connection is down, which is honest: the instance is still up, this tool
+// just cannot see it.
+setInterval(updateUptime, 1000);

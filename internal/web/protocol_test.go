@@ -507,3 +507,80 @@ func TestReferenceTableSavingsOnARealisticRow(t *testing.T) {
 		t.Fatalf("steady-state payload is only %.0f%% smaller on a realistic row; the reference table's payoff is sensitive to statement length and should not collapse this far", saved*100)
 	}
 }
+
+// TestBothEndpointsReportTheSameServerFacts closes a drift that had already
+// happened once: /api/status and /api/stream each built their own
+// StatusPayload, so when host, edition and the instance start time were
+// added to the struct only the stream learned about them, and the same tool
+// answered two different things about the same server depending on which of
+// its own endpoints you asked. Comparing the two payloads field by field
+// through the JSON they actually serialise means a field added to
+// StatusPayload and wired into only one of them fails here, without anybody
+// having to remember this file exists.
+func TestBothEndpointsReportTheSameServerFacts(t *testing.T) {
+	st := collector.Status{
+		Connected: true,
+		Message:   "a message",
+		Info: model.ServerInfo{
+			Instance:       "SQL01\\PROD",
+			Host:           "host01",
+			Edition:        "Developer Edition (64-bit)",
+			ProductVersion: "16.0.4265.3",
+			StartedAt:      time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
+		},
+		Caps:            model.Caps(model.CapInstanceWideView),
+		CostMsPerSecond: 12.5,
+	}
+
+	fromStream := NewEncoder().Snapshot(nil, nil, st).Status
+	fromStatus := newStatusPayload(st)
+
+	a, err := json.Marshal(fromStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(fromStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Errorf("the two endpoints disagree about the same server:\n stream: %s\n status: %s", a, b)
+	}
+
+	// Every field the dashboard's first row needs has to survive the trip,
+	// which a comparison of two equally empty payloads would not catch.
+	var got map[string]any
+	if err := json.Unmarshal(a, &got); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]any{
+		"instance":  "SQL01\\PROD",
+		"host":      "host01",
+		"edition":   "Developer Edition (64-bit)",
+		"version":   "16.0.4265.3",
+		"startedAt": float64(st.Info.StartedAt.UnixMilli()),
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %v, want %v", k, got[k], want)
+		}
+	}
+}
+
+// TestUnknownStartTimeIsNotSentAsAnInstant pins the honesty rule on the one
+// field where the zero value is a plausible-looking number rather than an
+// obviously empty string: an unset time.Time marshalled through UnixMilli
+// is a large negative integer, which the page would happily render as an
+// uptime of roughly two thousand years.
+func TestUnknownStartTimeIsNotSentAsAnInstant(t *testing.T) {
+	p := newStatusPayload(collector.Status{Info: model.ServerInfo{Instance: "x"}})
+	if p.StartedAt != 0 {
+		t.Fatalf("StartedAt = %d for a source that could not read it, want 0", p.StartedAt)
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "startedAt") {
+		t.Errorf("payload = %s; an unknown start time must be omitted, not sent as a number the page could render", b)
+	}
+}

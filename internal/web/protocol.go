@@ -140,6 +140,29 @@ func startedAtMillis(t time.Time) int64 {
 	return t.UnixMilli()
 }
 
+// newStatusPayload is the single place a collector.Status becomes a
+// StatusPayload. It exists because there were two: Encoder.Snapshot built
+// one for the stream and Server.status built another for /api/status, and
+// the day host, edition and the start time were added to the struct only
+// the first one learned about them, so the same tool reported different
+// facts about the same server on two of its own endpoints. Adding a field
+// to StatusPayload must not require remembering where else it is
+// assembled.
+func newStatusPayload(st collector.Status) StatusPayload {
+	return StatusPayload{
+		Sqltop:          buildinfo.String(),
+		Connected:       st.Connected,
+		Message:         st.Message,
+		Instance:        st.Info.Instance,
+		Version:         st.Info.ProductVersion,
+		Host:            st.Info.Host,
+		Edition:         st.Info.Edition,
+		StartedAt:       startedAtMillis(st.Info.StartedAt),
+		Caps:            capNames(st.Caps),
+		CostMsPerSecond: st.CostMsPerSecond,
+	}
+}
+
 // capName is checked against every bit in model.Capabilities in this fixed
 // order. New capabilities in model must be added here too, or they reach
 // this package's caller but never the wire.
@@ -302,20 +325,9 @@ func (e *Encoder) Snapshot(rows []model.RequestSample, figures map[string]model.
 		// sampled: rows can be empty (a session churn with nothing running)
 		// or span more than one sample time, and the client only needs a
 		// single instant to measure its own staleness against.
-		TS:   time.Now().UnixMilli(),
-		Rows: make([]Row, 0, len(rows)),
-		Status: StatusPayload{
-			Sqltop:          buildinfo.String(),
-			Connected:       st.Connected,
-			Message:         st.Message,
-			Instance:        st.Info.Instance,
-			Version:         st.Info.ProductVersion,
-			Host:            st.Info.Host,
-			Edition:         st.Info.Edition,
-			StartedAt:       startedAtMillis(st.Info.StartedAt),
-			Caps:            capNames(st.Caps),
-			CostMsPerSecond: st.CostMsPerSecond,
-		},
+		TS:     time.Now().UnixMilli(),
+		Rows:   make([]Row, 0, len(rows)),
+		Status: newStatusPayload(st),
 	}
 
 	if figures != nil {

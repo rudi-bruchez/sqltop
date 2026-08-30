@@ -160,6 +160,22 @@ func TestIndexPageHasNoSeparatelyFetchedSubresource(t *testing.T) {
 	if !strings.Contains(body, "<script>") || !strings.Contains(body, "gridScroll") {
 		t.Fatal("index page does not appear to carry app.js inlined")
 	}
+
+	// The favicon is the one request a browser makes that no markup asks
+	// for. Driving the real page in headless Chromium found it: two "401
+	// Unauthorized" lines in the console on every load, because
+	// /favicon.ico carries no token and every route here requires one.
+	// Declaring an inline icon stops the request being made at all, which
+	// is the only fix that does not put an unauthenticated route on this
+	// server. An icon declared as anything but a data: URI would be a
+	// separately fetched subresource again, and would 401 exactly like the
+	// one it replaced.
+	if !strings.Contains(body, `rel="icon"`) {
+		t.Fatal("index page declares no icon, so a browser will request /favicon.ico and be refused for want of a token")
+	}
+	if !strings.Contains(body, `rel="icon" href="data:`) {
+		t.Fatal("the icon is not a data: URI, so it is fetched as its own request and gets the same 401 the missing favicon did")
+	}
 }
 
 // TestIndexPageServesOnlyTheRootPath proves the composed page is not
