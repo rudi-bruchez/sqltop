@@ -172,6 +172,49 @@ func TestCollectorBudgetThrottlesUnderLoad(t *testing.T) {
 	}
 }
 
+// TestCollectorSurfacesTheFullRecoveryMessage crosses the seam between
+// Budget and Collector that let a message go unreachable by construction:
+// Budget.reviseLocked writes "back inside the observation budget, full
+// refresh rate restored" at the exact same moment it drops the level to 0,
+// but messageLocked used to hand that message to the status bar only when
+// level > 0, which is never true right when that particular message is set.
+// Budget's own tests (TestRecoversOneStepAtATime and friends) assert
+// levels, never message text, and Collector's tests that do check Message
+// use a permanently failing tier or Cost, never a budget that recovers all
+// the way to 0 - so neither side's test suite could have caught this on its
+// own. Driven with feed rather than a live Collector.Run, since the real
+// timings involved (an escalate cooldown, then a thirty second recovery
+// period) are too slow to wait out in a test.
+func TestCollectorSurfacesTheFullRecoveryMessage(t *testing.T) {
+	tiers := baseTiers()
+	bud := NewBudget(50, tiers)
+	var total int64
+	now := time.Now()
+
+	// Escalate: 15 s over budget is enough to reach level 1 (see
+	// TestOverBudgetDegradesSpaceFirst for the same shape).
+	feed(bud, &total, now, 15, 80)
+	if _, level, _ := bud.State(); level == 0 {
+		t.Fatal("the budget never escalated; the rest of this test proves nothing without a level to recover from")
+	}
+
+	// Recover all the way to 0: over thirty seconds of quiet readings,
+	// comfortably past recoveryPeriod plus the window-turnover delay
+	// TestRecoversOneStepAtATime documents, so the level actually reaches 0
+	// rather than stopping at 1.
+	feed(bud, &total, now.Add(20*time.Second), 60, 5)
+	if _, level, msg := bud.State(); level != 0 {
+		t.Fatalf("level = %d after a long quiet period, want 0 (msg = %q); this test needs a full recovery to exercise the bug", level, msg)
+	}
+
+	c := New(fake.New(nil), window.New(time.Minute, 1000), bud)
+	got := c.Status().Message
+	want := "back inside the observation budget, full refresh rate restored"
+	if got != want {
+		t.Fatalf("Status().Message = %q, want %q: a DBA watching a server recover must see this, not the warning simply vanishing", got, want)
+	}
+}
+
 // counterSampleFailsSource makes SampleServer fail for the counters tier
 // specifically while every other call, Cost included, keeps working. It
 // exists to prove Cost/Observe run independently of that one query's

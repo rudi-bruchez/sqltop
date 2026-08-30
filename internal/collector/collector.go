@@ -336,8 +336,15 @@ func (c *Collector) messageLocked() string {
 	if len(parts) > 0 {
 		return strings.Join(parts, "; ")
 	}
-	if _, level, msg := c.bud.State(); level > 0 {
-		return msg
-	}
-	return ""
+	// msg, not level > 0: Budget sets its recovery message, "back inside the
+	// observation budget, full refresh rate restored", at the exact same
+	// moment it drops level to 0 (see reviseLocked in budget.go). Gating on
+	// level > 0 made that particular message unreachable by construction,
+	// since it is only ever written once the level has already become 0 -
+	// every intermediate degradation step got announced and the one saying
+	// the tool is healthy again never did. msg is empty until the budget has
+	// changed at least once, so this still returns "" beforehand exactly as
+	// the level > 0 check did.
+	_, _, msg := c.bud.State()
+	return msg
 }
