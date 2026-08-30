@@ -31,13 +31,24 @@ func loopbackRequest(method, target string) *http.Request {
 	return req
 }
 
+// testTiers is config.Default().Tiers with a fast requests period, so the
+// stream tests below do not have to wait out the real one-second default:
+// fix round 1, task 14 made stream.go read the collector's own configured
+// period on every tick rather than a value passed in separately, so this
+// fixture's tiers are now the one and only place that period comes from.
+func testTiers() config.Tiers {
+	tiers := config.Default().Tiers
+	tiers.Requests = config.Duration(80 * time.Millisecond)
+	return tiers
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	w := window.New(time.Minute, 1000)
 	w.Append(time.Now(), []model.RequestSample{{Ref: model.RequestRef{SessionID: 51}, SQLText: "SELECT 1"}})
-	c := collector.New(fake.New(nil), w, collector.NewBudget(50, config.Default().Tiers))
+	c := collector.New(fake.New(nil), w, collector.NewBudget(50, testTiers()))
 
-	s, err := NewServer(c, w, config.Server{Port: 0}, 200*time.Millisecond)
+	s, err := NewServer(c, w, config.Server{Port: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +83,60 @@ func TestCorrectTokenIsAccepted(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 with the run's token", rec.Code)
+	}
+}
+
+// TestIndexPageHasNoSeparatelyFetchedSubresource is the fix round 1
+// regression test for the critical bug a reviewer found by actually
+// opening the printed URL in a browser rather than curling it with an
+// explicit ?t=: a relative URL, <link href="style.css"> or <script
+// src="app.js">, does not inherit the page's own query string, so the
+// browser requested both with no token, authenticate refused both with
+// 401, and the page that loaded was a bare unstyled heading with no grid
+// and no stream. Every check this package ran before this fix round went
+// through curl with the token spelled out on every request, which is
+// exactly the method that cannot see this failure.
+//
+// index now composes style.css and app.js into the document it returns,
+// so this asserts the page declares no subresource a browser would have to
+// fetch on its own, rather than fetching whatever it does declare and
+// requiring 200 on each: the chosen fix is that there is nothing left to
+// fetch.
+func TestIndexPageHasNoSeparatelyFetchedSubresource(t *testing.T) {
+	s := newTestServer(t)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, loopbackRequest(http.MethodGet, "/?t="+s.token))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	for _, needle := range []string{`href="style.css"`, `src="app.js"`, `<link rel="stylesheet"`} {
+		if strings.Contains(body, needle) {
+			t.Fatalf("index page still references %q as a separate URL: a relative reference does not inherit the ?t= query string, so a browser would request it unauthenticated and get 401", needle)
+		}
+	}
+	if !strings.Contains(body, "<style>") || !strings.Contains(body, ":root") {
+		t.Fatal("index page does not appear to carry style.css inlined")
+	}
+	if !strings.Contains(body, "<script>") || !strings.Contains(body, "gridScroll") {
+		t.Fatal("index page does not appear to carry app.js inlined")
+	}
+}
+
+// TestIndexPageServesOnlyTheRootPath proves the composed page is not
+// silently reachable, and therefore servable without the substitutions
+// above, from some other path a stray request might hit now that "/" is a
+// handler function rather than a static file server with its own
+// per-file routing.
+func TestIndexPageServesOnlyTheRootPath(t *testing.T) {
+	s := newTestServer(t)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, loopbackRequest(http.MethodGet, "/nonexistent?t="+s.token))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a path other than /", rec.Code)
 	}
 }
 

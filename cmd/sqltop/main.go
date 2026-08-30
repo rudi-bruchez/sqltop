@@ -77,14 +77,34 @@ func main() {
 
 	win := window.New(cfg.Retention.Std(), cfg.Budget.MaxSamples)
 	col := collector.New(src, win, collector.NewBudget(cfg.Budget.ServerCPUMsPerSecond, cfg.Tiers))
-	go col.Run(ctx)
+	// colDone closes once col.Run actually returns, not merely once ctx is
+	// cancelled: the wait below on it is what keeps the deferred src.Close
+	// above from firing while a tier goroutine is still mid-query against
+	// that same connection (fix round 1, task 14). col.Run's own error is
+	// only logged, not fatal: by the time it returns, ctx is already
+	// cancelled and shutdown is already under way, so there is nothing left
+	// to abort.
+	colDone := make(chan struct{})
+	go func() {
+		defer close(colDone)
+		if err := col.Run(ctx); err != nil {
+			log.Printf("collector stopped: %v", err)
+		}
+	}()
 
-	srv, err := web.NewServer(col, win, cfg.Server, cfg.Tiers.Requests.Std())
+	srv, err := web.NewServer(col, win, cfg.Server)
 	if err != nil {
 		log.Fatal(err)
 	}
+	// The token in this URL is exactly what URL's own doc comment names as
+	// its cost: printing it here sends it to stderr, and from there to
+	// whatever captures this process's output, journald, a CI log, a
+	// terminal scrollback, with whatever permissions that carries. Accepted
+	// for the same reason URL accepts putting it in the address at all;
+	// see that comment for the full reasoning rather than repeating it here.
 	log.Printf("sqltop on %s", srv.URL())
 	if err := srv.Serve(ctx); err != nil {
 		log.Fatal(err)
 	}
+	<-colDone
 }

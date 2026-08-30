@@ -42,6 +42,15 @@ const (
 	CapKillSession
 	CapVersionStoreUsage
 	CapRingBufferCPU
+	// CapRequestDOP reports whether sys.dm_exec_requests carries a dop
+	// column at all: it does not exist before SQL Server 2016, so on an
+	// older server the request grid's dop figure is a substituted literal
+	// zero, not a measurement. This is a version fact rather than a
+	// permission, but it travels on the wire exactly like the others so the
+	// UI has one channel, caps, to decide what to greet as real and what to
+	// grey as unavailable, rather than a second, separate signal for
+	// version-gated columns.
+	CapRequestDOP
 )
 
 type Capabilities uint32

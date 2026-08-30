@@ -97,3 +97,4 @@ h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
 .sqlcell { color: #9aa7b8; overflow: hidden; text-overflow: ellipsis; }
 .blocked { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; text-align: right; display: block; }
+.na { color: var(--dim); font-style: italic; }

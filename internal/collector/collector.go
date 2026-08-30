@@ -293,6 +293,17 @@ func (c *Collector) Server() model.ServerSample {
 	return out
 }
 
+// Period reports the interval tier is currently sampled at, throttle
+// included. It exists so a caller outside this package (fix round 1, task
+// 14's stream handler) can follow the same live period this package's own
+// tier goroutines follow, by asking again on every tick rather than
+// reading it once and caching a value the throttle can move out from
+// under it. bud is unexported, so this is the only way in; it is a plain
+// forward to Budget.Period, which already holds its own lock.
+func (c *Collector) Period(tier model.Tier) time.Duration {
+	return c.bud.Period(tier)
+}
+
 func (c *Collector) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

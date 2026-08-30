@@ -71,7 +71,15 @@ OPTION (RECOMPILE, MAXDOP 1)`
 // "Invalid column name 'dop'", leaving the grid permanently empty on a
 // version spec section 3 promises works. Below 2016, and not Azure SQL
 // Database (which is always current), the DOP column becomes the literal
-// 0 instead.
+// 0 instead. This is a version fact, independent of what caps says: a
+// login can lack every optional right and still be on SQL Server 2022, and
+// TestBuiltQueryGates's "no rights on the tempdb dmv" case pins exactly
+// that down, DOP present with caps otherwise empty. Identify sets
+// model.CapRequestDOP from the identical condition (info.IsAzure() ||
+// info.MajorVersion >= 13) so the browser can grey the same column this
+// gate is deciding, but that is a second read of the same fact for the
+// wire, not the source of truth for this substitution; keep both
+// conditions in sync by hand if either ever changes.
 //
 // sys.dm_db_task_space_usage, behind the tempdb figure, needs a right the
 // probe already checked for as model.CapTempdbPerTask. A login without it

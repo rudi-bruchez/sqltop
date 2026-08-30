@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -8,9 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
@@ -24,15 +25,17 @@ var assetsFS embed.FS
 
 // Server is the loopback HTTP server: it serves the page and the API, and
 // nothing about it is reachable from the network. Spec section 4.3.
+//
+// It no longer carries its own stream period. Fix round 1, task 14: a value
+// read once here and handed to stream.go could not follow the collector's
+// own throttle, which re-reads Budget.Period on every tier iteration; the
+// stream now asks col.Period(model.TierRequests) on every tick instead, so
+// there is nothing left for this struct to cache.
 type Server struct {
 	col      *collector.Collector
 	win      *window.Window
 	token    string
 	listener net.Listener
-	// push is the stream period. It follows the requests tier, so changing
-	// that in the configuration file changes what the browser receives too.
-	// Task 14 is what actually reads it; this task only carries it through.
-	push time.Duration
 }
 
 // NewServer binds 127.0.0.1 and nothing else. There is deliberately no
@@ -40,10 +43,7 @@ type Server struct {
 // sessions on a production server, and a bind on all interfaces would hand
 // that to anyone on the network. cfg.Port is the only knob, and it still
 // only ever selects a port on the loopback address, never the interface.
-func NewServer(c *collector.Collector, w *window.Window, cfg config.Server, push time.Duration) (*Server, error) {
-	if push <= 0 {
-		push = time.Second
-	}
+func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Server, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Port))
 	if err != nil {
 		return nil, fmt.Errorf("web: listen: %w", err)
@@ -53,7 +53,7 @@ func NewServer(c *collector.Collector, w *window.Window, cfg config.Server, push
 		ln.Close()
 		return nil, fmt.Errorf("web: token: %w", err)
 	}
-	return &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln, push: push}, nil
+	return &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln}, nil
 }
 
 // URL is what the tool prints and opens on startup. The token travels in the
@@ -67,9 +67,16 @@ func NewServer(c *collector.Collector, w *window.Window, cfg config.Server, push
 // would need the user to paste a header by hand before the first page
 // load, and because the token still protects the one thing that matters on
 // a loopback bind: another local account on the same shared machine.
-// authenticate also accepts the token from a header, which is what the page
-// itself uses for every request after the first, so the token appears in
-// history exactly once per run rather than on every poll.
+//
+// authenticate also accepts the token from an X-Sqltop-Token header, but
+// the shipped page never sends one: EventSource, which is what it uses for
+// /api/stream, cannot set arbitrary headers, and index composes the CSS and
+// JavaScript into the document it returns rather than asking the browser to
+// fetch them separately (fix round 1, task 14), so there is no second
+// request left that could use one either. The header path exists for a
+// non-browser client, a script or curl, that would rather not put the
+// token in a URL at all; it is not what keeps the token out of history
+// today.
 func (s *Server) URL() string {
 	return fmt.Sprintf("http://%s/?t=%s", s.listener.Addr().String(), s.token)
 }
@@ -96,15 +103,98 @@ type route struct {
 // That closes the mistake a second, outer mux with its own unauthenticated
 // route would otherwise open.
 func (s *Server) routes() ([]route, error) {
-	content, err := fs.Sub(assetsFS, "assets")
-	if err != nil {
+	if _, err := page(); err != nil {
 		return nil, err
 	}
 	return []route{
-		{"/", http.FileServer(http.FS(content))},
+		{"/", http.HandlerFunc(s.index)},
 		{"/api/status", http.HandlerFunc(s.status)},
 		{"/api/stream", http.HandlerFunc(s.stream)},
 	}, nil
+}
+
+// composePage builds the single response index serves: index.html with
+// style.css and app.js substituted in as inline <style> and <script>
+// elements, in place of the <link href="style.css"> and <script
+// src="app.js"> tags the files sit under on disk (fix round 1, task 14).
+//
+// The relative URLs those tags used to carry are exactly what broke the
+// page: a relative reference does not inherit the base URL's query string,
+// so a browser that requested them separately sent GET /style.css and GET
+// /app.js with no token at all, authenticate refused both with 401, and
+// the reviewer who clicked the printed link got a bare unstyled heading
+// with no grid and no stream, verified against a real browser rather than
+// curl's explicit ?t=. Composing everything into one response removes the
+// subresources rather than exempting them from the token: an exemption
+// would have worked too, since they carry no server data, but the other
+// way out the brief allowed, a cookie, is worse than either. Cookies are
+// not port-scoped, so any other local page open on 127.0.0.1 would have
+// the browser attach this one, handing the token to whatever that page
+// wanted to do with it.
+//
+// style.css and app.js stay separate files on disk rather than moving into
+// this string: app_assets_test.go reads assets/app.js directly (its own
+// regression guard, unrelated to this one), and editing either a
+// stylesheet or a two hundred line script inside a Go string literal is
+// its own kind of mistake
+// waiting to happen.
+func composePage() ([]byte, error) {
+	html, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		return nil, err
+	}
+	css, err := assetsFS.ReadFile("assets/style.css")
+	if err != nil {
+		return nil, err
+	}
+	js, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		return nil, err
+	}
+
+	link := []byte(`<link rel="stylesheet" href="style.css">`)
+	if !bytes.Contains(html, link) {
+		return nil, fmt.Errorf("web: assets/index.html does not carry the expected stylesheet link")
+	}
+	styled := append([]byte("<style>\n"), css...)
+	styled = append(styled, []byte("\n</style>")...)
+	html = bytes.Replace(html, link, styled, 1)
+
+	script := []byte(`<script src="app.js"></script>`)
+	if !bytes.Contains(html, script) {
+		return nil, fmt.Errorf("web: assets/index.html does not carry the expected script tag")
+	}
+	inlined := append([]byte("<script>\n"), js...)
+	inlined = append(inlined, []byte("\n</script>")...)
+	html = bytes.Replace(html, script, inlined, 1)
+
+	return html, nil
+}
+
+// page memoises composePage: the embedded assets never change while the
+// process runs, so every request shares one composed response instead of
+// redoing the same substitution per connection. sync.OnceValues, not a
+// plain package-level []byte, so a compose failure (an index.html that
+// lost its link or script tag) is still reported as an error the first
+// time anything asks, from routes, rather than panicking at package init
+// before main has a chance to log anything.
+var page = sync.OnceValues(composePage)
+
+// index serves the single composed page at "/". Anything else falls
+// through to a 404: there is no longer a directory of static files behind
+// this route for a stray path to resolve against.
+func (s *Server) index(rw http.ResponseWriter, req *http.Request) {
+	if req.URL.Path != "/" {
+		http.NotFound(rw, req)
+		return
+	}
+	body, err := page()
+	if err != nil {
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+	rw.Write(body)
 }
 
 // Handler builds the mux fresh on every call. It is cheap (a handful of
@@ -274,10 +364,23 @@ func gracefulShutdown(srv *http.Server) {
 // that test's own poll allows up to two seconds of slack, so it would not
 // by itself have caught a version that let the goroutine finish slightly
 // late.
+//
+// BaseContext ties every request's context to ctx, the same one this
+// method's caller cancels to ask for shutdown (fix round 1, task 14).
+// Without it, http.Server.Shutdown does not cancel any request context on
+// its own; stream.go's handler only found out its connection was going
+// away once a write to the now-closing socket failed, or, if the client
+// happened to be idle at exactly that moment, once shutdownGrace's
+// force-close fired, up to two full seconds later. Deriving every request
+// context from ctx makes stream.go's own claim (it returns as soon as
+// req.Context() is cancelled) true the moment shutdown is asked for,
+// rather than up to shutdownGrace later: a Ctrl-C with a browser tab open
+// no longer has to wait out the grace period at all.
 func (s *Server) Serve(ctx context.Context) error {
 	srv := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 
 	done := make(chan struct{})

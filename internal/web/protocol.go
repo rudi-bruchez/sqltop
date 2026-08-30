@@ -59,7 +59,12 @@ type Row struct {
 	DOP       int     `json:"dop"`
 	WaitType  string  `json:"w"`
 	WaitMs    int64   `json:"wms"`
-	Percent   float64 `json:"pct"`
+	// Percent is ahead of its consumer: task 14's grid does not have a
+	// progress column, so nothing on the client reads this field today.
+	// Sent anyway because dropping it now and adding it back once the
+	// column exists would be a second wire-format change for the same
+	// data; the cost is a handful of extra bytes per row.
+	Percent float64 `json:"pct"`
 }
 
 // Ref holds what stays constant for one session's current statement: sent
@@ -108,6 +113,7 @@ var capName = []struct {
 	{model.CapKillSession, "killSession"},
 	{model.CapVersionStoreUsage, "versionStoreUsage"},
 	{model.CapRingBufferCPU, "ringBufferCPU"},
+	{model.CapRequestDOP, "requestDOP"},
 }
 
 func capNames(c model.Capabilities) []string {
@@ -122,10 +128,16 @@ func capNames(c model.Capabilities) []string {
 
 // SnapshotPayload is one tick as the browser sees it.
 type SnapshotPayload struct {
-	Seq     uint64                  `json:"seq"`
-	TS      int64                   `json:"ts"`
-	Rows    []Row                   `json:"rows"`
-	Refs    map[string]Ref          `json:"refs,omitempty"`
+	Seq  uint64         `json:"seq"`
+	TS   int64          `json:"ts"`
+	Rows []Row          `json:"rows"`
+	Refs map[string]Ref `json:"refs,omitempty"`
+	// Figures is also ahead of its consumer: no dashboard ships with task
+	// 14's request grid (that is UI-plan work, spec section 6), so the
+	// client never reads this today. About 1.2 kB of a typical 22 kB
+	// snapshot. Kept on the wire now for the same reason as Row.Percent
+	// above: the collector already produces it, and the alternative is
+	// adding it back later as its own wire-format change.
 	Figures map[string]model.Figure `json:"figures,omitempty"`
 	Status  StatusPayload           `json:"status"`
 }

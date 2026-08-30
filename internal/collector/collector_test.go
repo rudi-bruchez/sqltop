@@ -587,3 +587,34 @@ func TestCollectorCostFailureReachesTheStatusBar(t *testing.T) {
 		t.Fatalf("status message %q does not mention the cost read failure: a failing Cost must be visible in the status bar, not silent", msg)
 	}
 }
+
+// TestPeriodForwardsToTheBudgetAndTracksThrottle proves Collector.Period
+// (fix round 1, task 14) is not a snapshot taken once: it is a live forward
+// to Budget.Period, so a caller that asks again after the budget escalates
+// gets the doubled period without needing any cooperation from Collector
+// beyond this one call. internal/web's stream handler is exactly such a
+// caller, and this is what stands in, at this package's level, for that
+// dependency actually holding.
+func TestPeriodForwardsToTheBudgetAndTracksThrottle(t *testing.T) {
+	tiers := baseTiers()
+	bud := NewBudget(50, tiers)
+	c := New(fake.New(nil), window.New(time.Minute, 1000), bud)
+
+	if got := c.Period(model.TierRequests); got != tiers.Requests.Std() {
+		t.Fatalf("Period(TierRequests) = %v, want the base period %v before anything throttles", got, tiers.Requests.Std())
+	}
+
+	// Escalate to level 3 (tier A, requests, is the last to give) exactly
+	// as TestStillOverBudgetDegradesCountersThenRequests does in
+	// budget_test.go, reusing the same feed helper and timing.
+	var total int64
+	now := time.Now()
+	feed(bud, &total, now, 15, 80)
+	feed(bud, &total, now.Add(15*time.Second), 15, 80)
+	feed(bud, &total, now.Add(30*time.Second), 15, 80)
+
+	want := tiers.Requests.Std() * 2
+	if got := c.Period(model.TierRequests); got != want {
+		t.Fatalf("Period(TierRequests) = %v after escalating to level 3, want %v (doubled): Collector.Period must track the budget live, not a value cached at construction", got, want)
+	}
+}

@@ -346,6 +346,19 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 		return info, 0, fmt.Errorf("mssql: probing capabilities: %w", err)
 	}
 
+	// CapRequestDOP is a version fact, not a login right, so it is decided
+	// here rather than inside probe, which only asks the server what a
+	// login can read. It travels on the wire so the browser can grey the
+	// dop column exactly when buildRequestsQuery below substitutes the
+	// literal 0 for it (fix round 1, task 14): same condition, computed
+	// twice on purpose rather than threaded through caps into
+	// buildRequestsQuery, because that function's own gate has to stay
+	// independent of everything else in caps - see its doc comment and
+	// TestBuiltQueryGates's "no rights on the tempdb dmv" case.
+	if info.IsAzure() || info.MajorVersion >= 13 {
+		caps = caps.With(model.CapRequestDOP)
+	}
+
 	// Task 9's sampling goroutine reads s.info/s.caps, while the collector
 	// may be re-identifying, so the write goes under the same lock every
 	// query uses. requestsQuery is rebuilt here rather than kept as a fixed
@@ -460,6 +473,18 @@ func (s *Source) probe(ctx context.Context, info model.ServerInfo) (model.Capabi
 		}
 	}
 
+	// CapKillSession has no entry in this list and is never set anywhere in
+	// this file. The kill flow is spec section 9.1, and it does not ship
+	// until the UI plan lands it; setting the capability with nothing able
+	// to act on it would be premature. It is worth naming explicitly rather
+	// than leaving the gap to be rediscovered as a bug: on the wire, a
+	// login that never gets this capability is indistinguishable from one
+	// that genuinely lacks ALTER ANY CONNECTION, since nothing here probes
+	// for that right either. Whoever adds the kill flow adds the probe (it
+	// would look like the entries below: a can() check against something
+	// that needs the right, or, since ALTER ANY CONNECTION is not itself
+	// queryable as a DMV, a direct HAS_PERMS_BY_NAME call) and the entry in
+	// this list together.
 	checks := []struct {
 		from string
 		cap  model.Capability
