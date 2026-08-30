@@ -42,9 +42,16 @@ mock. This machine already has `mcr.microsoft.com/mssql/server` images for
 `sql2025`. Pull 2019 (the minimum target) and 2016 or 2017 (the degraded path)
 when those need exercising.
 
+The 2019 image is now pulled and `sqltop-test-2019` runs on port 11439. The
+whole integration suite passes against it, which is what the version floor in
+the spec is worth checking against. Point the tests at it by exporting
+`SQLTOP_TEST_DSN` for that port. 2016 or 2017, the degraded path, is still
+unpulled and untested.
+
 Two things cannot be tested locally and stay open until pointed at the real
 thing: Azure SQL Database, which cannot be containerised, and Kerberos against a
-real domain.
+real domain. Managed instance edition detection is asserted from documentation
+for the same reason.
 
 ## Commits
 

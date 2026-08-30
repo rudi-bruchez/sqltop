@@ -293,3 +293,90 @@ carried over from the bench on the strength of the mechanism being identical,
 not re-measured, and the specification already records that the budget was
 measured on a grid that only displayed, so it has to be measured again when
 sorting and filtering arrive.
+
+## What the final review found, and what three reviewers disagreed about
+
+After the fourteen tasks were done, the branch went through a whole-branch
+review and two external ones, run unattended by `agy` and by `opencode`. The
+three disagreed on the verdict, which is itself the useful part: the two
+external reviewers said there were no serious defects, and both were wrong, but
+each found something true that the other two missed.
+
+### Two defects that no per-task review could have found
+
+Nothing validated the configuration file. A user who wrote a zero tier period
+in `sqltop.json`, as a typo or because zero looks like "as fast as sensible",
+got a tight loop with no delay and no complaint: measured at about 1.26 million
+DMV queries a second against whatever server the tool was pointed at. The
+observation budget cannot intervene, because throttling doubles the period and
+twice zero is zero. Specification section 2's one hard promise, that the tool
+must never become the problem it is meant to diagnose, was defeated by one
+character. `config.Load` now rejects a file that would do this, naming the field
+and the value, which is how section 8.3 already treats a missing configuration
+path.
+
+The tool exceeded its own observation budget in ordinary use. Measured by
+reading its own session out of `sys.dm_exec_sessions`: 41.7 ms/s against a
+50 ms/s budget at 112 active requests, where the specification sizes the
+renderer at 800 rows. Two causes, one fix. The tempdb lookup cost two to five
+times the CPU of the rest of the hot query, and 94 per cent of the rows it paid
+for were engine internals. The PowerShell prototype this project descends from
+filtered exactly those, and the port dropped the predicate silently, which was
+possible because the specification described the grid's columns and never said
+which requests appear in it. The grid now filters, the specification says so,
+and the measurement after the change is 23.0 ms/s, 46 per cent of the budget,
+with no throttling.
+
+The port was not literal. Two departures were forced by measurement rather than
+taste: the prototype's status-and-open-transaction heuristic hid genuine
+long-running work, because a bare `WAITFOR` has no implicit transaction, and it
+was replaced by asking whether the session is a user process; and filtering on
+the tempdb lookup's own output made that lookup run for every row anyway, 752
+milliseconds against 292 over twenty runs, so the filter moved into an inner
+derived table.
+
+### Two seams where every layer was individually right
+
+The specification names one figure that must show "n/a" rather than a zero, the
+longest running transaction, which is only populated under read committed
+snapshot isolation. It was the one figure shipping a zero, marked available,
+because the counter layer is correct in isolation and the requirement lives in a
+table two sections away. It is now gated on whether any database on the instance
+has snapshot isolation on, discovered once with the other server facts.
+
+The status bar could say the tool had throttled itself and could never say it
+had recovered. The budget writes the recovery message at the same moment it
+returns to level zero, and the collector only forwarded the message when the
+level was above zero, so that one string was unreachable by construction. Every
+intermediate step was announced and the one saying the tool is healthy again
+never was. Neither package was wrong alone, and no test crossed the seam.
+
+The observation cost was also collected and never displayed, although the
+specification says an instrument that claims to bound its own cost should show
+it. It reached exactly one consumer, a throttle message that only renders once
+the cost is already too high. It is now in the status payload and on the page.
+
+### What the external reviewers contributed
+
+`agy` and the final review independently found the same thing: the code paths
+that classify a database error as an absent capability rather than a dead
+connection had no test coverage at all, because every integration test runs as
+`sa`, which holds every right, so no test ever saw a permission denial. That
+classifier already had a bug once, and its fix was defended by a comment rather
+than a test. It is now exercised against a deliberately under-privileged login
+created and dropped by the test, and against a real killed session.
+
+`opencode` found the one thing nobody else did: the integration tests only ever
+ran against SQL Server 2022, while the specification targets 2019 as the floor
+and promises a clean degradation below it. The version-gated logic was tested
+against fabricated version structures and never against an older engine. A 2019
+container now exists and the whole integration suite passes against it, which is
+the first time this code has met an engine other than 2022. The 2016 and 2017
+degraded path is still untested.
+
+Both external reviews were run in a dedicated git worktree so that an unattended
+tool with loosened permissions could not touch the repository. One of them
+resolved its project to the main checkout anyway and wrote its report there.
+Nothing tracked was modified, but the lesson is worth keeping: a worktree is not
+a sandbox, and the check afterwards belongs in the real repository, not only in
+the copy.
