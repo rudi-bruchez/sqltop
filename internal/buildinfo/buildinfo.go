@@ -13,9 +13,10 @@ import "runtime/debug"
 // 0.1 was the collector and a working request grid, 0.2 the server dashboard
 // and then sorting and filtering, 0.3 the blocking, session, transaction and
 // log views with the columns configurable per view, 0.4 the detail panel:
-// the statement, the plan as it runs, and saving one. The CHANGELOG is the
-// authority on what each one covers.
-const Version = "0.4.0"
+// the statement, the plan as it runs, and saving one, 0.5 the scoped statement
+// capture and the first thing this tool creates on a server. The CHANGELOG is
+// the authority on what each one covers.
+const Version = "0.5.0"
 
 // Revision returns the commit this binary was built from, and whether the
 // tree was dirty. Both are empty and false when the build carried no VCS
