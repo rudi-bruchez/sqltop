@@ -3,6 +3,9 @@
 // Being agnostic does not mean pretending every engine is the same. It means
 // the model is neutral and every source declares what it can actually do, so
 // the interface adapts instead of the model lying. Spec section 4.1.
+//
+// Source itself only reads. Capturer, below, is the one exception this seam
+// allows, and it says so in its own comment.
 package source
 
 import (

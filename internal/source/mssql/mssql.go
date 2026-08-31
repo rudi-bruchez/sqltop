@@ -1,7 +1,8 @@
 // Package mssql is the SQL Server implementation of source.Source.
 //
-// Everything here is read-only. No object is created, nothing is configured,
-// no trace flag is set: spec section 2.
+// Everything here is read-only, with one exception: capture.go implements
+// source.Capturer, and behind the -capture flag it creates and drops exactly
+// one named Extended Events session. Spec section 2.
 package mssql
 
 import (

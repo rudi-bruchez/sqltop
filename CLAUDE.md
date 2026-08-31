@@ -53,8 +53,12 @@ is worth doing and has not been done.
 
 - Pure Go, no CGO. The binary is static and cross-compiles in one command.
   Verified to hold even with Kerberos authentication.
-- Read-only on the monitored server. No object created, nothing configured, no
-  trace flag set.
+- Read-only on the monitored server, with one stated exception. No object
+  created, nothing configured, no trace flag set. The exception is the scoped
+  statement capture of `docs/SPECS.md` section 2, which creates one named
+  Extended Events session, only behind the `-capture` flag, only while
+  somebody is watching, and removes it when they stop. Without the flag the
+  tool creates and drops nothing at all, the recovery sweep included.
 - Plan retrieval is on demand only and never enters the polling loop.
 - Secrets come from the environment via `.env`, never from the config file and
   never in code.
