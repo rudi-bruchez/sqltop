@@ -38,3 +38,4 @@ bench/
 # enough to catch it would also catch a directory someone adds later.
 /sqltop
 /sqlstress/sqlstress
+.codegraph/
