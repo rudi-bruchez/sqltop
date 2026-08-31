@@ -245,7 +245,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 
 	// A command nobody can discover is a command nobody uses, so the keys
 	// are on the page rather than only behind h.
-	if want := []string{"t", "e", "d", "y", "n", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
+	if want := []string{"t", "e", "d", "y", "n", "c", "s", "p", "f", "h"}; !equalStrings(got.Views.Hints, want) {
 		t.Errorf("the command strip shows %v, want %v", got.Views.Hints, want)
 	}
 	if got.Views.Blocking.Rows == 0 || got.Views.Blocking.Rows >= got.Views.Blocking.Total {
@@ -483,6 +483,37 @@ func TestEndToEndInABrowser(t *testing.T) {
 	}
 	if !strings.Contains(got.Commands.Rate, "1 s") {
 		t.Errorf("after f the status bar shows the rate as %q, want the 1 s the ladder steps to first", got.Commands.Rate)
+	}
+
+	// c, the capture panel. This fixture's source cannot capture, so what
+	// is on screen is the unavailable state, which is the state most
+	// operators meet first and the one a silent panel would ruin.
+	t.Logf("capture: head %q, %d columns %v, first %g px, list %g px tall, %d rows, notice %q",
+		got.CaptureHead, len(got.CaptureHeadings), got.CaptureHeadings, got.CaptureFirstColWidth,
+		got.CaptureListHeight, got.CaptureRows, got.CaptureNotice)
+	if got.CaptureHead == "" {
+		t.Error("the capture panel opened with no header; a panel that explains nothing is the failure this feature is built around")
+	}
+	if got.CaptureFirstColWidth < 40 {
+		t.Errorf("the first capture column is %g px wide; the table did not lay out", got.CaptureFirstColWidth)
+	}
+	if got.CaptureListHeight < 20 {
+		t.Errorf("the capture table is %g px tall", got.CaptureListHeight)
+	}
+	if !got.HelpMentionsCapture {
+		t.Error("c is bound but absent from the help; a key nobody can discover is a key nobody uses")
+	}
+	// The same table with a statement in it. The panel above is drawn from
+	// an empty list, and every column keeps its catalogue floor whatever the
+	// cell registry holds, so nothing on screen here can tell a registry of
+	// entries carrying text from one of bare functions. That one throws the
+	// first time a capture returns a row.
+	if got.CaptureDrawn.FirstColWidth < 40 || got.CaptureDrawn.RowLines != 1 {
+		t.Errorf("a captured statement drew a first column %g px wide over %d lines: %v %s",
+			got.CaptureDrawn.FirstColWidth, got.CaptureDrawn.RowLines, got.CaptureDrawn.Cells, got.CaptureDrawn.Error)
+	}
+	if len(got.CaptureDrawn.Cells) == 0 || got.CaptureDrawn.Cells[0] == "" {
+		t.Errorf("the drawn capture row is %v; its cells come from the registry and are empty", got.CaptureDrawn.Cells)
 	}
 
 	// The saved file is the state, not the scroll position: the grid is
@@ -825,6 +856,19 @@ type e2eResult struct {
 		Rows        int `json:"rows"`
 		ScrollAfter int `json:"scrollAfter"`
 	} `json:"anchorDrops"`
+	CaptureHead          string   `json:"captureHead"`
+	CaptureHeadings      []string `json:"captureHeadings"`
+	CaptureFirstColWidth float64  `json:"captureFirstColWidth"`
+	CaptureListHeight    float64  `json:"captureListHeight"`
+	CaptureRows          int      `json:"captureRows"`
+	CaptureNotice        string   `json:"captureNotice"`
+	HelpMentionsCapture  bool     `json:"helpMentionsCapture"`
+	CaptureDrawn         struct {
+		FirstColWidth float64  `json:"firstColWidth"`
+		RowLines      int      `json:"rowLines"`
+		Cells         []string `json:"cells"`
+		Error         string   `json:"error"`
+	} `json:"captureDrawn"`
 }
 
 // browserTestServer serves the real page from a fake source: enough rows to

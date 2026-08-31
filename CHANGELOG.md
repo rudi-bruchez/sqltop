@@ -6,6 +6,40 @@ constant changes.
 
 ## Unreleased
 
+## 0.5.0, 31 August 2026
+
+The scoped statement capture, and with it the one thing this tool creates on a
+server it is watching.
+
+- `c` captures every batch and RPC completed on the selected session, through
+  an Extended Events session created for it and destroyed when the capture
+  ends. Statements reach a JSON Lines file under `traces/` beside the binary as
+  they arrive, so a process killed mid-capture still leaves a readable trace
+  whose last record says it was not a clean end. The panel is a grid like any
+  other and its columns configure the same way.
+- Nothing about it runs without `-capture` on the command line. Without that
+  flag the tool creates and drops nothing at all, the recovery sweep included,
+  and the panel says which flag is missing rather than going quiet.
+- The capture ends on the key, on the ten minute cap, when the session ends,
+  when the connection pool hands that session to somebody else, when the
+  browser has been gone for thirty seconds, when the server has been
+  unreachable for a minute, and on shutdown. The panel always says which.
+- What was lost is counted rather than hidden. The ring buffer holds whichever
+  of a thousand events and 1024 KB comes first, so drained every two seconds
+  the capture keeps up with about five hundred statements a second and reports
+  exactly how many it missed past that.
+- An event session outlives the process that made it, so a sweep removes what a
+  crash left behind. It never touches a running capture younger than twice the
+  cap, because several people can watch one server and destroying a colleague's
+  capture is the worse failure. That also means a crashed capture is not
+  cleaned promptly: it runs until it passes the threshold.
+- Known limits, all stated in `docs/specs/2026-08-30-session-capture-design.md`:
+  Azure SQL Database is refused, a failover is neither detected nor recovered
+  from, and the cost of event dispatch falls on the watched workload's threads
+  where this tool's own observation budget cannot see it.
+- `docs/SPECS.md` section 7 gave up `c`, which it had reserved for a sub-mode of
+  the unwritten Waits view. That view will use `g`.
+
 - `y` shows what the selected session has been seen running over the
   retention window: one row per statement, when it was last seen, how long
   for, how many samples, its peaks, and the wait it was most often on. It is

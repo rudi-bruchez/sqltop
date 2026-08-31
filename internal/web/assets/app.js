@@ -41,6 +41,15 @@ function fDur(sec) {
   return s + "s";
 }
 
+// A capture spans minutes at most, so a clock reading, not a date, is what
+// tells one row from the next.
+function fClockMs(iso) {
+  const d = new Date(iso);
+  const p2 = (x) => String(x).padStart(2, "0");
+  const p3 = (x) => String(x).padStart(3, "0");
+  return p2(d.getHours()) + ":" + p2(d.getMinutes()) + ":" + p2(d.getSeconds()) + "." + p3(d.getMilliseconds());
+}
+
 const token = new URLSearchParams(location.search).get("t") || "";
 
 // Per-session invariants, sent once. A row carries only the key; the SQL
@@ -256,6 +265,23 @@ const CELL_SESSIONWAITS = {
   signal_ms: { num: true, text: (r) => n0(r.signal_ms) },
 };
 
+const CELL_CAPTURE = {
+  at: { text: (r) => fClockMs(r.at) },
+  kind: { text: (r) => r.kind },
+  database: { text: (r) => r.database || "" },
+  // Microseconds in, milliseconds out, with decimals kept.
+  duration_ms: { num: true, text: (r) => (r.duration_us / 1000).toFixed(2) },
+  cpu_ms: { num: true, text: (r) => (r.cpu_us / 1000).toFixed(2) },
+  logical_reads: { num: true, text: (r) => n0(r.logical_reads) },
+  writes: { num: true, text: (r) => n0(r.writes) },
+  rows: { num: true, text: (r) => n0(r.row_count) },
+  result: { text: (r) => r.result || "" },
+  object: { text: (r) => r.object || "" },
+  application: { text: (r) => r.application || "" },
+  user: { text: (r) => r.user || "" },
+  text: { text: (r) => r.text || "" },
+};
+
 const CELL_LOGS = {
   database: { text: (r) => r.database },
   size_mb: { num: true, text: (r) => n2(r.size_mb) },
@@ -278,6 +304,7 @@ const CELLS = {
   plan: CELL_PLAN,
   history: CELL_HISTORY,
   sessionwaits: CELL_SESSIONWAITS,
+  capture: CELL_CAPTURE,
 };
 
 // The columns actually drawn in the grid, in order. Built by applyColumns
@@ -632,6 +659,7 @@ const COMMANDS = [
   ["d", "write the selected request's plan to plans/ beside the binary", "save plan"],
   ["y", "show what the selected session has been seen running in the window", "history"],
   ["n", "show what the selected session has waited on", "waits"],
+  ["c", "capture every statement the selected session runs, into traces/", "capture"],
   ["s", "save the current state to snapshots/ beside the binary", "save"],
   ["p", "pause and resume the display", "pause"],
   ["f", "cycle the refresh period", "rate"],
@@ -1131,7 +1159,43 @@ const DETAIL_SOURCE = {
       ? "waits of spid " + spid + " since its last reset, " + rows.length + " types"
       : "spid " + spid + " has waited on nothing since its last reset"),
   },
+  capture: {
+    path: "/api/capture",
+    view: "capture",
+    // The capture is per session, and the request id means nothing to it.
+    // With it true the poller would append an rqid the endpoint ignores,
+    // documenting a requirement that does not exist.
+    needsRequest: false,
+    heading: (_spid, rows, j) => captureHead(j.state, rows.length),
+  },
 };
+
+// An empty table with no explanation reads as a broken feature, so this
+// states the situation in one line whatever the situation is.
+function captureHead(st, n) {
+  if (!st) return "capture";
+  if (!st.available) return "capture unavailable: " + (st.why || "not supported here");
+  if (!st.active) {
+    return st.stopped
+      ? "capture ended, " + st.stopped + ", " + n + " statement" + (n === 1 ? "" : "s")
+      : "press c on a row to capture that session's statements";
+  }
+  const secs = (Date.now() - Date.parse(st.started_at)) / 1000;
+  let head = "capturing spid " + st.session_id + " for " + fDur(secs)
+    + ", " + n + " statement" + (n === 1 ? "" : "s");
+  if (n === 0) head += " so far; the session is idle";
+  // Two different losses, never collapsed into one number.
+  if (st.missed) head += ", " + st.missed + " missed between reads";
+  if (st.unknown) head += ", and an uncounted gap";
+  if (st.dropped) head += ", " + st.dropped + " dropped by the server";
+  // Not filtered by session id: two people capturing one session is the
+  // case this line exists for, and the server has already excluded our own.
+  const others = st.others || [];
+  if (others.length) {
+    head += " (also captured here: " + others.map((o) => "spid " + o.session_id + " for " + fDur(o.age_sec)).join(", ") + ")";
+  }
+  return head;
+}
 
 let detailTimer = 0;
 function pollDetail() {
@@ -1188,6 +1252,27 @@ function savePlan() {
   post("/api/plansave?spid=" + val(r, "spid") + "&rqid=" + val(r, "rqid"), "", "application/json")
     .then((j) => say(j.kind + " plan written to " + j.path))
     .catch((e) => say("could not save the plan: " + e.message));
+}
+
+// The server owns the decision: c on another row replaces the capture
+// rather than adding one. The catch is what makes a refusal audible; without
+// it a refused start is a silent no-op.
+function toggleCapture() {
+  if (!isGrid(activeView)) {
+    say("a capture belongs to a session; the requests and blocking views are where they are");
+    return;
+  }
+  const r = selectedKey === null ? null : view.find((x) => rowKey(x) === selectedKey);
+  if (!r) {
+    say("select a row first: the session captured is the selected one");
+    return;
+  }
+  post("/api/capture?spid=" + val(r, "spid"), "", "application/json")
+    .then(() => {
+      if (detailMode !== "capture") setDetail("capture");
+      pollDetail();
+    })
+    .catch((e) => say("could not change the capture: " + e.message));
 }
 
 // renderDetail runs on every tick while the panel is open, and does nothing
@@ -1258,6 +1343,7 @@ const KEYS = {
   d: savePlan,
   y: () => setDetail("history"),
   n: () => setDetail("sessionwaits"),
+  c: toggleCapture,
   s: saveSnapshot,
   p: togglePause,
   f: cycleFrequency,

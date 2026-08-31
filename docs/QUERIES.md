@@ -10,16 +10,24 @@ go test ./internal/source/mssql -run TestQueriesDocIsCurrent -update
 and a test fails when it falls out of date. To change a query, change it in
 the Go source and regenerate.
 
-Every statement here is read-only, carries `OPTION (MAXDOP 1)`
-and runs on a session set to read uncommitted. Those three properties are
-checked by tests, not by convention: RECOMPILE keeps these plans out of the
-monitored server's cache, MAXDOP 1 keeps a monitoring query from taking
-parallel workers on the server it is watching, and read uncommitted keeps it
-from blocking or being blocked.
+Every statement here runs on a session set to read uncommitted, which keeps
+it from blocking and from being blocked. All but three are read-only and
+carry `OPTION (MAXDOP 1)`, which keeps a monitoring query from taking
+parallel workers on the server it is watching. Both properties are checked by
+tests rather than left to convention.
+
+The three exceptions are the capture DDL, marked as such below. Creating,
+starting and dropping one named event session is the only write this tool
+makes, it happens only when the capture flag is passed, and it can carry no
+query hint: `CREATE EVENT SESSION ... OPTION (MAXDOP 1)` is Msg 156 on
+SQL Server 2019 and 2022 alike. A test names those three statements one by
+one and fails if a fourth ever claims the exception.
 
 Two of the queries are built rather than written, because they depend on the
-server's version and on what the login may read. They appear below as the
-shapes they are actually built into.
+server's version and on what the login may read; they appear below as the
+shapes they are actually built into. The capture statements appear as the
+templates the code holds, `%s` standing for a session name generated per
+capture and `%d` for a session id, because they take no one fixed shape.
 
 ## spidQuery
 
@@ -529,6 +537,127 @@ The tool's own server CPU and logical reads, read from its own session. This is 
 SELECT cpu_time, logical_reads
 FROM sys.dm_exec_sessions
 WHERE session_id = @@SPID
+OPTION (MAXDOP 1)
+```
+
+## createCaptureQueryTemplate
+
+Runs on the c command, only when -capture was passed.
+
+Writes to the monitored server, and carries no query hint. One of the three capture statements.
+
+Creates the scoped capture. Both ring buffer caps are stated because a target naming only MAX_MEMORY silently gets a thousand-event limit, measured on 2019 and 2022. ALLOW_SINGLE_EVENT_LOSS rather than NO_EVENT_LOSS, which would make the monitored workload wait for the buffer.
+
+```sql
+CREATE EVENT SESSION [%s] ON SERVER
+ADD EVENT sqlserver.sql_batch_completed (
+    ACTION (sqlserver.database_name, sqlserver.client_app_name, sqlserver.username)
+    WHERE (sqlserver.session_id = %d)
+),
+ADD EVENT sqlserver.rpc_completed (
+    ACTION (sqlserver.database_name, sqlserver.client_app_name, sqlserver.username)
+    WHERE (sqlserver.session_id = %d)
+)
+ADD TARGET package0.ring_buffer (SET MAX_EVENTS_LIMIT = 1000, MAX_MEMORY = 1024)
+WITH (
+    MAX_MEMORY = 2 MB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MAX_DISPATCH_LATENCY = 2 SECONDS,
+    TRACK_CAUSALITY = OFF,
+    STARTUP_STATE = OFF
+)
+```
+
+## startCaptureQueryTemplate
+
+Runs immediately after createCaptureQueryTemplate.
+
+Writes to the monitored server, and carries no query hint. One of the three capture statements.
+
+Starts the session, which STARTUP_STATE = OFF deliberately does not do. Kept separate because the two cannot be made one statement, which is the window section 5 of the design records.
+
+```sql
+ALTER EVENT SESSION [%s] ON SERVER STATE = START
+```
+
+## stopCaptureQueryTemplate
+
+Runs when a capture ends, for any of the reasons in model.StopReason, and once per session the sweep names.
+
+Writes to the monitored server, and carries no query hint. One of the three capture statements.
+
+Removes the session. An event session outlives the process that made it, so this is not optional tidiness.
+
+```sql
+DROP EVENT SESSION [%s] ON SERVER
+```
+
+## sweepCaptureQueryTemplate
+
+Runs at connection and before each new capture, only when -capture was passed.
+
+Names the sessions under this tool's prefix that are dead by construction: a definition that is not started, or a started session past twice the cap. Anything younger may belong to another instance of sqltop watching the same server. The age comparison uses SYSDATETIME because create_time is local server time.
+
+```sql
+SELECT s.name
+FROM sys.server_event_sessions AS s
+LEFT JOIN sys.dm_xe_sessions AS x ON x.name = s.name
+WHERE s.name LIKE 'sqltop[_]capture[_]%%'
+  AND (x.name IS NULL
+       OR x.create_time < DATEADD(minute, %d, SYSDATETIME()))
+OPTION (MAXDOP 1)
+```
+
+## runningCapturesQuery
+
+Runs on every read of the capture panel.
+
+Reports the other captures alive on this instance, so a second watcher of one session learns it is doubling the dispatch cost on the workload being watched. Nothing else would tell them, because that cost is invisible to the observation budget.
+
+```sql
+SELECT x.name, DATEDIFF(second, x.create_time, SYSDATETIME())
+FROM sys.dm_xe_sessions AS x
+WHERE x.name LIKE 'sqltop[_]capture[_]%'
+OPTION (MAXDOP 1)
+```
+
+## drainCaptureQueryTemplate
+
+Runs every two seconds while a capture runs, whether or not the panel is open.
+
+Reads the ring buffer target and the session's dropped event count. Draining does not wait for a reader: a buffer nobody empties loses events in silence.
+
+```sql
+SELECT CAST(t.target_data AS nvarchar(max)), s.dropped_event_count
+FROM sys.dm_xe_sessions AS s
+JOIN sys.dm_xe_session_targets AS t ON t.event_session_address = s.address
+WHERE s.name = '%s' AND t.target_name = 'ring_buffer'
+OPTION (MAXDOP 1)
+```
+
+## capturePermissionQuery
+
+Runs inside Identify, only when -capture was passed.
+
+Asks for ALTER ANY EVENT SESSION and VIEW SERVER STATE together, because neither implies the other and a login holding only the first would create a capture it could never read.
+
+```sql
+SELECT
+    HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY EVENT SESSION'),
+    HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')
+OPTION (MAXDOP 1)
+```
+
+## watchedSessionQueryTemplate
+
+Runs every two seconds while a capture runs.
+
+Whether the watched session is still the one the capture started on. login_time moves when a pooled connection is reset and connect_time does not, which is why this reads the first. Asked of the server rather than of the retention window, which holds no login time and drops idle sessions entirely.
+
+```sql
+SELECT s.login_time
+FROM sys.dm_exec_sessions AS s
+WHERE s.session_id = %d
 OPTION (MAXDOP 1)
 ```
 

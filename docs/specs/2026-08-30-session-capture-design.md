@@ -99,9 +99,10 @@ type CapturedStatement struct {
 // statements, and it is what makes the panel honest about loss.
 type CaptureProgress struct {
     Total     int64 // events the server has processed for this capture
+    Seen      int64 // absolute index the caller has now consumed through
     Missed    int64 // events that passed through the buffer unread
     Dropped   int64 // events the server dropped before the target
-    Truncated bool  // the ring buffer XML exceeded 4 MB
+    Truncated bool  // the document held less than the buffer
 }
 ```
 
@@ -114,8 +115,17 @@ type Capturer interface {
     CanCapture(ctx context.Context) (bool, string, error)
     SweepCaptures(ctx context.Context) (dropped int, err error)
     RunningCaptures(ctx context.Context) ([]model.CaptureNote, error)
+    // WatchedSession answers the only question the manager cannot answer
+    // for itself: whether the session it started on is still that session.
+    // Asked of the server rather than of the retention window, for the
+    // reason section 4 gives.
+    WatchedSession(ctx context.Context, spid int64) (login time.Time, ok bool, err error)
+
     StartCapture(ctx context.Context, spid int64) (CaptureHandle, error)
-    PollCapture(ctx context.Context, h CaptureHandle) ([]model.CapturedStatement, model.CaptureProgress, error)
+    // PollCapture returns the statements past mark. The caller replaces its
+    // mark with the returned Seen, never with Total: under truncation those
+    // differ, and taking Total would skip what the document could not carry.
+    PollCapture(ctx context.Context, h CaptureHandle, mark int64) ([]model.CapturedStatement, model.CaptureProgress, error)
     StopCapture(ctx context.Context, h CaptureHandle) error
 }
 ```
@@ -144,7 +154,13 @@ server cost and complicate the panel for no diagnostic gain. Pressing the key
 on another row stops the first capture and says so.
 
 The capture stops on any of six conditions, and the panel header always says
-which one ended it.
+which one ended it. The two that concern the watched session are answered by
+one small query against `sys.dm_exec_sessions`, on the source, and not by the
+retention window: that window holds only request samples, which carry no login
+time at all, and `Latest()` returns the tick's running requests, so a session
+that is merely idle is absent from it. A manager consulting the window would
+stop every capture within one tick of the watched session going quiet, which is
+the case this feature most needs to survive.
 
 The key is pressed again. The process shuts down, including on `SIGINT`. The
 last browser connection has been gone for thirty seconds, which tolerates a
@@ -178,6 +194,15 @@ is meaningless across machines. The sweep therefore does not look for an
 owner. It looks for what is dead by construction, and there are exactly two
 such states.
 
+Neither rule recovers a crash quickly, and it is worth being plain about that
+rather than implying otherwise. A `kill -9` leaves a session that is started
+and young, which is exactly the shape the second rule protects, so a crashed
+capture keeps running and keeps costing the watched workload until it passes
+twice the cap: up to twenty minutes. That is the price of never destroying a
+colleague's live capture, and it is the right trade, but the sweep is not a
+prompt cleanup and no test or manual check should be written as though a
+restart removes what a kill left behind.
+
 A session under our prefix that exists in `sys.server_event_sessions` but is
 absent from `sys.dm_xe_sessions` is not started. A live capture is always
 started, and a stopped capture has its definition dropped, so a stopped
@@ -193,10 +218,33 @@ Anything started and younger than that is left alone. It is probably somebody
 else's, and destroying a colleague's capture is a worse failure than leaving a
 stale one for another twenty minutes.
 
+One window in that reasoning is real and cannot be closed. Between the `CREATE`
+and the `ALTER ... STATE = START` that follows it, a capture being born is
+defined and not started, which is precisely what the first rule calls a
+residue. Another instance sweeping in that instant would drop it. The window is
+the round trip of one statement, the loser sees an error rather than losing
+data silently, and no ordering removes it, since the two statements cannot be
+made atomic. It is recorded here rather than defended: the alternative would be
+to weaken the rule that recovers after a server restart, which is worth more.
+
 The age comparison is made on the server, in the query, against
-`SYSUTCDATETIME()`. Comparing `create_time` to the sqltop process clock would
-put clock skew between two machines in the path of a decision that destroys
-another person's work.
+`SYSDATETIME()`. Two mistakes are available here and the design has made one of
+them already. Comparing `create_time` to the sqltop process clock puts skew
+between two machines in the path of a decision that destroys another person's
+work. Comparing it to `SYSUTCDATETIME()` is worse, because it looks correct:
+`sys.dm_xe_sessions.create_time` is local server time, so on a server west of
+Greenwich every session appears hours old and every colleague's live capture is
+swept, while east of it an abandoned one survives for the cap plus the offset.
+It passes every test on a container running in UTC, which is every container on
+the development machine.
+
+Comparing two local times is correct and still has one hour a year where it is
+not. At a daylight saving spring forward the server clock jumps, so a session
+created at 01:59 is a minute later older than the threshold and a colleague's
+live capture is swept. There is no better clock to reach for: `create_time` is
+local, so UTC is further from it rather than nearer, and no third one exists.
+It is one hour, once a year, per timezone that observes the change, against the
+alternative of being wrong by the whole offset every day of the year.
 
 The sweep runs at connection and again before each new capture, and only when
 the flag is set. A failed `DROP`, typically a permission the login does not
@@ -205,12 +253,17 @@ have, is reported in the panel header and not retried in a loop.
 One case defeats the sweep entirely and is worth stating rather than
 discovering. An event session is server-scoped and does not follow an
 availability group failover. If the instance fails over mid-capture, sqltop
-reconnects to the new primary, sweeps there, and leaves the session running on
-the old primary, which it has no reason to connect to again. Nothing in this
-design fixes that: an instance can only clean the server it talks to. What it
-can do is not hide it, so a failover detected during a capture ends the
-capture with a stop reason that names the old primary and says a session may
-have been left there.
+reconnects to the new primary and leaves the session running on the old
+primary, which it has no reason to connect to again. An instance can only clean
+the server it talks to.
+
+Nothing here fixes that and nothing here detects it either. Detecting a
+failover reliably is more than this feature should carry, and a stop reason no
+code can produce is worse than none, so there is no failover stop reason. The
+sweep also runs at connection and before each capture, not on the reconnection
+that the source's repair path performs, so a capture that survives a blip does
+not trigger a fresh sweep. Both are limitations, stated here because they are
+the kind that get discovered at the worst moment.
 
 ## 6. The event session
 
@@ -260,11 +313,35 @@ a session where sampling was always going to be the honest answer.
 
 1024 KB is Microsoft's own recommendation for this target, and the reason to
 respect it is the 4 MB limit on the XML document the buffer is read through.
-The expansion from buffer bytes to document bytes was measured between 0.6 and
-1.9 times across event shapes here, and an external review measured 3.7 on a
-different shape, so 1024 KB keeps the document under 4 MB comfortably in some
-workloads and narrowly in others. It is not a guarantee, which is why section
-7 handles truncation rather than assuming it away.
+Under these two caps that limit turns out to be unreachable, which is worth
+stating with the numbers because an earlier draft of this document guessed at
+them and guessed wrong in both directions.
+
+The document is largest when the buffer holds many small events, not when it
+holds few large ones: the markup is per event, so short statements expand and
+long ones amortise. Measured on 2022: with no padding the buffer stopped at the
+thousand-event cap using 227 KB and produced a 1.54 MB document, an expansion
+of 6.8; with 1500 byte statements the memory cap bound first at 324 events
+using the full 1024 KB and produced a 984 KB document, an expansion of 0.94.
+The largest document either cap admits is therefore about 1.95 MB, half the
+limit, and no event shape reaches it from both directions at once.
+
+So `truncated="1"` cannot occur as this feature ships. Section 7 handles it
+anyway, and the reason is not caution: the handling is what makes a future
+change to either cap fail loudly instead of silently, and the unit tests
+exercise a path the engine will not.
+
+There is one shape of that future change that would fail quietly instead, and
+it is worth writing down beside the caps rather than leaving in a comment. The
+placement arithmetic and the exact loss count both rest on the buffer evicting
+its oldest events, which the thousand-event cap guarantees. Remove that cap and
+raise the memory one past four megabytes and the buffer stops evicting: the
+oldest events stay put, every read returns the same window, the mark stops
+advancing, and the capture reports no loss at all while the workload runs past
+unseen. Measured, on 2022, two reads six thousand events apart returning
+byte-identical documents. Only the truncation flag would say anything was
+wrong. Whoever changes either cap owns that, and the caps are written out in
+section 6 partly so the change cannot be made by accident.
 
 `MAX_DISPATCH_LATENCY = 2 SECONDS` matches the drain interval, so events reach
 the target at roughly the rate we read them.
@@ -289,7 +366,7 @@ events silently, so draining is independent of whether anybody is looking.
 Each poll reads the target once:
 
 ```sql
-SELECT CAST(t.target_data AS xml), s.dropped_event_count, s.dropped_buffer_count
+SELECT CAST(t.target_data AS nvarchar(max)), s.dropped_event_count, s.dropped_buffer_count
 FROM sys.dm_xe_sessions AS s
 JOIN sys.dm_xe_session_targets AS t ON t.event_session_address = s.address
 WHERE s.name = @name AND t.target_name = 'ring_buffer';
@@ -304,7 +381,10 @@ the life of the session, and `eventCount`, the number currently held. The
 buffer therefore holds events numbered `totalEventsProcessed - eventCount`
 through `totalEventsProcessed - 1`, in order, which gives every event an exact
 absolute index. The drain keeps a high water mark, emits everything at or
-above it, and sets the mark to `totalEventsProcessed`.
+above it, and advances the mark to the end of what this document actually
+carried. Not to `totalEventsProcessed`: those are the same number on an
+untruncated read and different on a truncated one, and taking the total there
+would step over events the document could not fit.
 
 That arithmetic is also the loss report. If `totalEventsProcessed - eventCount`
 is greater than the mark, exactly that many events passed through the buffer
@@ -314,17 +394,31 @@ loss from `dropped_event_count`, which counts what the server discarded before
 it ever reached the target; both are reported, separately, because they mean
 different things.
 
-Truncation breaks that arithmetic and has to be detected rather than assumed
-away. `truncated="1"` on the element means the XML omitted part of the buffer,
-and in that state `eventCount` still reports what the buffer holds, not what
-the document contains: an external review measured the attribute saying 3 620
-while 2 399 nodes were returned. So the drain checks both, and treats either
-`truncated="1"` or a node count below `eventCount` as the same condition. It
-records a gap of unknown size, re-anchors the mark to `totalEventsProcessed`,
-and says so. An unknown gap that announces itself is acceptable. A silent one
-is not.
+Truncation does not break that arithmetic, which is the opposite of what an
+earlier draft of this document said and is worth stating carefully, because
+getting it backwards produces silent duplicates rather than a visible error.
 
-The last thousand statements are kept in memory for the panel, so opening it
+Past four megabytes of XML the document holds only part of the buffer, and in
+that state `eventCount` keeps reporting the whole buffer rather than what was
+returned. Measured on 2022: four thousand events driven through an unbounded
+ring buffer gave `totalEventsProcessed="4000"`, `eventCount="4000"`,
+`truncated="1"`, and 2 191 nodes carrying the sequence numbers 0 through 2 190.
+The document keeps the oldest of the buffer and drops the newest.
+
+So the first node always sits at `totalEventsProcessed - eventCount`, truncated
+or not, and placement holds. Computing it as `totalEventsProcessed` minus the
+node count is what fails: it labels the oldest event with a high index,
+concludes placement is impossible, and re-emits the whole document on every
+poll while discarding the events that were genuinely missing.
+
+Two things still change under truncation. Both `truncated="1"` and a node count
+below `eventCount` are treated as the same signal, since the flag is the server
+saying so and the short count says the same and shows up first. And the mark
+advances only to the end of what the document actually carried, never to
+`totalEventsProcessed`: the tail the document could not fit is still in the
+buffer, and advancing past it would skip it permanently.
+
+The last five hundred statements are kept in memory for the panel, so opening it
 does not re-read the file. That slice is written by the drain goroutine and
 read by an HTTP handler, which is the shape of the fatal map race an external
 reviewer already found in `/api/layout` on this project. It is guarded by its
@@ -332,10 +426,17 @@ own mutex, held only across the copy, never across the file write or the
 server query.
 
 If the connection to the server is lost, the existing repair path reconnects
-and the drain resumes; the event session is server-scoped and unaffected. If
-the server cannot be reached for longer than the cap, the capture is
-considered ended, and the `DROP` is attempted on the next successful
-connection, with the sweep as the backstop.
+and the drain resumes; the event session is server-scoped and unaffected. A
+single failed poll is therefore not an ending, and the next tick simply tries
+again.
+
+Thirty consecutive failures are. At a two second tick that is a minute of a
+server that cannot be reached, which is long enough that a reconnection was
+never coming and short enough that the panel does not sit claiming to capture
+for another nine minutes until the cap. The capture ends with that reason
+named, the `DROP` is attempted on the next successful connection, and the sweep
+is the backstop if there is never one. A stop reason with no code that produces
+it would be worse than no stop reason at all, and this is the code.
 
 ## 8. The file
 
@@ -349,11 +450,17 @@ wrong artefact for something that never existed as a file on the server. JSON
 Lines appends, survives a process that dies mid-capture, and is readable by
 anything.
 
-Three record kinds share the stream, distinguished by `kind`. A header,
+Three record kinds share the stream, distinguished by a field named `record`.
+Not `kind`: the statement itself already spends that name on batch versus rpc,
+and a flat JSON object carrying two keys of one name is not a parse error but
+something quieter, since a decoder simply keeps the last. The kinds are: a
+header,
 written first, naming the tool version, the instance, the session id, its
 `login_time`, the event session name and the start time. An `event` record per
 statement, carrying the fields of `CapturedStatement`. A `gap` record with a
-count, or a null count where the count is unknown, and the reason. A final
+count. A truncated read, which cannot happen under the caps section 6 sets,
+would leave a count nobody can compute; that is reported through the state and
+the end record rather than as a gap with a hole in it. A final
 `end` record with the stop reason from section 4.
 
 Records are written as they arrive, not at the end. A file that stops
@@ -389,7 +496,9 @@ that is idle says so and shows zero, because a running capture with an empty
 table and no explanation reads as a broken feature.
 
 The header also names any other capture running on the instance, by the
-session id it watches and how long it has been running. Two people capturing the same session id is legitimate and the
+session id it watches and how long it has been running. Its own is excluded by
+the source's name for it and not by session id, because two people capturing
+the same session id is legitimate and the
 random suffix makes it possible, but it doubles the dispatch cost on the
 monitored workload, and section 10 explains why nothing else in this tool will
 tell them.
@@ -428,8 +537,19 @@ The integration suite runs against real containers, which is the only way this
 feature can be tested at all. Against 2019, 2022 and 2025: create a capture on
 a session driven by the test itself, run a known batch and a known RPC on it,
 and assert both appear with plausible durations. Assert the event session no
-longer exists after the stop. Assert a killed drain leaves a session that the
-sweep then removes, which is the crash path made explicit rather than assumed.
+longer exists after the stop.
+
+The crash path is asserted at the threshold, not by restarting: a killed drain
+leaves a started, young session, which the sweep is required to leave alone.
+What a test can assert is that the same session is removed once it passes twice
+the cap, which is the rule doing its job, and that is what it should say rather
+than claiming a restart cleans up.
+
+Truncation is not reachable against the engine under the shipped caps, for the
+reason section 6 measures, and no integration test should try: longer statement
+texts make the document smaller, not larger, so the obvious attempt fails in a
+way that looks like the code working. It is covered by unit tests over
+fixtures, which is the honest place for a path the engine will not produce.
 
 The sweep's two rules each need a test that builds the state directly: a
 stopped session under the prefix, and a started session whose `create_time` is

@@ -107,8 +107,12 @@ own web interface from an embedded filesystem and opens it in the local browser;
 nothing is installed on the monitored server and nothing is downloaded at
 runtime.
 
-The first target is SQL Server, read-only through the DMVs. PostgreSQL and MySQL
-come later, behind a source abstraction designed in from the start.
+The first target is SQL Server, read-only through the DMVs, with one exception
+the operator has to ask for. Started with `-capture`, the `c` key creates a
+named Extended Events session scoped to one session id, keeps it only while
+somebody is watching, and removes it when they stop. Without that flag the tool
+creates and drops nothing at all. PostgreSQL and MySQL come later, behind a
+source abstraction designed in from the start.
 
 ## Language
 

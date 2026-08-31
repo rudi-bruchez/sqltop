@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
+	"github.com/rudi-bruchez/sqltop/internal/capture"
 	"github.com/rudi-bruchez/sqltop/internal/model"
 	"github.com/rudi-bruchez/sqltop/internal/source"
 	"github.com/rudi-bruchez/sqltop/internal/window"
@@ -64,6 +66,8 @@ type Collector struct {
 	src source.Source
 	win *window.Window
 	bud *Budget
+	// captures is nil when this source cannot capture at all.
+	captures *capture.Manager
 
 	mu        sync.RWMutex
 	figures   map[string]model.Figure
@@ -78,8 +82,17 @@ type Collector struct {
 }
 
 func New(src source.Source, w *window.Window, b *Budget) *Collector {
-	return &Collector{src: src, win: w, bud: b, figures: map[string]model.Figure{}, tierErr: map[model.Tier]string{}}
+	c := &Collector{src: src, win: w, bud: b, figures: map[string]model.Figure{}, tierErr: map[model.Tier]string{}}
+	if cp, ok := src.(source.Capturer); ok {
+		c.captures = capture.New(cp, "", "")
+	}
+	return c
 }
+
+// Captures is the capture manager, or nil when this source cannot capture at
+// all. Decided here rather than type-asserted per request, so the answer
+// cannot change under a handler.
+func (c *Collector) Captures() *capture.Manager { return c.captures }
 
 // Run blocks until ctx is done, driving one goroutine per tier. It returns
 // ctx.Err() once every tier goroutine has actually returned, not merely been
@@ -109,6 +122,12 @@ func (c *Collector) Run(ctx context.Context) error {
 		c.identifyErr = "identify: " + err.Error()
 	}
 	c.mu.Unlock()
+	if c.captures != nil {
+		// The build of sqltop, not the engine's product version: a trace
+		// file that cannot say which binary wrote it is the one that hurts
+		// when somebody sends you theirs. The server is named beside it.
+		c.captures.SetIdentity(buildinfo.String(), info.Instance)
+	}
 
 	var wg sync.WaitGroup
 	for _, tier := range allTiers {

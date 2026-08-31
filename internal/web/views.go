@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -302,4 +303,48 @@ func (s *Server) sessionwaits(rw http.ResponseWriter, req *http.Request) {
 		})
 	}
 	writeJSON(rw, map[string]any{"rows": out})
+}
+
+// capture is the c command: POST toggles a capture on one session, GET
+// reports what it has seen. A source that cannot capture answers with a
+// reason rather than an error, because the panel has to be able to say why
+// the key did nothing.
+func (s *Server) capture(rw http.ResponseWriter, req *http.Request) {
+	m := s.col.Captures()
+	if m == nil {
+		writeJSON(rw, map[string]any{
+			"state": model.CaptureState{Why: "this source cannot capture", Others: []model.CaptureNote{}},
+			"rows":  []model.CapturedStatement{},
+		})
+		return
+	}
+	ctx := req.Context()
+	if req.Method == http.MethodPost {
+		spid, err := strconv.ParseInt(req.URL.Query().Get("spid"), 10, 64)
+		if err != nil || spid <= 0 {
+			http.Error(rw, "a session id is required", http.StatusBadRequest)
+			return
+		}
+		// A capture that is merely unavailable is an answer, not a failure.
+		// The panel only opens on a 200, so an error status here leaves the
+		// reason in a message that fades and no panel to read it in, which
+		// is the one thing the key most needs to say when it does nothing.
+		// Active as well as Available, so stopping a running capture still
+		// works if the answer ever changes underneath one.
+		if st := m.State(ctx); st.Available || st.Active {
+			// Not the request's context: a capture outlives the request that
+			// asks for it, and a client that disconnects between the CREATE and
+			// the START would cancel the compensating DROP too, leaving exactly
+			// the residue this design is arranged around not producing.
+			if err := m.Toggle(context.Background(), spid); err != nil {
+				http.Error(rw, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	rows := m.Recent()
+	if rows == nil {
+		rows = []model.CapturedStatement{}
+	}
+	writeJSON(rw, map[string]any{"state": m.State(ctx), "rows": rows})
 }

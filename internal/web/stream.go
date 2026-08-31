@@ -63,6 +63,11 @@ func (s *Server) stream(rw http.ResponseWriter, req *http.Request) {
 	// keeps the unbounded write it had before.
 	rc := http.NewResponseController(rw)
 
+	// A capture nobody is watching stops, after a grace period; this is what
+	// tells the server whether anybody is.
+	s.clientArrived()
+	defer s.clientLeft()
+
 	enc := NewEncoder().WithDashboard(s.dashboard()).WithGrid(s.gridColumns())
 	send := func() bool {
 		payload := enc.Snapshot(s.win.Latest(), s.col.Server().Figures, s.col.Status())

@@ -530,3 +530,21 @@ day. See "the database a transaction is in" above.
   the size of the server, and it has only been measured against a container.
 - Anything above 800 rows. That is the number section 10.1 chose and every
   measurement since has used it.
+
+## What the budget cannot see
+
+The observation budget measures the CPU of the tool's own session. Extended
+Events dispatch does not run there: predicate evaluation and event
+construction happen on the thread of the workload being watched. The
+statement capture is the first feature in this tool whose cost its own
+instrument cannot report.
+
+The predicate is one integer comparison per candidate event, and the two
+events fire once per batch rather than once per statement, so the expected
+cost is small. Expected is not measured. Measure it against the containers
+before relying on the number, and record it here beside the others.
+
+One figure is measured and belongs here now. The ring buffer holds whichever
+of a thousand events and 1024 KB comes first, so drained every two seconds
+the capture keeps up with about five hundred statements a second on the
+watched session. Past that it reports exactly what it missed.

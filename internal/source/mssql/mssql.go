@@ -1,7 +1,8 @@
 // Package mssql is the SQL Server implementation of source.Source.
 //
-// Everything here is read-only. No object is created, nothing is configured,
-// no trace flag is set: spec section 2.
+// Everything here is read-only, with one exception: capture.go implements
+// source.Capturer, and behind the -capture flag it creates and drops exactly
+// one named Extended Events session. Spec section 2.
 package mssql
 
 import (
@@ -70,6 +71,12 @@ type Source struct {
 	// tempdb_mb pinned at zero, rather than erroring or blocking on a
 	// version nobody has probed yet.
 	requestsQuery string
+
+	// captureAllowed comes from -capture and is the whole of the permission
+	// to write to the monitored server. Nothing in this package creates,
+	// starts or drops an event session while it is false, the sweep
+	// included: a sweep is a DROP like any other.
+	captureAllowed bool
 }
 
 func New() *Source {
@@ -78,6 +85,11 @@ func New() *Source {
 		requestsQuery: buildRequestsQuery(model.ServerInfo{}, 0),
 	}
 }
+
+// AllowCapture carries -capture into the source. Called before Open and never
+// again, which is why it is a plain assignment rather than a locked one: the
+// goroutines that read the field do not exist yet.
+func (s *Source) AllowCapture(ok bool) { s.captureAllowed = ok }
 
 // sessionInit runs once, when the pinned connection is first established, and
 // again on the rare re-pin after Source has discovered the previous
@@ -278,6 +290,23 @@ func (s *Source) queryRow(ctx context.Context, query string, dest ...any) error 
 	return err
 }
 
+// exec runs a statement that returns nothing, on the same terms as queryRow:
+// one at a time on the pinned connection, with a dead connection handed to
+// repairLocked rather than retried. Only the capture uses it, behind its own
+// flag; see capture.go.
+func (s *Source) exec(ctx context.Context, q string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conn, err := s.connLocked(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, q)
+	s.repairLocked(conn, err)
+	return err
+}
+
 // query runs one query under the same lock queryRow uses, holding it for the
 // whole query-plus-scan cycle rather than just the call that starts it: a
 // *sql.Conn can have another batch put on the wire while a previous result
@@ -443,6 +472,16 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	// no uptime at all rather than as a duration counted from the year 1.
 	info.StartedAt = s.startTime(ctx)
 
+	// The flag gates the capability and nothing else. A source withdrawn
+	// from the capture machinery altogether could only tell the panel it
+	// cannot capture, when the true answer is that nobody asked for the
+	// feature; CanCapture is what distinguishes the two.
+	if s.captureAllowed {
+		if ok, _, err := s.CanCapture(ctx); err == nil && ok {
+			caps = caps.With(model.CapCaptureSession)
+		}
+	}
+
 	// Task 9's sampling goroutine reads s.info/s.caps, while the collector
 	// may be re-identifying, so the write goes under the same lock every
 	// query uses. requestsQuery is rebuilt here rather than kept as a fixed
@@ -507,6 +546,16 @@ OPTION (MAXDOP 1)`
 //
 // A failure of the marker query leaves the default rather than an error.
 // This is a label, and losing a connection over a label would be absurd.
+// knownDeployment reads info under the lock Identify writes it under. Empty
+// until Identify has finished, which callers have to treat as "not yet
+// known" rather than as a deployment. Never called from anything already
+// holding s.mu.
+func (s *Source) knownDeployment() model.Deployment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.info.Deployment
+}
+
 func (s *Source) deployment(ctx context.Context, engineEdition int) model.Deployment {
 	switch engineEdition {
 	case 5:

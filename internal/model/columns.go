@@ -198,6 +198,27 @@ var ViewCatalogue = []ViewDef{
 		{"signal_ms", "signal ms", 90, false},
 	}},
 
+	// One session's captured statements. No Key: it is a detail panel opened
+	// from a row, not a tab of its own.
+	{ID: "capture", Title: "captured statements", Columns: []Column{
+		{"at", "time", 92, true},
+		{"kind", "kind", 52, true},
+		{"database", "database", 110, true},
+		// Decimals, because a 400 microsecond batch is exactly what somebody
+		// opens this panel to find and a whole millisecond would round it to
+		// a zero that lies.
+		{"duration_ms", "ms", 74, true},
+		{"cpu_ms", "cpu ms", 74, true},
+		{"logical_reads", "reads", 80, true},
+		{"writes", "writes", 70, false},
+		{"rows", "rows", 70, true},
+		{"result", "result", 70, false},
+		{"object", "object", 130, false},
+		{"application", "program", 130, false},
+		{"user", "login", 110, false},
+		{"text", "statement", 400, true},
+	}},
+
 	{ID: "logs", Title: "transaction logs", Key: "l", Columns: []Column{
 		{"database", "database", 150, true},
 		{"size_mb", "size MB", 80, true},

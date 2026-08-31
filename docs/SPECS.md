@@ -28,10 +28,12 @@ These are binding. Anything that violates one of them is out of scope.
 Single static binary. Pure Go, no CGO, cross-compiled in one command for Linux,
 Windows and macOS. The web assets are embedded; nothing is fetched at runtime.
 
-Nothing installed on the monitored server. The MVP is read-only through the
-DMVs. No stored procedure, no table, no job, no Extended Events session. The XE
-capture discussed in the research notes is deferred to a later version and will
-be opt-in behind an explicit flag, with a named session and automatic cleanup.
+Nothing installed on the monitored server, with one exception. The MVP is
+read-only through the DMVs: no stored procedure, no table, no job. The
+exception is the XE capture discussed in the research notes: one named
+Extended Events session, opt-in behind an explicit flag, that exists only
+while somebody is watching it and is cleaned up automatically when they
+stop.
 
 Bounded observation cost. The tool must never become the problem it is meant to
 diagnose. See section 8.
@@ -372,13 +374,17 @@ PowerShell prototype. Shortcuts are shown in the tab labels.
 |---|---|---|---|
 | Requests | `r` | Every active request, one row each. The default | `sys.dm_exec_sessions`, `sys.dm_exec_requests`, `sys.dm_exec_sql_text` |
 | Blocking | `b` | Blocking chains only, flattened with a depth column, ordered so a blocker is immediately above those it blocks. Head blockers highlighted | Same, plus `sys.dm_os_waiting_tasks` |
-| Waits | `w` | Two sub-modes toggled with `c`: current waits per request, and cumulative wait statistics differentiated over the window | `sys.dm_os_waiting_tasks`, `sys.dm_os_wait_stats` |
+| Waits | `w` | Two sub-modes toggled with `g`: current waits per request, and cumulative wait statistics differentiated over the window | `sys.dm_os_waiting_tasks`, `sys.dm_os_wait_stats` |
 | Repetitive queries | `q` | Aggregation of the retention window by `query_hash`: executions seen, distinct sessions, total CPU, average and maximum elapsed, one sample text. This is what catches the query that is individually fast and collectively ruinous | Derived from stored samples |
 | Throughput | `v` | Request counts and rates over the window: active requests, batch requests/sec, compilations, recompilations, by database and by command. `v` for volume: `t` shows the selected statement and `f` is the refresh rate | Derived, plus `SQL Statistics` |
 | Programs | `a` | Aggregation by program name and login. `a` for applications: `p` is pause | Derived |
 | Sessions | `u` | Every open user session: who, from where, connected for how long, idle for how long, and whether a transaction is open and since when | `sys.dm_exec_sessions`, `sys.dm_tran_session_transactions`, `sys.dm_tran_active_transactions` |
 | Transactions | `x` | Every open user transaction with its age, state, type and log written, and underneath it what each holding session has locked | `sys.dm_tran_active_transactions`, `sys.dm_tran_database_transactions`, `sys.dm_tran_locks` |
 | Transaction logs | `l` | Every database's log: size, active portion, percent used, recovery model, and what is stopping the log being reused | `sys.dm_os_performance_counters`, `sys.databases` |
+
+The waits sub-mode toggle was `c` until the statement capture took that key.
+The capture ships and the waits view does not, and a mnemonic is worth more
+on a key somebody presses than on one nobody can yet.
 
 `u` for users and `x` for xact, which is the engine's own abbreviation, in
 `XACT_STATE` and in every `sys.dm_tran_` view. `t` is the throughput view
@@ -1327,7 +1333,11 @@ without the tool ever becoming a recorder.
 
 No alerting, no thresholds, no notifications.
 
-No configuration of the monitored server. The tool reads.
+No persistent configuration of the monitored server: no setting, no trace
+flag, no `sp_configure` value, nothing that outlives the run. The scoped
+statement capture of section 2 is the one thing this tool creates, it is
+opt-in behind a flag, it exists only while somebody is watching it, and it
+is removed when they stop. Everything else reads.
 
 ## 13. Later versions
 
@@ -1335,9 +1345,6 @@ Local persistence. SQLite in pure Go (`modernc.org/sqlite`) for replaying a
 capture after the fact, with the samples, the session and request tables, a
 deduplicated SQL text table keyed by hash, and compressed plans stored once per
 plan handle. Not needed for the MVP, where the in-memory window is enough.
-
-Extended Events capture, opt-in, for the short history of completed queries that
-the DMVs cannot give.
 
 PostgreSQL and MySQL sources.
 

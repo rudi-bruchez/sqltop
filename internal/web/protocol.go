@@ -379,6 +379,7 @@ var capName = []struct {
 	{model.CapRingBufferCPU, "ringBufferCPU"},
 	{model.CapRequestDOP, "requestDOP"},
 	{model.CapSessionWaitStats, "sessionWaitStats"},
+	{model.CapCaptureSession, "captureSession"},
 }
 
 func capNames(c model.Capabilities) []string {

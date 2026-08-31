@@ -6,11 +6,11 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/model"
+	"github.com/rudi-bruchez/sqltop/internal/outdir"
 )
 
 // maxSnapshotBody bounds what the snapshot endpoint will read. A snapshot
@@ -29,18 +29,10 @@ const maxSnapshotBody = 16 << 20
 // environment lookup, for the reason config's own seams are not: a variable
 // nobody can set from outside cannot silently redirect where a user's files
 // land.
-var snapshotDir = func() (string, error) { return besideBinary("snapshots") }
+var snapshotDir = func() (string, error) { return outdir.Beside("snapshots") }
 
 // planDir is where the plan command writes, on the same terms.
-var planDir = func() (string, error) { return besideBinary("plans") }
-
-func besideBinary(name string) (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(filepath.Dir(exe), name), nil
-}
+var planDir = func() (string, error) { return outdir.Beside("plans") }
 
 // snapshot writes the posted page to snapshots/server-yyyy-mm-dd-hhmmss.html.
 //
@@ -74,7 +66,7 @@ func (s *Server) snapshot(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	path, err := writeUnique(dir, time.Now().Format("server-2006-01-02-150405"), ".html", body)
+	path, err := outdir.Write(dir, time.Now().Format("server-2006-01-02-150405"), ".html", body)
 	if err != nil {
 		http.Error(rw, "could not write the snapshot", http.StatusInternalServerError)
 		return
@@ -125,39 +117,12 @@ func (s *Server) plansave(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	base := fmt.Sprintf("plan-%d-%s-%s", ref.SessionID, kind, time.Now().Format("2006-01-02-150405"))
-	path, err := writeUnique(dir, base, ".sqlplan", plan.Payload)
+	path, err := outdir.Write(dir, base, ".sqlplan", plan.Payload)
 	if err != nil {
 		http.Error(rw, "could not write the plan", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(rw, map[string]string{"path": path, "kind": kind})
-}
-
-// writeUnique creates the file without ever overwriting one. The names have
-// one second of resolution, so two presses inside the same second would
-// otherwise land on each other; the suffix is not a feature, it is the
-// alternative to losing a file somebody asked for.
-func writeUnique(dir, base, ext string, body []byte) (string, error) {
-	for n := 1; n <= 9; n++ {
-		name := base + ext
-		if n > 1 {
-			name = fmt.Sprintf("%s-%d%s", base, n, ext)
-		}
-		path := filepath.Join(dir, name)
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if os.IsExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		if _, err := f.Write(body); err != nil {
-			f.Close()
-			return "", err
-		}
-		return path, f.Close()
-	}
-	return "", fmt.Errorf("web: nine files already exist for %s", base)
 }
 
 // periodRequest is what the f command posts: the new base period for the

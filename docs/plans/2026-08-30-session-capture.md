@@ -34,7 +34,11 @@ Getting these wrong was the largest single category of defect in the first versi
 | mssql test source | `open(t *testing.T) *Source` in `mssql_test.go` |
 | web test server | `newTestServer(t *testing.T) *Server` in `server_test.go` |
 | the source's pinned connection | `s.db *sql.Conn`, with `s.pool *sql.DB` behind it |
-| query helpers | `s.query`, `s.queryRow`; there is no `s.exec` yet, Task 2 adds it |
+| query helpers | `s.query(ctx, q, scan)`, `s.queryRow(ctx, q, dest ...any)`; there is no `s.exec` yet, Task 2 adds it |
+| how a parameter reaches a query | not `sql.Named`, which appears nowhere in this package. A `…QueryTemplate` constant with `%d`, rendered by `fmt.Sprintf` into a local, and the local passed to the helper. `canQueryTemplate` and `livePlanQueryTemplate` are the pattern |
+| model test file | `internal/model/model_test.go`; there is no `columns_test.go` |
+| web request helper | `loopbackRequest(method, target)`; there is no `apiRequest` and no per-request token |
+| the fake source | `fake.New(nil)`, which `newTestServer` already uses and which does not implement `Capturer` |
 | the window on `Server` | `s.win`, and it holds only `RequestSample` |
 | how a handler reaches the source | `s.col`, the collector, which delegates |
 | web routes | `[]route{{path, handler}}`, no per-route token wrapper |
@@ -475,7 +479,7 @@ Append to the `Capability` const block in `internal/model/model.go`, after `CapS
 
 - [ ] **Step 4: Write the types**
 
-Note `omitempty` is absent from the fields the interface always reads. A zero that disappears is a field the JavaScript sees as undefined, and the panel's whole job is to state a number even when it is zero.
+`omitempty` is absent from every field the interface reads, and that means the strings and the slice as well as the numbers. A value that vanishes when it is empty is a field the JavaScript sees as undefined, and two tests turn on exactly that: a capture stopped with no reason to show, and an `Others` slice that disappears when empty and comes back as null.
 
 ```go
 package model
@@ -510,9 +514,16 @@ type CapturedStatement struct {
 // would hide which is happening, and they have different cures.
 type CaptureProgress struct {
 	Total     int64
-	Missed    int64
-	Dropped   int64
-	Truncated bool // the read could not place events, so Missed is unknown
+	// Seen is the absolute index the caller has consumed through after this
+	// read. Equal to Total on a whole read, lower on a truncated one, and it
+	// is what the caller must adopt as its next mark.
+	Seen    int64
+	Missed  int64
+	Dropped int64
+	// Truncated means the document held less than the buffer. Placement
+	// still holds, so Missed stays exact; what it signals is that newer
+	// events are in the buffer and could not be returned this time.
+	Truncated bool
 }
 
 // CaptureNote is another capture running on the same instance, named by what
@@ -567,13 +578,13 @@ type CaptureState struct {
 	Active     bool          `json:"active"`
 	SessionID  int64         `json:"session_id"`
 	StartedAt  time.Time     `json:"started_at"`
-	Stopped    string        `json:"stopped,omitempty"`
+	Stopped    string        `json:"stopped"`
 	Statements int           `json:"statements"`
 	Missed     int64         `json:"missed"`
 	Dropped    int64         `json:"dropped"`
 	Unknown    bool          `json:"unknown"`
 	File       string        `json:"file,omitempty"`
-	Others     []CaptureNote `json:"others,omitempty"`
+	Others     []CaptureNote `json:"others"`
 }
 ```
 
@@ -661,7 +672,9 @@ type Capturer interface {
 	StartCapture(ctx context.Context, spid int64) (CaptureHandle, error)
 
 	// PollCapture returns the statements past mark, and what was lost. The
-	// returned Total replaces the caller's mark.
+	// caller replaces its mark with the returned Seen and never with Total:
+	// on a truncated read those differ, and Total would step over what the
+	// document could not carry.
 	PollCapture(ctx context.Context, h CaptureHandle, mark int64) ([]model.CapturedStatement, model.CaptureProgress, error)
 
 	StopCapture(ctx context.Context, h CaptureHandle) error
@@ -842,8 +855,8 @@ func TestParseRingBufferOnAnEmptyTarget(t *testing.T) {
 
 - [ ] **Step 3: Run them and watch them fail**
 
-Run: `go test ./internal/source/mssql/ -run RingBuffer -v 2>&1 | tail -20`
-Expected: FAIL, `parseRingBuffer` undefined.
+Run: `go test ./internal/source/mssql/ -run 'RingBuffer|Truncat' -v 2>&1 | tail -20`
+Expected: FAIL, `parseRingBuffer` undefined. The pattern carries `Truncat` because two of the six tests are named for what they assert rather than for the function, and a `-run RingBuffer` filter silently skips both, which are the two this task exists for.
 
 - [ ] **Step 4: Write the parser**
 
@@ -989,8 +1002,8 @@ func atoi(s string) int64 {
 
 - [ ] **Step 5: Run the tests and watch them pass**
 
-Run: `go test ./internal/source/mssql/ -run RingBuffer -v 2>&1 | tail -20`
-Expected: PASS, six tests.
+Run: `go test ./internal/source/mssql/ -run 'RingBuffer|Truncat' -v 2>&1 | tail -20`
+Expected: PASS, six tests. Count them: a run reporting four means the filter is wrong and the truncation tests are not running.
 
 - [ ] **Step 6: Break each of the three claims and watch the right test fail**
 
@@ -1199,12 +1212,12 @@ const stopCaptureQueryTemplate = `DROP EVENT SESSION [%s] ON SERVER`
 // capture is worse than leaving a stale one for another twenty minutes.
 //
 // SYSDATETIME and not SYSUTCDATETIME: create_time is local server time.
-const sweepCaptureQuery = `SELECT s.name
+const sweepCaptureQueryTemplate = `SELECT s.name
 FROM sys.server_event_sessions AS s
 LEFT JOIN sys.dm_xe_sessions AS x ON x.name = s.name
 WHERE s.name LIKE '` + capturePrefix + `%'
   AND (x.name IS NULL
-       OR x.create_time < DATEADD(minute, -@cap, SYSDATETIME()))
+       OR x.create_time < DATEADD(minute, -%d, SYSDATETIME()))
 OPTION (MAXDOP 1)`
 
 const runningCapturesQuery = `SELECT x.name, x.create_time
@@ -1212,10 +1225,19 @@ FROM sys.dm_xe_sessions AS x
 WHERE x.name LIKE '` + capturePrefix + `%'
 OPTION (MAXDOP 1)`
 
-const drainCaptureQuery = `SELECT CAST(t.target_data AS nvarchar(max)), s.dropped_event_count, s.dropped_buffer_count
+// The name is formatted in rather than bound, because this package binds
+// nothing: every parameterised query here is a template. Safe for the same
+// reason the identifier in the DDL is, and for one more: the name comes from
+// captureSessionName, whose output a test constrains to the prefix, an
+// integer and hex, and PollCapture refuses a handle that does not match.
+//
+// dropped_buffer_count is deliberately not selected. Nothing displays it, and
+// a column scanned into a variable nobody reads is one the next person
+// assumes means something.
+const drainCaptureQueryTemplate = `SELECT CAST(t.target_data AS nvarchar(max)), s.dropped_event_count
 FROM sys.dm_xe_sessions AS s
 JOIN sys.dm_xe_session_targets AS t ON t.event_session_address = s.address
-WHERE s.name = @name AND t.target_name = 'ring_buffer'
+WHERE s.name = '%s' AND t.target_name = 'ring_buffer'
 OPTION (MAXDOP 1)`
 
 // capturePermissionQuery asks for both rights, because neither implies the
@@ -1230,9 +1252,9 @@ OPTION (MAXDOP 1)`
 // the capture started on. login_time moves when a pooled connection is reset,
 // which the project measured while building the sessions view; connect_time
 // does not, which is why this reads login_time and not that.
-const watchedSessionQuery = `SELECT s.login_time
+const watchedSessionQueryTemplate = `SELECT s.login_time
 FROM sys.dm_exec_sessions AS s
-WHERE s.session_id = @spid
+WHERE s.session_id = %d
 OPTION (MAXDOP 1)`
 ```
 
@@ -1343,14 +1365,35 @@ func TestTheWriteExceptionIsOnlyTheCapture(t *testing.T) {
 	}
 }
 
-// eventSessionDDL matches the three shapes and nothing else.
-func eventSessionDDL(sql string) bool {
+// eventSessionDDL matches the three shapes and nothing else, rendered with a
+// name under this tool's prefix so the prefix rule is actually exercised
+// rather than assumed. Checking the raw template would prove nothing: it
+// contains [%s], which names no prefix at all.
+//
+// Every pattern is anchored at both ends. Without a closing anchor a
+// developer could append anything to a template, DROP DATABASE included, and
+// this would still pass.
+func eventSessionDDL(tmpl string) bool {
+	name := capturePrefix + "51_a3f2c9d1"
+	n := strings.Count(tmpl, "%s") + strings.Count(tmpl, "%d")
+	var rendered string
+	switch n {
+	case 1:
+		rendered = fmt.Sprintf(tmpl, name)
+	case 3:
+		rendered = fmt.Sprintf(tmpl, name, 51, 51)
+	default:
+		return false
+	}
+	if !strings.Contains(rendered, "["+capturePrefix) {
+		return false
+	}
 	for _, re := range []*regexp.Regexp{
-		regexp.MustCompile(`(?s)^CREATE EVENT SESSION \[%s\] ON SERVER\b`),
-		regexp.MustCompile(`^ALTER EVENT SESSION \[%s\] ON SERVER STATE = START$`),
-		regexp.MustCompile(`^DROP EVENT SESSION \[%s\] ON SERVER$`),
+		regexp.MustCompile(`(?s)\A` + regexp.QuoteMeta("CREATE EVENT SESSION ["+name+"] ON SERVER") + `.*STARTUP_STATE = OFF\n\)\z`),
+		regexp.MustCompile(`\AALTER EVENT SESSION \[` + regexp.QuoteMeta(name) + `\] ON SERVER STATE = START\z`),
+		regexp.MustCompile(`\ADROP EVENT SESSION \[` + regexp.QuoteMeta(name) + `\] ON SERVER\z`),
 	} {
-		if re.MatchString(sql) {
+		if re.MatchString(rendered) {
 			return true
 		}
 	}
@@ -1371,7 +1414,61 @@ func TestTheReadOnlyCaptureQueriesStillCarryTheHint(t *testing.T) {
 }
 ```
 
-Write the seven catalogue entries with real `when` and `why` text; they are what `docs/QUERIES.md` is generated from.
+All eight entries, which are what `docs/QUERIES.md` is generated from and which the coverage test names one by one:
+
+```go
+		{
+			name:   "createCaptureQueryTemplate",
+			when:   "on the c command, only when -capture was passed",
+			why:    "Creates the scoped capture. Both ring buffer caps are stated because a target naming only MAX_MEMORY silently gets a thousand-event limit, measured on 2019 and 2022. ALLOW_SINGLE_EVENT_LOSS rather than NO_EVENT_LOSS, which would make the monitored workload wait for the buffer.",
+			sql:    createCaptureQueryTemplate,
+			writes: true,
+		},
+		{
+			name:   "startCaptureQueryTemplate",
+			when:   "immediately after createCaptureQueryTemplate",
+			why:    "Starts the session, which STARTUP_STATE = OFF deliberately does not do. Kept separate because the two cannot be made one statement, which is the window section 5 of the design records.",
+			sql:    startCaptureQueryTemplate,
+			writes: true,
+		},
+		{
+			name:   "stopCaptureQueryTemplate",
+			when:   "when a capture ends, for any of the reasons in model.StopReason, and once per session the sweep names",
+			why:    "Removes the session. An event session outlives the process that made it, so this is not optional tidiness.",
+			sql:    stopCaptureQueryTemplate,
+			writes: true,
+		},
+		{
+			name: "sweepCaptureQueryTemplate",
+			when: "at connection and before each new capture, only when -capture was passed",
+			why:  "Names the sessions under this tool's prefix that are dead by construction: a definition that is not started, or a started session past twice the cap. Anything younger may belong to another instance of sqltop watching the same server. The age comparison uses SYSDATETIME because create_time is local server time.",
+			sql:  sweepCaptureQueryTemplate,
+		},
+		{
+			name: "runningCapturesQuery",
+			when: "on every read of the capture panel",
+			why:  "Reports the other captures alive on this instance, so a second watcher of one session learns it is doubling the dispatch cost on the workload being watched. Nothing else would tell them, because that cost is invisible to the observation budget.",
+			sql:  runningCapturesQuery,
+		},
+		{
+			name: "drainCaptureQueryTemplate",
+			when: "every two seconds while a capture runs, whether or not the panel is open",
+			why:  "Reads the ring buffer target and the session's dropped event count. Draining does not wait for a reader: a buffer nobody empties loses events in silence.",
+			sql:  drainCaptureQueryTemplate,
+		},
+		{
+			name: "capturePermissionQuery",
+			when: "inside Identify, only when -capture was passed",
+			why:  "Asks for ALTER ANY EVENT SESSION and VIEW SERVER STATE together, because neither implies the other and a login holding only the first would create a capture it could never read.",
+			sql:  capturePermissionQuery,
+		},
+		{
+			name: "watchedSessionQueryTemplate",
+			when: "every two seconds while a capture runs",
+			why:  "Whether the watched session is still the one the capture started on. login_time moves when a pooled connection is reset and connect_time does not, which is why this reads the first. Asked of the server rather than of the retention window, which holds no login time and drops idle sessions entirely.",
+			sql:  watchedSessionQueryTemplate,
+		},
+```
 
 - [ ] **Step 5: Run the whole package**
 
@@ -1451,6 +1548,22 @@ func captureDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+func mustExec(t *testing.T, db *sql.DB, sql string) {
+	t.Helper()
+	if _, err := db.Exec(sql); err != nil {
+		t.Fatalf("%v\nwhile running: %s", err, sql)
+	}
+}
+
+func countSessions(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sys.server_event_sessions").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func sessionExists(t *testing.T, db *sql.DB, name string) bool {
@@ -1609,7 +1722,18 @@ Expected: FAIL, undefined methods.
 
 - [ ] **Step 3: Write the methods, all of them through the helpers**
 
-Add `captureAllowed bool` to the `Source` struct with a comment saying it comes from `-capture` and that nothing here writes while it is false.
+Add `captureAllowed bool` to the `Source` struct with a comment saying it comes from `-capture` and that nothing here writes while it is false. Add the small accessor `CanCapture` needs:
+
+```go
+// deployment reads info under the lock that Identify writes it under.
+func (s *Source) deployment() model.Deployment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.info.Deployment
+}
+```
+
+Do not call this from anything already holding `s.mu`.
 
 ```go
 // CanCapture reports whether a capture is possible, and says why not when it
@@ -1618,7 +1742,15 @@ func (s *Source) CanCapture(ctx context.Context) (bool, string, error) {
 	if !s.captureAllowed {
 		return false, "capture is off; start sqltop with -capture to allow it", nil
 	}
-	if s.info.Deployment == model.DeploymentAzureSQLDB {
+	// deploymentLocked rather than s.info directly: info is written under
+	// s.mu at the end of Identify, and reading it unsynchronised from a
+	// handler goroutine is a race whatever the value turns out to be. It is
+	// also empty until Identify finishes, so the Azure refusal is simply not
+	// yet knowable on the first call, and an unknown deployment is allowed
+	// through rather than refused: the permission probe below is the real
+	// gate, and Azure fails it anyway because sys.dm_xe_sessions is not the
+	// view it has.
+	if s.deployment() == model.DeploymentAzureSQLDB {
 		return false, "Azure SQL Database has only database-scoped event sessions, which this is not written for", nil
 	}
 	var ddl, view bool
@@ -1647,14 +1779,15 @@ func (s *Source) sweepOlderThan(ctx context.Context, age time.Duration) (int, er
 		return 0, nil
 	}
 	var names []string
-	err := s.query(ctx, sweepCaptureQuery, func(rows *sql.Rows) error {
+	q := fmt.Sprintf(sweepCaptureQueryTemplate, int(age.Minutes()))
+	err := s.query(ctx, q, func(rows *sql.Rows) error {
 		var n string
 		if err := rows.Scan(&n); err != nil {
 			return err
 		}
 		names = append(names, n)
 		return nil
-	}, sql.Named("cap", int(age.Minutes())))
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -1667,7 +1800,8 @@ func (s *Source) sweepOlderThan(ctx context.Context, age time.Duration) (int, er
 		if !strings.HasPrefix(n, capturePrefix) {
 			continue
 		}
-		if err := s.exec(ctx, fmt.Sprintf(stopCaptureQueryTemplate, n)); err != nil {
+		drop := fmt.Sprintf(stopCaptureQueryTemplate, n)
+		if err := s.exec(ctx, drop); err != nil {
 			return dropped, err
 		}
 		dropped++
@@ -1676,7 +1810,9 @@ func (s *Source) sweepOlderThan(ctx context.Context, age time.Duration) (int, er
 }
 ```
 
-`s.query` and `s.queryRow` will need to accept trailing arguments if they do not already; read their signatures at `internal/source/mssql/mssql.go:268` and `:292` and extend them with `args ...any` passed through, rather than reaching around them.
+Do not extend `s.query` or `s.queryRow` to take parameters. `queryRow` is already variadic on its scan destinations, so a second variadic is impossible, and turning `dest` into a slice would rewrite every existing caller for this feature's convenience. It is also unnecessary: this package binds no parameters anywhere, it renders a `…QueryTemplate` with `fmt.Sprintf` and passes the result, which `canQueryTemplate` and `livePlanQueryTemplate` both do. Follow that.
+
+Render into a named local, never inline into the call. `TestEveryQuerySentComesFromTheCatalogue`, which Task 2 taught to inspect `s.exec` too, requires that argument to be a named value and rejects a call expression. `s.exec(ctx, fmt.Sprintf(...))` fails it at every call site in this feature, and since no `-run` filter in Tasks 5 through 7 selects that test, the failure would first appear four commits later.
 
 Write `RunningCaptures` and `WatchedSession` the same way. `WatchedSession` returns `ok=false` on `sql.ErrNoRows`, which is the session having ended. `spidFromCaptureName` parses the integer back out of the name so the note carries what it watches rather than what it is called.
 
@@ -1960,25 +2096,31 @@ func (s *Source) StartCapture(ctx context.Context, spid int64) (source.CaptureHa
 	if err != nil {
 		return source.CaptureHandle{}, err
 	}
-	if err := s.exec(ctx, fmt.Sprintf(createCaptureQueryTemplate, name, spid, spid)); err != nil {
+	create := fmt.Sprintf(createCaptureQueryTemplate, name, spid, spid)
+	if err := s.exec(ctx, create); err != nil {
 		return source.CaptureHandle{}, err
 	}
-	if err := s.exec(ctx, fmt.Sprintf(startCaptureQueryTemplate, name)); err != nil {
+	start := fmt.Sprintf(startCaptureQueryTemplate, name)
+	if err := s.exec(ctx, start); err != nil {
 		// A session created but not started must not be left behind. It is
 		// exactly the residue the sweep exists to clean, and relying on the
 		// sweep for a failure we are standing in front of is how recovery
 		// paths stop being tested.
-		s.exec(ctx, fmt.Sprintf(stopCaptureQueryTemplate, name))
+		drop := fmt.Sprintf(stopCaptureQueryTemplate, name)
+		s.exec(ctx, drop)
 		return source.CaptureHandle{}, err
 	}
 	return source.CaptureHandle{Name: name, SessionID: spid, Started: time.Now()}, nil
 }
 
 func (s *Source) PollCapture(ctx context.Context, h source.CaptureHandle, mark int64) ([]model.CapturedStatement, model.CaptureProgress, error) {
+	if !strings.HasPrefix(h.Name, capturePrefix) {
+		return nil, model.CaptureProgress{Seen: mark}, fmt.Errorf("mssql: refusing to read %q, which is not one of ours", h.Name)
+	}
 	var doc sql.NullString
-	var droppedEvents, droppedBuffers int64
-	err := s.queryRow(ctx, drainCaptureQuery, []any{&doc, &droppedEvents, &droppedBuffers},
-		sql.Named("name", h.Name))
+	var dropped int64
+	q := fmt.Sprintf(drainCaptureQueryTemplate, h.Name)
+	err := s.queryRow(ctx, q, &doc, &dropped)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The session is gone from under us. The caller decides what that
 		// means; here it is nothing to read.
@@ -1991,7 +2133,7 @@ func (s *Source) PollCapture(ctx context.Context, h source.CaptureHandle, mark i
 	if err != nil {
 		return nil, model.CaptureProgress{Seen: mark}, err
 	}
-	prog.Dropped = droppedEvents
+	prog.Dropped = dropped
 	return out, prog, nil
 }
 
@@ -1999,7 +2141,8 @@ func (s *Source) StopCapture(ctx context.Context, h source.CaptureHandle) error 
 	if !strings.HasPrefix(h.Name, capturePrefix) {
 		return fmt.Errorf("mssql: refusing to drop %q, which is not one of ours", h.Name)
 	}
-	return s.exec(ctx, fmt.Sprintf(stopCaptureQueryTemplate, h.Name))
+	q := fmt.Sprintf(stopCaptureQueryTemplate, h.Name)
+	return s.exec(ctx, q)
 }
 ```
 
@@ -2051,7 +2194,7 @@ The lifecycle, the drain goroutine, the file, and the mutex the panel needs. Tes
 
 **Interfaces:**
 - Consumes: `source.Capturer`, `source.CaptureHandle`, the model types, `outdir`.
-- Produces: `capture.New(c source.Capturer) *Manager`, `(*Manager).Toggle`, `.Stop`, `.State`, `.Recent`.
+- Produces: `capture.New(c source.Capturer, version, instance string) *Manager`, `(*Manager).Toggle`, `.Stop`, `.State`, `.Recent`. The version and instance are constructor arguments because the header record of section 8 names both, and a manager that has to ask for them later would have to reach back through the collector to get them.
 
 The manager asks the source for the watched session's login time. It does not consult the retention window, which holds only running requests and no login time at all.
 
@@ -2137,7 +2280,7 @@ func testManager(t *testing.T) (*Manager, *fakeCapturer, string) {
 	t.Helper()
 	dir := t.TempDir()
 	f := newFake()
-	m := New(f)
+	m := New(f, "0.5.0-test", "testhost\\TESTINSTANCE")
 	m.dir = func() (string, error) { return dir, nil }
 	m.interval = 5 * time.Millisecond
 	t.Cleanup(func() { m.Stop(context.Background(), model.StopByShutdown) })
@@ -2302,7 +2445,7 @@ func TestRecentAndStateAreSafeWhileTheDrainWrites(t *testing.T) {
 	dir := t.TempDir()
 	f := newFake()
 	f.always = true
-	m := New(f)
+	m := New(f, "0.5.0-test", "testhost\\TESTINSTANCE")
 	m.dir = func() (string, error) { return dir, nil }
 	m.interval = time.Microsecond
 	defer m.Stop(context.Background(), model.StopByShutdown)
@@ -2366,12 +2509,14 @@ An embedded struct flattens into the same object, so the line stays one self-des
 
 The drain runs whether or not the panel is open. A capture nobody drains fills its buffer and loses events in silence.
 
+A failed poll is not an ending. The source's own repair path replaces a dead connection and the next tick tries again, so the drain counts consecutive failures and resets the count on any success. Thirty in a row, a minute at the two second tick, ends the capture with `model.StopByServerLost`. That is the only producer of that reason, and a stop reason nothing can produce is worse than one that does not exist. Add the test: a fake that always errors, the interval shortened, and an assertion on both the stop and its wording.
+
 `State` answers when nothing is running, returning the last capture's outcome, because "ended because the session was reused" is what a reader needs and an empty panel is not.
 
 - [ ] **Step 4: Run with the race detector**
 
 Run: `go test -race ./internal/capture/ -v 2>&1 | tail -30`
-Expected: PASS, ten tests, no race.
+Expected: PASS, nine tests, no race. Count them; a lower number means a test name does not match the filter, which is how the previous version of this plan shipped a race test that never ran.
 
 - [ ] **Step 5: Prove the race test can fail**
 
@@ -2425,21 +2570,23 @@ Handlers reach the source through `s.col`, never directly. The collector is wher
 
 - [ ] **Step 1: Write the failing test**
 
-`newTestServer(t)` is the helper; routes carry no per-route token wrapper, so build requests the way the existing view tests do. Read one of them first.
+Three facts about this package's tests, all of which the previous version of this plan got wrong. The helper is `newTestServer(t)`. Requests are built with `loopbackRequest(method, target)`, which sets `Host` to `127.0.0.1` and adds no token, because the routes carry no per-route token wrapper. And `newTestServer` builds its collector over `fake.New(nil)`, which does not implement `source.Capturer`, so the default test server is already the no-capture case and no second constructor is needed for it.
+
+What is needed instead is a fake that can capture, for the two tests that exercise a running one. Give `internal/source/fake` the `Capturer` methods behind a constructor flag, so `fake.New(nil)` stays exactly as it is and a new `fake.NewCapturing(nil)` implements the interface over an in-memory list. Anything else means the panel's own endpoint is never exercised.
 
 ```go
 func TestCaptureEndpointTogglesAndReports(t *testing.T) {
-	s := newTestServer(t)
+	s := newCapturingTestServer(t) // fake.NewCapturing, added in Step 3
 	h := s.Handler()
 
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, apiRequest(t, s, "POST", "/api/capture?spid=51"))
+	h.ServeHTTP(rw, loopbackRequest("POST", "/api/capture?spid=51"))
 	if rw.Code != 200 {
 		t.Fatalf("POST returned %d: %s", rw.Code, rw.Body)
 	}
 
 	rw = httptest.NewRecorder()
-	h.ServeHTTP(rw, apiRequest(t, s, "GET", "/api/capture"))
+	h.ServeHTTP(rw, loopbackRequest("GET", "/api/capture"))
 	var got struct {
 		State model.CaptureState        `json:"state"`
 		Rows  []model.CapturedStatement `json:"rows"`
@@ -2455,7 +2602,7 @@ func TestCaptureEndpointTogglesAndReports(t *testing.T) {
 func TestCaptureEndpointRefusesAMissingSpid(t *testing.T) {
 	s := newTestServer(t)
 	rw := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rw, apiRequest(t, s, "POST", "/api/capture"))
+	s.Handler().ServeHTTP(rw, loopbackRequest("POST", "/api/capture"))
 	if rw.Code != 400 {
 		t.Errorf("POST with no spid returned %d, want 400", rw.Code)
 	}
@@ -2464,9 +2611,9 @@ func TestCaptureEndpointRefusesAMissingSpid(t *testing.T) {
 func TestCaptureEndpointSaysWhyWhenUnavailable(t *testing.T) {
 	// A fake source cannot capture. The panel must be able to say so, which
 	// means a 200 with a reason and not a 500.
-	s := newTestServerWithoutCapture(t)
+	s := newTestServer(t) // fake.New(nil) is not a Capturer
 	rw := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rw, apiRequest(t, s, "GET", "/api/capture"))
+	s.Handler().ServeHTTP(rw, loopbackRequest("GET", "/api/capture"))
 	if rw.Code != 200 {
 		t.Fatalf("GET returned %d", rw.Code)
 	}
@@ -2485,9 +2632,9 @@ func TestCaptureEndpointSaysWhyWhenUnavailable(t *testing.T) {
 func TestOtherCapturesReachTheState(t *testing.T) {
 	// Others is what warns a second watcher it is doubling the dispatch
 	// cost on the monitored workload, and nothing else will tell them.
-	s := newTestServer(t)
+	s := newCapturingTestServer(t)
 	rw := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rw, apiRequest(t, s, "GET", "/api/capture"))
+	s.Handler().ServeHTTP(rw, loopbackRequest("GET", "/api/capture"))
 	var got struct {
 		State model.CaptureState `json:"state"`
 	}
@@ -2589,8 +2736,10 @@ MSG
 These two ship together. A catalogue view with no `CELL_` table fails `internal/web`'s own consistency test, so splitting them across tasks would commit a red suite.
 
 **Files:**
-- Modify: `internal/model/columns.go`, `internal/model/columns_test.go`
+- Modify: `internal/model/columns.go`, `internal/model/model_test.go`
 - Modify: `internal/web/assets/app.js`
+
+`internal/model` has one test file, `model_test.go`. There is no `columns_test.go` and creating one for a single test would split the package's tests on no principle.
 
 **Interfaces:**
 - Consumes: nothing.
@@ -2687,7 +2836,7 @@ Expected: PASS and clean, with the catalogue-to-cell-table consistency test sati
 
 ```bash
 gofmt -l . && go vet ./...
-git add internal/model/columns.go internal/model/columns_test.go internal/web/assets/app.js
+git add internal/model/columns.go internal/model/model_test.go internal/web/assets/app.js
 git commit -F - <<'MSG'
 Put the captured statements in the catalogue, with the table that draws them
 
@@ -2725,7 +2874,10 @@ In `DETAIL_SOURCE`, beside `history` and `sessionwaits`:
   capture: {
     path: "/api/capture",
     view: "capture",
-    needsRequest: true,
+    // false: the capture is per session, and the request id means nothing
+    // to it. With it true the generic poller appends an rqid the endpoint
+    // ignores, which documents a requirement that does not exist.
+    needsRequest: false,
     heading: (spid, rows, j) => captureHead(j.state, rows.length),
   },
 ```
@@ -2852,6 +3004,9 @@ The design ships with an amendment to the project's own specification. Shipping 
 
 **Files:**
 - Modify: `docs/SPECS.md`, `CLAUDE.md`, `docs/PERFORMANCE.md`
+- Modify: `internal/source/source.go` and `internal/source/mssql/mssql.go` package comments
+
+Both package comments say this layer never writes to the server. `source.go` opens with the seam's promise and `mssql.go` with the same in its own words; `Source.Open`'s comment says outright that it "must not create, alter or configure anything on the server: sqltop is read-only". That sentence stays true of `Open` and stops being true of the package, so each gets the same one-clause exception the other documents get.
 
 - [ ] **Step 1: Amend section 7's key table**
 
@@ -3052,7 +3207,9 @@ In the server's shutdown path:
 	}
 ```
 
-For the browser, `internal/web/stream.go` already knows when a client connects and disconnects. Keep a count; when it reaches zero start a thirty second timer, and if no client has arrived when it fires, stop the capture with `model.StopByBrowserGone`. Thirty seconds so a page reload does not kill a capture. Concretely: a `time.AfterFunc` stored on the `Server` under `s.mu`, cancelled by the next connection.
+For the browser, `internal/web/stream.go` already knows when a client connects and disconnects. Keep a count; when it reaches zero start a thirty second timer, and if no client has arrived when it fires, stop the capture with `model.StopByBrowserGone`. Thirty seconds so a page reload does not kill a capture.
+
+Use `time.AfterFunc` stored on the `Server` under `s.mu` and cancelled by the next connection, exactly as below. Do not reach for `case <-time.After(30 * time.Second):` inside a `select` in a polling loop: the loop re-enters the `select` on every other tick and builds a fresh timer each time, so the branch never fires and the capture never stops. That shape is why this step spells out the mechanism rather than describing the behaviour.
 
 ```go
 // lastClientLeft starts the grace period after which an unwatched capture
