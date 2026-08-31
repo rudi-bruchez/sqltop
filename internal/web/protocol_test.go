@@ -800,3 +800,27 @@ func TestDeploymentReachesTheWire(t *testing.T) {
 		t.Errorf("payload = %s; an unknown deployment is omitted", b)
 	}
 }
+
+// TestEveryCapabilityReachesTheWire enforces what capName's comment asks for.
+// It went unenforced long enough for one capability to be computed at the cost
+// of a round trip and then never sent, which is worse than not having it: the
+// interface cannot grey what it never hears about, and nothing says so.
+func TestEveryCapabilityReachesTheWire(t *testing.T) {
+	named := map[model.Capability]bool{}
+	for _, e := range capName {
+		named[e.cap] = true
+	}
+	// Every bit the model defines, walked by value rather than by name, so
+	// adding a capability and forgetting this table fails here.
+	for bit := model.Capability(1); bit != 0; bit <<= 1 {
+		if !model.Caps(bit).Has(bit) {
+			continue
+		}
+		if bit > model.CapCaptureSession {
+			break
+		}
+		if !named[bit] {
+			t.Errorf("capability bit %d is defined in the model and absent from capName, so it never reaches the browser", bit)
+		}
+	}
+}

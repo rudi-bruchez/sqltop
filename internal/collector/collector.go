@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rudi-bruchez/sqltop/internal/buildinfo"
 	"github.com/rudi-bruchez/sqltop/internal/capture"
 	"github.com/rudi-bruchez/sqltop/internal/model"
 	"github.com/rudi-bruchez/sqltop/internal/source"
@@ -122,7 +123,10 @@ func (c *Collector) Run(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	if c.captures != nil {
-		c.captures.SetIdentity(info.ProductVersion, info.Instance)
+		// The build of sqltop, not the engine's product version: a trace
+		// file that cannot say which binary wrote it is the one that hurts
+		// when somebody sends you theirs. The server is named beside it.
+		c.captures.SetIdentity(buildinfo.String(), info.Instance)
 	}
 
 	var wg sync.WaitGroup

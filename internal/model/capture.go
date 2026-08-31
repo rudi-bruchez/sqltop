@@ -54,8 +54,16 @@ type CaptureProgress struct {
 // names are a SQL Server concept and spec section 4.1 keeps those below the
 // source seam.
 type CaptureNote struct {
-	SessionID int64     `json:"session_id"`
-	Since     time.Time `json:"since"`
+	// Name is the source's own identifier for the capture, never rendered.
+	// It is here so a manager can tell its own capture from somebody else's
+	// when both watch one session, which is the case the panel most needs
+	// to report and the one a session id cannot distinguish.
+	Name      string `json:"-"`
+	SessionID int64  `json:"session_id"`
+	// AgeSec is computed on the server. create_time is local server time and
+	// the driver hands it back tagged UTC, so any absolute instant crossing
+	// this seam is wrong by the server's offset; a difference is not.
+	AgeSec int64 `json:"age_sec"`
 }
 
 // StopReason is why a capture ended. Every one is shown to the user, so every

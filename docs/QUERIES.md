@@ -602,7 +602,7 @@ Names the sessions under this tool's prefix that are dead by construction: a def
 SELECT s.name
 FROM sys.server_event_sessions AS s
 LEFT JOIN sys.dm_xe_sessions AS x ON x.name = s.name
-WHERE s.name LIKE 'sqltop_capture_%%'
+WHERE s.name LIKE 'sqltop[_]capture[_]%%'
   AND (x.name IS NULL
        OR x.create_time < DATEADD(minute, %d, SYSDATETIME()))
 OPTION (MAXDOP 1)
@@ -615,9 +615,9 @@ Runs on every read of the capture panel.
 Reports the other captures alive on this instance, so a second watcher of one session learns it is doubling the dispatch cost on the workload being watched. Nothing else would tell them, because that cost is invisible to the observation budget.
 
 ```sql
-SELECT x.name, x.create_time
+SELECT x.name, DATEDIFF(second, x.create_time, SYSDATETIME())
 FROM sys.dm_xe_sessions AS x
-WHERE x.name LIKE 'sqltop_capture_%'
+WHERE x.name LIKE 'sqltop[_]capture[_]%'
 OPTION (MAXDOP 1)
 ```
 

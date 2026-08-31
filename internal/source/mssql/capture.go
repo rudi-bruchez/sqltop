@@ -21,6 +21,11 @@ import (
 // guarantees we never do.
 const capturePrefix = "sqltop_capture_"
 
+// captureLikePrefix is capturePrefix as a LIKE pattern. The underscores have
+// to be bracketed or they match any single character, which makes the filter
+// admit names this tool did not write.
+const captureLikePrefix = "sqltop[_]capture[_]"
+
 // captureCap is how long a capture may run. Deliberately not configurable:
 // the sweep uses it as evidence about captures belonging to other instances,
 // and that reasoning holds only while every instance agrees. Encoding it in
@@ -76,19 +81,19 @@ const stopCaptureQueryTemplate = `DROP EVENT SESSION [%s] ON SERVER`
 // go vet reads it as one and rejects a lone percent before the tests do.
 //
 // The offset carries its own sign rather than the template writing -%d: a
-// negative threshold would render as -- and comment out the rest of the
-// statement, which is how the test that shortens the age found it.
+// negative threshold, which the age rule's test uses, would render as -- and
+// comment out the rest of the statement.
 const sweepCaptureQueryTemplate = `SELECT s.name
 FROM sys.server_event_sessions AS s
 LEFT JOIN sys.dm_xe_sessions AS x ON x.name = s.name
-WHERE s.name LIKE '` + capturePrefix + `%%'
+WHERE s.name LIKE '` + captureLikePrefix + `%%'
   AND (x.name IS NULL
        OR x.create_time < DATEADD(minute, %d, SYSDATETIME()))
 OPTION (MAXDOP 1)`
 
-const runningCapturesQuery = `SELECT x.name, x.create_time
+const runningCapturesQuery = `SELECT x.name, DATEDIFF(second, x.create_time, SYSDATETIME())
 FROM sys.dm_xe_sessions AS x
-WHERE x.name LIKE '` + capturePrefix + `%'
+WHERE x.name LIKE '` + captureLikePrefix + `%'
 OPTION (MAXDOP 1)`
 
 // The name is formatted in rather than bound, because this package binds
@@ -223,11 +228,17 @@ func (s *Source) RunningCaptures(ctx context.Context) ([]model.CaptureNote, erro
 	var notes []model.CaptureNote
 	err := s.query(ctx, runningCapturesQuery, func(rows *sql.Rows) error {
 		var name string
-		var since time.Time
-		if err := rows.Scan(&name, &since); err != nil {
+		var age int64
+		if err := rows.Scan(&name, &age); err != nil {
 			return err
 		}
-		notes = append(notes, model.CaptureNote{SessionID: spidFromCaptureName(name), Since: since})
+		// The LIKE pattern is the first filter and this is the second.
+		// Neither is redundant: a name that reaches here is about to be
+		// shown to somebody as one of this tool's own captures.
+		if !strings.HasPrefix(name, capturePrefix) {
+			return nil
+		}
+		notes = append(notes, model.CaptureNote{Name: name, SessionID: spidFromCaptureName(name), AgeSec: age})
 		return nil
 	})
 	if err != nil {

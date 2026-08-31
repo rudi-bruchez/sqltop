@@ -238,6 +238,14 @@ swept, while east of it an abandoned one survives for the cap plus the offset.
 It passes every test on a container running in UTC, which is every container on
 the development machine.
 
+Comparing two local times is correct and still has one hour a year where it is
+not. At a daylight saving spring forward the server clock jumps, so a session
+created at 01:59 is a minute later older than the threshold and a colleague's
+live capture is swept. There is no better clock to reach for: `create_time` is
+local, so UTC is further from it rather than nearer, and no third one exists.
+It is one hour, once a year, per timezone that observes the change, against the
+alternative of being wrong by the whole offset every day of the year.
+
 The sweep runs at connection and again before each new capture, and only when
 the flag is set. A failed `DROP`, typically a permission the login does not
 have, is reported in the panel header and not retried in a loop.
@@ -245,12 +253,17 @@ have, is reported in the panel header and not retried in a loop.
 One case defeats the sweep entirely and is worth stating rather than
 discovering. An event session is server-scoped and does not follow an
 availability group failover. If the instance fails over mid-capture, sqltop
-reconnects to the new primary, sweeps there, and leaves the session running on
-the old primary, which it has no reason to connect to again. Nothing in this
-design fixes that: an instance can only clean the server it talks to. What it
-can do is not hide it, so a failover detected during a capture ends the
-capture with a stop reason that names the old primary and says a session may
-have been left there.
+reconnects to the new primary and leaves the session running on the old
+primary, which it has no reason to connect to again. An instance can only clean
+the server it talks to.
+
+Nothing here fixes that and nothing here detects it either. Detecting a
+failover reliably is more than this feature should carry, and a stop reason no
+code can produce is worse than none, so there is no failover stop reason. The
+sweep also runs at connection and before each capture, not on the reconnection
+that the source's repair path performs, so a capture that survives a blip does
+not trigger a fresh sweep. Both are limitations, stated here because they are
+the kind that get discovered at the worst moment.
 
 ## 6. The event session
 
@@ -405,7 +418,7 @@ advances only to the end of what the document actually carried, never to
 `totalEventsProcessed`: the tail the document could not fit is still in the
 buffer, and advancing past it would skip it permanently.
 
-The last thousand statements are kept in memory for the panel, so opening it
+The last five hundred statements are kept in memory for the panel, so opening it
 does not re-read the file. That slice is written by the drain goroutine and
 read by an HTTP handler, which is the shape of the fatal map race an external
 reviewer already found in `/api/layout` on this project. It is guarded by its
@@ -445,7 +458,9 @@ header,
 written first, naming the tool version, the instance, the session id, its
 `login_time`, the event session name and the start time. An `event` record per
 statement, carrying the fields of `CapturedStatement`. A `gap` record with a
-count, or a null count where the count is unknown, and the reason. A final
+count. A truncated read, which cannot happen under the caps section 6 sets,
+would leave a count nobody can compute; that is reported through the state and
+the end record rather than as a gap with a hole in it. A final
 `end` record with the stop reason from section 4.
 
 Records are written as they arrive, not at the end. A file that stops
@@ -481,7 +496,9 @@ that is idle says so and shows zero, because a running capture with an empty
 table and no explanation reads as a broken feature.
 
 The header also names any other capture running on the instance, by the
-session id it watches and how long it has been running. Two people capturing the same session id is legitimate and the
+session id it watches and how long it has been running. Its own is excluded by
+the source's name for it and not by session id, because two people capturing
+the same session id is legitimate and the
 random suffix makes it possible, but it doubles the dispatch cost on the
 monitored workload, and section 10 explains why nothing else in this tool will
 tell them.

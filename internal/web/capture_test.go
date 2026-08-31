@@ -119,12 +119,37 @@ func TestOtherCapturesReachTheState(t *testing.T) {
 	// Others is what warns a second watcher it is doubling the dispatch
 	// cost on the monitored workload, and nothing else will tell them.
 	s, f := newCapturingTestServer(t)
-	since := time.Now().Add(-time.Minute)
-	f.Running = []model.CaptureNote{{SessionID: 99, Since: since}}
+	f.Running = []model.CaptureNote{{Name: "sqltop_capture_99_aaaaaaaa", SessionID: 99, AgeSec: 60}}
 
 	got := getCapture(t, s)
 	if len(got.State.Others) != 1 || got.State.Others[0].SessionID != 99 {
 		t.Fatalf("others is %+v, want the capture on 99 the instance is already running", got.State.Others)
+	}
+}
+
+// TestASecondCaptureOfOneSessionIsReported is the case the design says nothing
+// else will tell anybody about: two people watching one session id, which
+// doubles the dispatch cost on the workload being watched. Excluding our own
+// capture by session id would hide theirs along with ours.
+func TestASecondCaptureOfOneSessionIsReported(t *testing.T) {
+	s, f := newCapturingTestServer(t)
+	if err := s.col.Captures().Toggle(context.Background(), 51); err != nil {
+		t.Fatal(err)
+	}
+	// The fake names every capture the same, which is enough: what matters
+	// is that our own is excluded by name and a stranger's on the same
+	// session id is not.
+	f.Running = []model.CaptureNote{
+		{Name: "sqltop_fake", SessionID: 51, AgeSec: 3},
+		{Name: "sqltop_capture_51_bbbbbbbb", SessionID: 51, AgeSec: 90},
+	}
+
+	got := getCapture(t, s)
+	if len(got.State.Others) != 1 {
+		t.Fatalf("others is %+v, want somebody else's capture of the same session and not our own", got.State.Others)
+	}
+	if got.State.Others[0].SessionID != 51 {
+		t.Errorf("others names spid %d, want 51", got.State.Others[0].SessionID)
 	}
 }
 

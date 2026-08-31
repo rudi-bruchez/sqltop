@@ -259,8 +259,7 @@ func TestRecentAndStateAreSafeWhileTheDrainWrites(t *testing.T) {
 	// interval is one microsecond and the fake hands out a statement on
 	// every poll, so the appending goroutine is always inside the slice
 	// while the readers are. With m.interval left at milliseconds this test
-	// passes with the mutex removed, which is the trap the first version of
-	// this plan fell into.
+	// passes with the mutex removed, which makes it worth nothing.
 	dir := t.TempDir()
 	f := newFake()
 	f.always = true

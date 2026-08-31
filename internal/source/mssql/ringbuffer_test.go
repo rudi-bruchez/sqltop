@@ -205,3 +205,20 @@ func TestTheMarkNeverRewinds(t *testing.T) {
 		t.Errorf("Seen is %d, want 7: a mark may stand still but never go back", prog.Seen)
 	}
 }
+
+func TestTheServersOwnFlagIsEnoughOnItsOwn(t *testing.T) {
+	// The other truncation test sets the flag and also returns fewer nodes
+	// than eventCount, so the short-count branch fires and the flag branch is
+	// never the reason. Here the counts agree and only the flag is left.
+	x := `<RingBufferTarget truncated="1" totalEventsProcessed="500" eventCount="2">
+	  <event name="sql_batch_completed" timestamp="2026-08-30T20:19:50.238Z"><data name="batch_text"><value>a</value></data></event>
+	  <event name="sql_batch_completed" timestamp="2026-08-30T20:19:50.239Z"><data name="batch_text"><value>b</value></data></event>
+	</RingBufferTarget>`
+	_, prog, err := parseRingBuffer(x, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prog.Truncated {
+		t.Error("the server said the document was truncated and the parser did not believe it")
+	}
+}

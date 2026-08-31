@@ -70,7 +70,7 @@ func TestTheSweepComparesTimesOnTheSameClock(t *testing.T) {
 	if !strings.Contains(strings.ToUpper(sweepCaptureQueryTemplate), "SYSDATETIME") {
 		t.Error("the age comparison must be made on the server, against the same clock as create_time")
 	}
-	if !strings.Contains(sweepCaptureQueryTemplate, capturePrefix+"%") {
+	if !strings.Contains(sweepCaptureQueryTemplate, captureLikePrefix+"%") {
 		t.Error("the sweep does not filter on the prefix, so it can see other people's event sessions")
 	}
 }
@@ -190,8 +190,8 @@ func TestRunningCapturesReportsTheSessionIdNotTheName(t *testing.T) {
 	for _, n := range notes {
 		if n.SessionID == 9996 {
 			found = true
-			if n.Since.IsZero() {
-				t.Error("the note carries no start time")
+			if n.AgeSec < 0 {
+				t.Errorf("the note carries a negative age of %d seconds", n.AgeSec)
 			}
 		}
 	}
@@ -236,6 +236,15 @@ func TestCaptureIsUnavailableWithoutTheFlag(t *testing.T) {
 	s := open(t)
 	s.captureAllowed = false
 	db := captureDB(t)
+
+	// A residue for the sweep to find, or this test cannot fail. Without one
+	// a flagless sweep drops nothing and returns zero whether the gate is
+	// there or not, and the assertions below pass over a missing gate: the
+	// read-only guarantee is the property this whole feature is argued
+	// around, and it needs a test that notices the guarantee going away.
+	residue := capturePrefix + "9990_deadfeed"
+	mustExec(t, db, fmt.Sprintf(createCaptureQueryTemplate, residue, 9990, 9990))
+	t.Cleanup(func() { db.Exec(fmt.Sprintf(stopCaptureQueryTemplate, residue)) })
 	before := countSessions(t, db)
 
 	ok, why, err := s.CanCapture(context.Background())
@@ -254,6 +263,9 @@ func TestCaptureIsUnavailableWithoutTheFlag(t *testing.T) {
 	}
 	if got := countSessions(t, db); got != before {
 		t.Errorf("event session count moved from %d to %d without the flag", before, got)
+	}
+	if !sessionExists(t, db, residue) {
+		t.Error("a residue the sweep would have dropped is gone, so a DROP reached the server without the flag")
 	}
 }
 
@@ -455,9 +467,14 @@ func TestPollReportsMissedEventsUnderLoad(t *testing.T) {
 	}
 	time.Sleep(4 * time.Second)
 
-	_, prog, err := s.PollCapture(ctx, h, 0)
+	got, prog, err := s.PollCapture(ctx, h, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Total minus what was missed is exactly what came back, which is the
+	// arithmetic the whole drain rests on and is available here for free.
+	if !prog.Truncated && prog.Total-prog.Missed != int64(len(got)) {
+		t.Errorf("Total %d minus Missed %d is not the %d statements returned", prog.Total, prog.Missed, len(got))
 	}
 	if prog.Missed == 0 {
 		t.Fatalf("2500 statements through a 1000 event buffer reported no loss; progress %+v", prog)
@@ -512,5 +529,65 @@ func TestTheCapabilityAppearsWithTheFlag(t *testing.T) {
 	}
 	if !caps.Has(model.CapCaptureSession) {
 		t.Error("the flag is on and the login is sa, so the capability should be present")
+	}
+}
+
+// TestTheLikePatternIsAPrefixAndNotAWildcard exists because it very nearly was
+// not one. An underscore matches any single character in LIKE, so the obvious
+// spelling of this tool's prefix also admits names it never wrote, and the
+// only thing standing between the sweep and those names was a Go-side check
+// that nothing tested.
+func TestTheLikePatternIsAPrefixAndNotAWildcard(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		match bool
+	}{
+		{capturePrefix + "51_a3f2c9d1", true},
+		{"sqltopXcaptureY51_ab", false},
+		{"sqltop.capture.1_x", false},
+		{"system_health", false},
+	} {
+		var got bool
+		q := "SELECT CASE WHEN @p1 LIKE '" + captureLikePrefix + "%' THEN 1 ELSE 0 END"
+		if err := s.db.QueryRowContext(ctx, q, c.name).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != c.match {
+			t.Errorf("%q matched=%v, want %v", c.name, got, c.match)
+		}
+	}
+}
+
+// TestTheGoSideGuardRefusesAForeignName covers the second filter, which was
+// the only real one until the LIKE pattern was fixed and which nothing
+// exercised. A name that reaches RunningCaptures is about to be shown to
+// somebody as one of this tool's own captures.
+func TestTheGoSideGuardRefusesAForeignName(t *testing.T) {
+	s := open(t)
+	s.captureAllowed = true
+	db := captureDB(t)
+	name := "sqltopXcaptureY51_ab"
+	mustExec(t, db, fmt.Sprintf(createCaptureQueryTemplate, name, 51, 51))
+	mustExec(t, db, fmt.Sprintf(startCaptureQueryTemplate, name))
+	t.Cleanup(func() { db.Exec(fmt.Sprintf(stopCaptureQueryTemplate, name)) })
+
+	notes, err := s.RunningCaptures(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range notes {
+		if n.Name == name {
+			t.Fatalf("a session this tool did not create is being reported as one of its captures: %q", name)
+		}
+	}
+
+	// And the sweep must not offer it for dropping either.
+	if _, err := s.sweepOlderThan(context.Background(), -1*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if !sessionExists(t, db, name) {
+		t.Fatal("the sweep dropped a session outside this tool's prefix")
 	}
 }

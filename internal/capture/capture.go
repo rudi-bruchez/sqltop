@@ -136,11 +136,13 @@ func (m *Manager) start(ctx context.Context, spid int64) error {
 
 	r := &run{handle: h, login: login, done: make(chan struct{}), file: f, enc: json.NewEncoder(f)}
 	r.write(headerRecord{
-		Record:    "header",
-		Version:   version,
-		Instance:  instance,
-		SessionID: spid,
-		StartedAt: h.Started,
+		Record:       "header",
+		Version:      version,
+		Instance:     instance,
+		SessionID:    spid,
+		LoginTime:    login,
+		EventSession: h.Name,
+		StartedAt:    h.Started,
 	})
 
 	// Not the caller's context: a capture outlives the request that asked
@@ -164,9 +166,18 @@ func (m *Manager) start(ctx context.Context, spid int64) error {
 // which is released before the wait: waiting while holding it would deadlock
 // against a State call the drain is blocked behind.
 func (m *Manager) Stop(ctx context.Context, reason model.StopReason) error {
+	return m.stop(ctx, reason, nil)
+}
+
+// stop ends the running capture. When only is non-nil it ends that capture and
+// no other: a drain goroutine deciding to stop hands its own run in, because
+// between its decision and this call a toggle can have replaced the capture,
+// and ending a stranger's work under someone else's reason is worse than
+// doing nothing.
+func (m *Manager) stop(ctx context.Context, reason model.StopReason, only *run) error {
 	m.mu.Lock()
 	r := m.run
-	if r == nil {
+	if r == nil || (only != nil && r != only) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -194,9 +205,17 @@ func (m *Manager) State(ctx context.Context) model.CaptureState {
 	} else {
 		st.Available, st.Why = ok, why
 	}
-	others, err := m.src.RunningCaptures(ctx)
-	if err != nil || others == nil {
-		others = []model.CaptureNote{}
+	// Our own capture is excluded by name, not by session id. Two people
+	// watching one session is exactly what this list exists to report, and
+	// filtering on the id would hide the second alongside the first.
+	mine := m.runningName()
+	others := []model.CaptureNote{}
+	if got, err := m.src.RunningCaptures(ctx); err == nil {
+		for _, n := range got {
+			if n.Name != mine {
+				others = append(others, n)
+			}
+		}
 	}
 	st.Others = others
 	return st
@@ -231,7 +250,7 @@ func (m *Manager) drain(ctx context.Context, r *run, interval, limit time.Durati
 		if reason, over := m.tick(ctx, r, limit, &fails); over {
 			ending = true
 			// From a fresh goroutine: Stop waits on this one.
-			go m.Stop(context.Background(), reason)
+			go m.stop(context.Background(), reason, r)
 		}
 	}
 }
@@ -318,11 +337,15 @@ func (m *Manager) finish(r *run) {
 // versus rpc, and two keys of one name in a flat object are not a parse
 // error but something worse, a decoder keeping the last of them.
 type headerRecord struct {
-	Record    string    `json:"record"`
-	Version   string    `json:"version"`
-	Instance  string    `json:"instance"`
-	SessionID int64     `json:"session_id"`
-	StartedAt time.Time `json:"started_at"`
+	Record    string `json:"record"`
+	Version   string `json:"version"`
+	Instance  string `json:"instance"`
+	SessionID int64  `json:"session_id"`
+	// LoginTime is what the capture will watch for a change: a pooled reset
+	// moves it, and the statements after that belong to somebody else.
+	LoginTime    time.Time `json:"login_time"`
+	EventSession string    `json:"event_session"`
+	StartedAt    time.Time `json:"started_at"`
 }
 
 // The embedded statement flattens into the same object, so a line stays one
@@ -355,4 +378,15 @@ type endRecord struct {
 // losing the capture over a full disk would cost the user the session too.
 func (r *run) write(v any) {
 	_ = r.enc.Encode(v)
+}
+
+// runningName is the source's name for the capture this manager is running,
+// or the empty string when it is running none.
+func (m *Manager) runningName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.run == nil {
+		return ""
+	}
+	return m.run.handle.Name
 }

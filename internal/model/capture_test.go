@@ -66,7 +66,7 @@ func TestCaptureStateFieldNamesMatchWhatTheInterfaceReads(t *testing.T) {
 		}
 	}
 	n, _ := json.Marshal(CaptureNote{})
-	for _, name := range []string{`"session_id"`, `"since"`} {
+	for _, name := range []string{`"session_id"`, `"age_sec"`} {
 		if !strings.Contains(string(n), name) {
 			t.Errorf("CaptureNote does not serialise %s; app.js reads it", name)
 		}

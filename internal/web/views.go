@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -331,7 +332,11 @@ func (s *Server) capture(rw http.ResponseWriter, req *http.Request) {
 		// Active as well as Available, so stopping a running capture still
 		// works if the answer ever changes underneath one.
 		if st := m.State(ctx); st.Available || st.Active {
-			if err := m.Toggle(ctx, spid); err != nil {
+			// Not the request's context: a capture outlives the request that
+			// asks for it, and a client that disconnects between the CREATE and
+			// the START would cancel the compensating DROP too, leaving exactly
+			// the residue this design is arranged around not producing.
+			if err := m.Toggle(context.Background(), spid); err != nil {
 				http.Error(rw, err.Error(), http.StatusBadRequest)
 				return
 			}

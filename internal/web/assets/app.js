@@ -1188,9 +1188,11 @@ function captureHead(st, n) {
   if (st.missed) head += ", " + st.missed + " missed between reads";
   if (st.unknown) head += ", and an uncounted gap";
   if (st.dropped) head += ", " + st.dropped + " dropped by the server";
-  const others = (st.others || []).filter((o) => o.session_id !== st.session_id);
+  // Not filtered by session id: two people capturing one session is the
+  // case this line exists for, and the server has already excluded our own.
+  const others = st.others || [];
   if (others.length) {
-    head += " (also captured here: " + others.map((o) => "spid " + o.session_id).join(", ") + ")";
+    head += " (also captured here: " + others.map((o) => "spid " + o.session_id + " for " + fDur(o.age_sec)).join(", ") + ")";
   }
   return head;
 }
