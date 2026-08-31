@@ -6,6 +6,24 @@ constant changes.
 
 ## Unreleased
 
+- The default sampling cadence moves from one second to five, on the request
+  tier and the counter tier together. The two move together because `f` and
+  `/api/period` drive the request tier alone, and leaving the counters at a
+  second would put the dashboard five ticks ahead of the grid it sits above.
+  `f` still steps through 1, 2, 5, 10 and 30 seconds.
+- `p` now holds the display at the moment it is pressed. The panels backed by
+  a request, the plan, the history and the session waits, checked the pause
+  only when deciding whether to ask again, so a response already in flight
+  landed afterwards and repainted a panel that was supposed to be frozen. The
+  same defect was in the sessions, transactions and log views.
+- An open history panel holds the display on its own, without `p`, and lets it
+  go when the panel is closed. A pause taken with `p` beforehand survives that
+  close. A held display carries the same marker as a paused one.
+- Walking the selection with the plan panel open called a function that was
+  never defined and threw on every keypress. The panel caught up on the next
+  tick, which is why nothing looked wrong. All three request-backed panels now
+  follow the selection, not just the plan.
+
 ## 0.5.0, 31 August 2026
 
 The scoped statement capture, and with it the one thing this tool creates on a

@@ -289,8 +289,8 @@ func catalogueGroup(id string) (model.DashboardGroup, bool) {
 func Default() Config {
 	return Config{
 		Tiers: Tiers{
-			Requests:   Duration(time.Second),
-			Counters:   Duration(time.Second),
+			Requests:   Duration(5 * time.Second),
+			Counters:   Duration(5 * time.Second),
 			Space:      Duration(5 * time.Second),
 			CPUHistory: Duration(time.Minute),
 			LivePlan:   Duration(2 * time.Second),

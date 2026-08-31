@@ -685,6 +685,95 @@ try {
   out.captureDrawn = { firstColWidth: 0, rowLines: 0, cells: [], error: String(e) };
 }
 
+
+// Freezing the display. Three things are checked here that a single
+// observation cannot see: that pausing takes effect on a response already in
+// flight, that an open history panel holds the whole screen still, and that
+// walking the selection with the plan panel open raises nothing.
+//
+// Content is not compared, mutations are counted. The fake source returns the
+// same plan rows every time, so a repaint after the pause would redraw
+// identical text and any assertion on the text would pass while the bug was
+// still there.
+out.freeze = {};
+{
+  // Uncaught errors from now on, so the ArrowDown check below has something
+  // to read. A listener rather than a try/catch: an exception thrown inside
+  // an event listener never reaches the caller of dispatchEvent.
+  await ev(`(() => { globalThis.__errs = []; globalThis.addEventListener("error", (e) => globalThis.__errs.push(String(e.message))); })()`);
+
+  // Land on the plan panel with a row selected.
+  await ev(`(() => {
+    const rows = [...document.querySelectorAll("#gridBody tr")].filter((r) => r.children.length > 1 && !r.hidden);
+    rows[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  })()`);
+  if (await ev(`detailMode !== "plan"`)) await ev(key("e"));
+  await sleep(700);
+
+  // Walking the selection with the plan open. This called a function that was
+  // never defined, so it threw every time and the panel only caught up on the
+  // next tick, which is why it went unnoticed.
+  await ev(`globalThis.__errs.length = 0`);
+  await ev(key("ArrowDown"));
+  await sleep(300);
+  out.freeze.moveErrors = await json(`globalThis.__errs`);
+  out.freeze.movedPanel = await ev(`document.getElementById("detailWho").textContent`);
+
+  // A response deliberately still in flight when p is pressed. Without the
+  // guard it lands afterwards and repaints a panel the user has frozen.
+  await ev(`(() => {
+    globalThis.__realFetch = globalThis.fetch;
+    globalThis.fetch = (...a) => new Promise((res, rej) => setTimeout(() => globalThis.__realFetch(...a).then(res, rej), 500));
+  })()`);
+  await ev(`(() => {
+    globalThis.__muts = 0;
+    globalThis.__obs = new MutationObserver(() => { globalThis.__muts++; });
+    globalThis.__obs.observe(document.getElementById("detail"), { childList: true, subtree: true, characterData: true });
+  })()`);
+  await ev(`pollDetail()`);
+  await sleep(60);
+  await ev(key("p"));
+  out.freeze.mutsAtPause = await ev(`globalThis.__muts`);
+  await sleep(900);
+  out.freeze.mutsAfterPause = await ev(`globalThis.__muts`);
+  out.freeze.pausedFlag = await ev(`paused`);
+  await ev(`(() => { globalThis.__obs.disconnect(); globalThis.fetch = globalThis.__realFetch; })()`);
+  await ev(key("p"));
+  await sleep(400);
+
+  // The history panel holds the grid still on its own, without p. seq is the
+  // server's sequence number, so it moves on every tick that reaches the page.
+  if (await ev(`detailMode !== "history"`)) await ev(key("y"));
+  await sleep(500);
+  const histSeq = await ev(`document.getElementById("seq").textContent`);
+  out.freeze.historyPausedFlag = await ev(`paused`);
+  out.freeze.historyMarked = await ev(`!document.getElementById("pauseMark").hidden`);
+  await sleep(900);
+  out.freeze.history = { before: histSeq, after: await ev(`document.getElementById("seq").textContent`) };
+
+  // Closing it lets the screen go again.
+  await ev(key("y"));
+  const resumedFrom = await ev(`document.getElementById("seq").textContent`);
+  await sleep(900);
+  out.freeze.afterHistory = { before: resumedFrom, after: await ev(`document.getElementById("seq").textContent`) };
+
+  // An explicit pause outlives the history panel: p was the user saying stop,
+  // and closing a panel is not a request to start again.
+  await ev(key("p"));
+  await ev(key("y"));
+  await sleep(300);
+  await ev(key("y"));
+  const stillSeq = await ev(`document.getElementById("seq").textContent`);
+  await sleep(900);
+  out.freeze.pauseSurvives = {
+    on: await ev(`paused`),
+    before: stillSeq,
+    after: await ev(`document.getElementById("seq").textContent`),
+  };
+  await ev(key("p"));
+  await sleep(300);
+}
+
 console.log(JSON.stringify(out));
 ws.close();
 Deno.exit(0);

@@ -39,3 +39,7 @@ bench/
 /sqltop
 /sqlstress/sqlstress
 .codegraph/
+
+# Local agent skills. Kept on the machine that wrote them rather than shared:
+# they record how to launch the tool against this environment's containers.
+.claude/

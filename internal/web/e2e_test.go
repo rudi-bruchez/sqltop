@@ -578,6 +578,59 @@ func TestEndToEndInABrowser(t *testing.T) {
 			got.Flipping.StaleWhileGreyed)
 	}
 
+	// Freezing. The three defects here were all invisible to a single look at
+	// the screen: each one needs two observations, or an error nobody was
+	// listening for.
+	t.Logf("freeze: moveErrors=%v mutsAtPause=%d mutsAfterPause=%d history %s->%s afterHistory %s->%s",
+		got.Freeze.MoveErrors, got.Freeze.MutsAtPause, got.Freeze.MutsAfterPause,
+		got.Freeze.History.Before, got.Freeze.History.After,
+		got.Freeze.AfterHistory.Before, got.Freeze.AfterHistory.After)
+
+	if len(got.Freeze.MoveErrors) > 0 {
+		t.Errorf("moving the selection with the plan panel open raised %v; the panel follows the selected row, so this is the path that has to work",
+			got.Freeze.MoveErrors)
+	}
+	if got.Freeze.MovedPanel == "" {
+		t.Error("the plan panel lost its heading after the selection moved")
+	}
+
+	// The mutation count is taken twice: once at the moment p is pressed, and
+	// once after the delayed response has certainly landed. Equal counts mean
+	// the response was dropped rather than drawn.
+	if got.Freeze.MutsAfterPause != got.Freeze.MutsAtPause {
+		t.Errorf("the detail panel changed %d times after p was pressed (%d at the keypress, %d after the in-flight response landed); pausing has to drop a response already on its way, not draw it",
+			got.Freeze.MutsAfterPause-got.Freeze.MutsAtPause, got.Freeze.MutsAtPause, got.Freeze.MutsAfterPause)
+	}
+	if !got.Freeze.PausedFlag {
+		t.Error("p did not set the paused flag")
+	}
+
+	// The history panel freezes the screen by itself, and says so.
+	if got.Freeze.HistoryPausedFlag {
+		t.Error("opening the history set the explicit pause flag; the two have to stay separable, or closing the panel would clear a pause the user asked for")
+	}
+	if !got.Freeze.HistoryMarked {
+		t.Error("the display is frozen by the history panel but nothing on screen says so; a still screen with no marker reads as a crash")
+	}
+	if got.Freeze.History.Before != got.Freeze.History.After {
+		t.Errorf("the grid moved from seq %s to %s while the history panel was open; the panel is there to be read, and it cannot be read while the rows under it are replaced",
+			got.Freeze.History.Before, got.Freeze.History.After)
+	}
+	if got.Freeze.AfterHistory.Before == got.Freeze.AfterHistory.After {
+		t.Errorf("the grid was still stuck at seq %s after the history panel was closed; the freeze has to lift with the panel",
+			got.Freeze.AfterHistory.After)
+	}
+
+	// p before y, and the panel closed again: the pause is the user's, the
+	// freeze is the panel's, and the panel must not clear the user's.
+	if !got.Freeze.PauseSurvives.On {
+		t.Error("closing the history panel cleared an explicit pause taken before it was opened")
+	}
+	if got.Freeze.PauseSurvives.Before != got.Freeze.PauseSurvives.After {
+		t.Errorf("the grid resumed from seq %s to %s after the history panel closed, although p had been pressed first",
+			got.Freeze.PauseSurvives.Before, got.Freeze.PauseSurvives.After)
+	}
+
 	// Folding hands height back to the grid, which is the point of it.
 	if !(got.Fold.AfterGroup > got.Fold.Before && got.Fold.AfterAll > got.Fold.AfterGroup) {
 		t.Errorf("folding did not give the grid its height back: %d before, %d after one group, %d after the whole dashboard",
@@ -852,6 +905,28 @@ type e2eResult struct {
 		Greyed           int      `json:"greyed"`
 		StaleWhileGreyed []string `json:"staleWhileGreyed"`
 	} `json:"flipping"`
+	Freeze struct {
+		MoveErrors        []string `json:"moveErrors"`
+		MovedPanel        string   `json:"movedPanel"`
+		MutsAtPause       int      `json:"mutsAtPause"`
+		MutsAfterPause    int      `json:"mutsAfterPause"`
+		PausedFlag        bool     `json:"pausedFlag"`
+		HistoryPausedFlag bool     `json:"historyPausedFlag"`
+		HistoryMarked     bool     `json:"historyMarked"`
+		History           struct {
+			Before string `json:"before"`
+			After  string `json:"after"`
+		} `json:"history"`
+		AfterHistory struct {
+			Before string `json:"before"`
+			After  string `json:"after"`
+		} `json:"afterHistory"`
+		PauseSurvives struct {
+			On     bool   `json:"on"`
+			Before string `json:"before"`
+			After  string `json:"after"`
+		} `json:"pauseSurvives"`
+	} `json:"freeze"`
 	AnchorDrops struct {
 		Rows        int `json:"rows"`
 		ScrollAfter int `json:"scrollAfter"`
@@ -970,8 +1045,16 @@ func browserTestServer(t *testing.T) (*Server, string, func()) {
 	w := window.New(time.Minute, 5000)
 	w.Append(time.Now(), rows)
 
+	// Both tiers the page redraws from are pinned here rather than inherited.
+	// Counters was left on the default until that default moved to 5s, at
+	// which point the flipping-figure watch below stopped seeing the figure
+	// go away at all: it samples 40 times at 120ms, so a 5s counter tier
+	// never alternates inside its window and the honesty check passed while
+	// observing one state. A test that sets the cadence it depends on cannot
+	// be quietly retuned by a change to the product's defaults.
 	tiers := config.Default().Tiers
 	tiers.Requests = config.Duration(200 * time.Millisecond)
+	tiers.Counters = config.Duration(200 * time.Millisecond)
 	c := collector.New(src, w, collector.NewBudget(50, tiers))
 
 	srv, err := NewServer(c, w, config.Server{Port: 0})

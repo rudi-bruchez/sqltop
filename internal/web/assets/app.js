@@ -657,11 +657,11 @@ const COMMANDS = [
   ["t", "show the selected row's statement under the grid", "text"],
   ["e", "follow the selected request through its plan as it runs", "plan"],
   ["d", "write the selected request's plan to plans/ beside the binary", "save plan"],
-  ["y", "show what the selected session has been seen running in the window", "history"],
+  ["y", "show what the selected session has been seen running, holding the display while it is open", "history"],
   ["n", "show what the selected session has waited on", "waits"],
   ["c", "capture every statement the selected session runs, into traces/", "capture"],
   ["s", "save the current state to snapshots/ beside the binary", "save"],
-  ["p", "pause and resume the display", "pause"],
+  ["p", "pause and resume the display, keeping every panel as it stands", "pause"],
   ["f", "cycle the refresh period", "rate"],
   ["h", "this list", "help"],
   ["ArrowUp", "move the selection up the grid", "", "\u2191"],
@@ -780,7 +780,7 @@ function setView(id) {
   for (const v of ["sessions", "transactions", "logs"]) $("panel-" + v).hidden = v !== id;
   buildColumnPanel();
   applyColumns();
-  if (!isGrid(id)) pollView();
+  if (!isGrid(id)) pollView(true);
 }
 
 // blockingRows keeps the chains and drops everything else. The rows arrive
@@ -808,7 +808,10 @@ const POLL_FLOOR = { sessions: 2000, transactions: 5000, logs: 5000 };
 // pollView asks for the active list view and schedules the next ask, at
 // whichever is slower, the sampling period or that view's own floor.
 let pollTimer = 0;
-function pollView() {
+// force marks the calls that come from something the user just did: switching
+// to the view, or lifting the freeze. Those draw whatever comes back. The
+// call the timer makes does not, so a frozen list stays as it was.
+function pollView(force) {
   clearTimeout(pollTimer);
   const v = activeView;
   if (isGrid(v)) return;
@@ -818,10 +821,14 @@ function pollView() {
     // would then redraw a hidden panel with the view's own data, which is
     // harmless, and set that view's cached payload to something older than
     // what a later request may already have returned, which is not.
-    .then((j) => { if (activeView === v) renderList(v, j); })
+    // Frozen is checked here and not only below: a request already in flight
+    // when p was pressed still resolves, and drawing it would repaint a view
+    // the user has just held still. Checking only before rescheduling let
+    // exactly one more redraw through, which is what this looked like.
+    .then((j) => { if (activeView === v && (force || !frozen())) renderList(v, j); })
     .catch((e) => showListError(v, e.message))
     .finally(() => {
-      if (activeView === v && !paused) pollTimer = setTimeout(pollView, Math.max(periodMs || 1000, POLL_FLOOR[v] || 5000));
+      if (activeView === v && !frozen()) pollTimer = setTimeout(() => pollView(), Math.max(periodMs || 1000, POLL_FLOOR[v] || 5000));
     });
 }
 
@@ -953,19 +960,45 @@ function saveLayout() {
 // text was sent while nobody was listening: the server sends a reference
 // once and never again while the session is alive.
 let paused = false;
-function togglePause() {
-  paused = !paused;
-  $("pauseMark").hidden = !paused;
-  if (paused) {
-    say("display paused, press p to resume");
-    return;
+
+// frozen is what every drawing path consults, and the only thing they should
+// consult. It unions the two ways the screen is held still: p, which is the
+// user saying stop, and an open history panel, which is a list of statements
+// meant to be read and cannot be read while the rows behind it are replaced.
+//
+// The two stay separate variables rather than one flag because closing the
+// panel must not clear a pause the user asked for first. The panel only
+// counts while it is actually on screen: detailMode survives a switch to a
+// list view, where the panel is hidden, and a hidden panel freezing a list
+// nobody can connect it to would be a screen stuck for no visible reason.
+function frozen() {
+  return paused || (detailMode === "history" && isGrid(activeView));
+}
+
+// applyFreeze puts the marker and the message in step with that state, and
+// restarts whatever gave up its timer. Both pollers stop rescheduling while
+// frozen, so lifting the freeze without this leaves a screen that never comes
+// back: the bug that once left a paused list view frozen after resuming until
+// the user switched tabs and back.
+// restart is false for the one caller that has already asked for its own
+// data: setDetail forces a poll of the panel it just opened or closed, and
+// letting this restart it too would send a second request for the same answer
+// every time the history panel is closed.
+function applyFreeze(was, restart) {
+  const now = frozen();
+  $("pauseMark").hidden = !now;
+  if (now) say(paused ? "display paused, press p to resume" : "display held while the history is open, press y to close it");
+  else if (was) say("");
+  if (was && !now && restart !== false) {
+    if (!isGrid(activeView)) pollView(true);
+    else pollDetail(true);
   }
-  say("");
-  // Both pollers stop rescheduling themselves while paused, so resuming has
-  // to start them again. Without this a paused list view stayed frozen after
-  // resuming until the user switched tabs and back.
-  if (!isGrid(activeView)) pollView();
-  else pollDetail();
+}
+
+function togglePause() {
+  const was = frozen();
+  paused = !paused;
+  applyFreeze(was);
 }
 
 // The ladder the f command steps through. Fixed rather than typed in:
@@ -1109,6 +1142,7 @@ function setDetail(mode) {
     say("the detail panel follows the requests and blocking views");
     return;
   }
+  const was = frozen();
   detailMode = detailMode === mode ? null : mode;
   $("detail").hidden = detailMode === null;
   $("sqlText").hidden = detailMode !== "sql";
@@ -1116,7 +1150,11 @@ function setDetail(mode) {
   detailShown = null;
   clearTimeout(detailTimer);
   renderDetail();
-  pollDetail();
+  pollDetail(true);
+  // Opening or closing the history panel is itself a change of freeze state,
+  // so the marker, the message and the pollers are settled here the same way
+  // p settles them.
+  applyFreeze(was, false);
   // The grid gives up its height to the panel, so it has to be told.
   layout();
 }
@@ -1198,7 +1236,10 @@ function captureHead(st, n) {
 }
 
 let detailTimer = 0;
-function pollDetail() {
+// force has the same meaning as it does on pollView: opening the panel or
+// walking the selection is the user asking for this row's answer, and it is
+// answered even while the display is frozen. The timer's call is not.
+function pollDetail(force) {
   clearTimeout(detailTimer);
   const mode = detailMode;
   const src = DETAIL_SOURCE[mode];
@@ -1215,12 +1256,16 @@ function pollDetail() {
     .then((res) => res.json().then((j) => (res.ok ? j : Promise.reject(new Error(j.error || res.statusText)))))
     .then((j) => {
       if (detailMode !== mode) return;
+      // The same in-flight response the list views had to guard against. This
+      // panel showed it most: a plan or a history frozen by p was repainted
+      // once more a moment later, by a request that had already left.
+      if (!force && frozen()) return;
       const rows = j.rows || [];
       $("detailWho").textContent = src.heading(spid, rows, j);
       const el = $("detailList");
       el.textContent = "";
       el.appendChild(listTable(src.view, rows));
-      if (!paused) detailTimer = setTimeout(pollDetail, Math.max(periodMs || 1000, 1000));
+      if (!frozen()) detailTimer = setTimeout(() => pollDetail(), Math.max(periodMs || 1000, 1000));
     })
     .catch((e) => detailNote(e.message));
 }
@@ -1270,7 +1315,7 @@ function toggleCapture() {
   post("/api/capture?spid=" + val(r, "spid"), "", "application/json")
     .then(() => {
       if (detailMode !== "capture") setDetail("capture");
-      pollDetail();
+      pollDetail(true);
     })
     .catch((e) => say("could not change the capture: " + e.message));
 }
@@ -1326,7 +1371,13 @@ function moveSelection(delta) {
   // layout marks the selected row itself, so there is nothing to toggle here.
   layout();
   renderDetail();
-  if (detailMode === "plan") pollPlan();
+  // Every panel backed by a request belongs to the selected row, so all of
+  // them follow the selection, not just the plan. This called pollPlan, which
+  // was never defined anywhere: it threw on every keypress, and the panel
+  // caught up on the next tick, which is why nothing looked wrong. Forced,
+  // because moving the selection is a request for this row's answer even
+  // while the display is frozen.
+  pollDetail(true);
 }
 
 function toggleHelp() {
@@ -1402,7 +1453,7 @@ function acquireRow() {
     selectedKey = tr._key;
     for (const e of pool) e.tr.classList.toggle("sel", e.tr._key === selectedKey);
     renderDetail();
-    pollDetail();
+    pollDetail(true);
   });
   const entry = { tr, tds, key: null, prev: {} };
   pool.push(entry);
@@ -1512,7 +1563,7 @@ es.addEventListener("snapshot", (e) => {
   if (p.cols) setCols(p.cols);
   if (p.grid) setGrid(p.grid);
   if (p.dash) buildDashboard(p.dash);
-  if (paused) {
+  if (frozen()) {
     // Absorbed even while frozen: a reference is sent once for the life of
     // a session, so dropping one here would leave a row permanently
     // without its SQL text after resuming.

@@ -84,7 +84,7 @@ that, which is what you want over SSH.
 | `↑` `↓` | Move the selection through the grid |
 | `t` | Show the selected row's statement under the grid |
 | `s` | Save the visible state to `snapshots/` beside the binary |
-| `p` | Pause and resume the display |
+| `p` | Pause and resume the display, holding every panel as it stands |
 | `f` | Step the sampling period through 1, 2, 5, 10 and 30 seconds |
 | `h` | The same list, on screen |
 

@@ -464,13 +464,13 @@ commands instead of text.
 |---|---|
 | `t` | Shows the selected row's statement under the grid, on the requests and blocking views |
 | `s` | Saves the state to `snapshots/server-yyyy-mm-dd-hhmmss.html` beside the binary |
-| `p` | Pauses and resumes the display |
+| `p` | Pauses and resumes the display, holding every panel as it stands |
 | `f` | Steps the refresh period through 1, 2, 5, 10 and 30 seconds |
 | `h` | Shows the list of commands |
 | `↑` `↓` | Move the selection one row up or down the grid |
 | `e` | Follows the selected request through its plan as it runs |
 | `d` | Writes the selected request's plan to `plans/` beside the binary |
-| `y` | Shows what the selected session has been seen running over the window |
+| `y` | Shows what the selected session has been seen running over the window, and holds the display until it is closed |
 | `n` | Shows what the selected session has waited on |
 
 The list is generated from one table in the page, which the key handler also
@@ -620,6 +620,23 @@ On `p`. The stream is left running and its reference table is still
 absorbed while frozen, because the server sends a session's SQL text once
 and never again while that session is alive; dropping those would leave rows
 permanently blank after resuming.
+
+The freeze covers every panel at once, and it covers a response that has
+already left. The panels backed by a request, the plan, the history and the
+session waits, each check the freeze where they draw and not only where they
+decide to ask again: a request in flight when the key is pressed resolves
+afterwards, and drawing it repainted a panel the user had just held still.
+That is one redraw after the pause, which is exactly the amount that makes
+the tool look unreliable without ever being reproducible on demand.
+
+On `y`. An open history panel holds the display on its own, without `p`. The
+panel is a list of what a session has run, put on screen to be read, and it
+cannot be read while the grid behind it is replaced under the selection it
+belongs to. Closing the panel lifts that hold. It does not lift a pause taken
+with `p` beforehand: the pause is the user's, the hold is the panel's, and a
+panel must not answer a question the user did not ask. A held display shows
+the same marker as a paused one, since a screen that has stopped moving for
+no visible reason reads as a crash.
 
 On `f`. It changes the sampling rate, not the rate at which the browser
 redraws. Sampling is the number the monitored instance pays for, and slowing
@@ -838,8 +855,8 @@ instances:
     dsn: sqlserver://x.database.windows.net?database=sales
 
 tiers:
-  requests: 1s
-  counters: 1s
+  requests: 5s
+  counters: 5s
   space: 5s
   cpuHistory: 60s
   livePlan: 2s
@@ -1060,8 +1077,8 @@ default and is configurable in the JSON file, section 8.3.
 
 | Tier | Period | Contents |
 |---|---|---|
-| A | 1 s | Requests, sessions, waiting tasks, active request count |
-| B | 1 s | The filtered performance counter query, `sys.dm_os_sys_info` |
+| A | 5 s | Requests, sessions, waiting tasks, active request count |
+| B | 5 s | The filtered performance counter query, `sys.dm_os_sys_info` |
 | C | 5 s | tempdb file space, version store, memory clerks, scheduler detail |
 | D | 1 min | Ring buffer CPU history, which the engine only produces once a minute |
 | On demand | - | SQL text of a selected request, execution plan, live plan progress, and the session, transaction and log views of section 7.2 |

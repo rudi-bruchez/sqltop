@@ -152,8 +152,18 @@ func TestPeriodChangesTheSamplingRate(t *testing.T) {
 	srv := commandServer(t)
 	before := srv.col.Period(model.TierRequests)
 
+	// The period asked for has to differ from the one already running, or the
+	// test passes on a command that does nothing. It asked for 5s until the
+	// default became 5s, at which point it could no longer tell a working
+	// command from a broken one. Asserted rather than assumed, so the next
+	// move of the default fails here loudly instead of going quiet.
+	const want = 10 * time.Second
+	if before == want {
+		t.Fatalf("the default is already %s: pick a target the command has to move to", want)
+	}
+
 	rw := httptest.NewRecorder()
-	srv.period(rw, httptest.NewRequest(http.MethodPost, "/api/period", strings.NewReader(`{"period":"5s"}`)))
+	srv.period(rw, httptest.NewRequest(http.MethodPost, "/api/period", strings.NewReader(`{"period":"10s"}`)))
 	if rw.Code != http.StatusOK {
 		t.Fatalf("period returned %d: %s", rw.Code, rw.Body)
 	}
@@ -161,8 +171,8 @@ func TestPeriodChangesTheSamplingRate(t *testing.T) {
 	if after == before {
 		t.Fatalf("the request tier is still sampled every %s", after)
 	}
-	if after != 5*time.Second {
-		t.Errorf("the request tier is sampled every %s, want 5s", after)
+	if after != want {
+		t.Errorf("the request tier is sampled every %s, want %s", after, want)
 	}
 }
 

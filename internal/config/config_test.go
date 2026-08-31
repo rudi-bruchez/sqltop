@@ -736,3 +736,40 @@ func TestWriteConfigListsEveryColumn(t *testing.T) {
 		}
 	}
 }
+
+// The sampling cadence a fresh install runs at. Pinned by a test because it
+// is the one default an operator feels immediately: it is what the tool costs
+// the instance it watches, every second, before anybody touches a key.
+//
+// Requests and Counters move together on purpose. The f key and /api/period
+// drive the request tier alone, so letting the counters run faster would put
+// the dashboard five ticks ahead of the grid it sits above, for figures
+// nobody reads that often.
+func TestDefaultSamplingCadenceIsFiveSeconds(t *testing.T) {
+	d := Default()
+	for _, c := range []struct {
+		field string
+		got   Duration
+		want  time.Duration
+	}{
+		{"tiers.requests", d.Tiers.Requests, 5 * time.Second},
+		{"tiers.counters", d.Tiers.Counters, 5 * time.Second},
+	} {
+		if c.got.Std() != c.want {
+			t.Errorf("%s = %s, want %s", c.field, c.got.Std(), c.want)
+		}
+	}
+}
+
+// The tiers deliberately left alone by that change. A live plan that only
+// advanced every five seconds would stop showing a statement progressing,
+// which is the whole reason the panel exists.
+func TestDefaultLeavesThePlanAndHistoryTiersAlone(t *testing.T) {
+	d := Default()
+	if got := d.Tiers.LivePlan.Std(); got != 2*time.Second {
+		t.Errorf("tiers.livePlan = %s, want 2s: the live plan must stay finer than the grid", got)
+	}
+	if got := d.Tiers.CPUHistory.Std(); got != time.Minute {
+		t.Errorf("tiers.cpuHistory = %s, want 1m", got)
+	}
+}
