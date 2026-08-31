@@ -324,9 +324,17 @@ func (s *Server) capture(rw http.ResponseWriter, req *http.Request) {
 			http.Error(rw, "a session id is required", http.StatusBadRequest)
 			return
 		}
-		if err := m.Toggle(ctx, spid); err != nil {
-			http.Error(rw, err.Error(), http.StatusBadRequest)
-			return
+		// A capture that is merely unavailable is an answer, not a failure.
+		// The panel only opens on a 200, so an error status here leaves the
+		// reason in a message that fades and no panel to read it in, which
+		// is the one thing the key most needs to say when it does nothing.
+		// Active as well as Available, so stopping a running capture still
+		// works if the answer ever changes underneath one.
+		if st := m.State(ctx); st.Available || st.Active {
+			if err := m.Toggle(ctx, spid); err != nil {
+				http.Error(rw, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	rows := m.Recent()

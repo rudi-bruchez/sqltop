@@ -466,3 +466,51 @@ func TestPollReportsMissedEventsUnderLoad(t *testing.T) {
 		t.Errorf("Total is %d, want at least the 2500 driven", prog.Total)
 	}
 }
+
+func TestWithoutTheFlagNothingIsEverCreated(t *testing.T) {
+	// The read-only guarantee in one test: the count of event sessions on
+	// the server must not move, in either direction, across everything the
+	// feature can be asked to do.
+	s := open(t)
+	db := captureDB(t)
+	_, caps, err := s.Identify(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caps.Has(model.CapCaptureSession) {
+		t.Fatal("the capture capability is present without the flag")
+	}
+	ok, why, err := s.CanCapture(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("CanCapture said yes without the flag")
+	}
+	if !strings.Contains(why, "-capture") {
+		t.Errorf("the reason is %q; it has to name the flag, or the panel cannot tell the user what to do", why)
+	}
+
+	before := countSessions(t, db)
+	if _, err := s.SweepCaptures(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartCapture(context.Background(), 51); err == nil {
+		t.Error("StartCapture succeeded without the flag")
+	}
+	if got := countSessions(t, db); got != before {
+		t.Errorf("event session count moved from %d to %d without the flag", before, got)
+	}
+}
+
+func TestTheCapabilityAppearsWithTheFlag(t *testing.T) {
+	s := open(t)
+	s.AllowCapture(true)
+	_, caps, err := s.Identify(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.Has(model.CapCaptureSession) {
+		t.Error("the flag is on and the login is sa, so the capability should be present")
+	}
+}

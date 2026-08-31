@@ -28,6 +28,7 @@ func main() {
 	writeConfig := flag.Bool("write-config", false, "write a complete sqltop.yaml, every dashboard tile listed, and exit")
 	noBrowser := flag.Bool("no-browser", false, "do not open the interface in a browser at startup")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	capture := flag.Bool("capture", false, "allow the c command to create a scoped Extended Events session on the monitored server; without this the tool creates and drops nothing")
 	flag.Parse()
 
 	if *showVersion {
@@ -115,10 +116,26 @@ func main() {
 	defer stop()
 
 	src := mssql.New()
+	src.AllowCapture(*capture)
 	if err := src.Open(ctx, dsn); err != nil {
 		log.Fatal(err)
 	}
 	defer src.Close()
+
+	// The recovery sweep is behind the flag like everything else, because it
+	// is itself a DROP and a server whose operator never asked for captures
+	// must see nothing created and nothing removed. It runs here, before the
+	// collector takes the connection, so it is over before anything else
+	// competes for it, and it says what it dropped: a tool that quietly
+	// deletes objects on somebody's server is worse than one that does not.
+	if *capture {
+		switch n, err := src.SweepCaptures(ctx); {
+		case err != nil:
+			log.Printf("warning: could not look for abandoned capture sessions: %v", err)
+		case n > 0:
+			log.Printf("dropped %d abandoned capture session(s) left behind by an earlier run", n)
+		}
+	}
 
 	win := window.New(cfg.Retention.Std(), cfg.Budget.MaxSamples)
 	col := collector.New(src, win, collector.NewBudget(cfg.Budget.ServerCPUMsPerSecond, cfg.Tiers))

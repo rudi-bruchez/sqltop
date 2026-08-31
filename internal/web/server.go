@@ -16,6 +16,7 @@ import (
 
 	"github.com/rudi-bruchez/sqltop/internal/collector"
 	"github.com/rudi-bruchez/sqltop/internal/config"
+	"github.com/rudi-bruchez/sqltop/internal/model"
 	"github.com/rudi-bruchez/sqltop/internal/window"
 )
 
@@ -46,6 +47,10 @@ type Server struct {
 	cfg    config.Config
 	dash   []DashGroup
 	grid   []GridView
+	// clients is the number of open streams, and captureIdle the pending
+	// grace period armed once that reaches zero. Both under mu.
+	clients     int
+	captureIdle *time.Timer
 }
 
 // WithConfig gives the server the resolved configuration: what the
@@ -414,6 +419,55 @@ func gracefulShutdown(srv *http.Server) {
 	}
 }
 
+// captureGrace is how long an unwatched capture keeps running after the last
+// browser goes away. Thirty seconds, because a page reload is a
+// disconnection and a capture that died on every refresh would be unusable.
+// A var only so a test can shrink it.
+var captureGrace = 30 * time.Second
+
+// stopCapture ends whatever capture is running, if any. It makes its own
+// context: the request that started the capture is long gone by the time
+// either caller fires, and the DROP still has to reach the server.
+func (s *Server) stopCapture(reason model.StopReason) {
+	if m := s.col.Captures(); m != nil {
+		m.Stop(context.Background(), reason)
+	}
+}
+
+// cancelGraceLocked disarms the pending grace period. Callers hold s.mu.
+func (s *Server) cancelGraceLocked() {
+	if s.captureIdle != nil {
+		s.captureIdle.Stop()
+		s.captureIdle = nil
+	}
+}
+
+// clientArrived and clientLeft bracket one open stream. The count is what
+// makes a second tab, or a reload that overlaps the old connection, keep the
+// capture alive.
+func (s *Server) clientArrived() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clients++
+	s.cancelGraceLocked()
+}
+
+func (s *Server) clientLeft() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clients--
+	if s.clients > 0 {
+		return
+	}
+	s.cancelGraceLocked()
+	// A timer, not a deadline checked inside the stream's own select: that
+	// loop re-arms on every tick, so a timer built there would be rebuilt
+	// before it could ever fire.
+	s.captureIdle = time.AfterFunc(captureGrace, func() {
+		s.stopCapture(model.StopByBrowserGone)
+	})
+}
+
 // Serve blocks until ctx is done, then shuts the server down and returns.
 // The shutdown goroutine below is the only one this method starts, and
 // Serve does not return until that goroutine has actually finished, not
@@ -451,6 +505,17 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	err := srv.Serve(s.listener)
 	<-done // Serve has returned; wait for the watcher goroutine above to finish too, so Serve never returns while a goroutine it started is still running.
+
+	// An event session outliving the process is the residue this whole
+	// design is arranged around not producing, and leaving the one ending we
+	// can see coming to a later run's sweep would mean the sweep is never
+	// exercised. Before the caller closes the source, which is why it is
+	// here rather than deferred in main.
+	s.mu.Lock()
+	s.cancelGraceLocked()
+	s.mu.Unlock()
+	s.stopCapture(model.StopByShutdown)
+
 	if err != nil && err != http.ErrServerClosed {
 		return err
 	}

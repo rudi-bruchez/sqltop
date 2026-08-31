@@ -86,6 +86,11 @@ func New() *Source {
 	}
 }
 
+// AllowCapture carries -capture into the source. Called before Open and never
+// again, which is why it is a plain assignment rather than a locked one: the
+// goroutines that read the field do not exist yet.
+func (s *Source) AllowCapture(ok bool) { s.captureAllowed = ok }
+
 // sessionInit runs once, when the pinned connection is first established, and
 // again on the rare re-pin after Source has discovered the previous
 // connection is dead - pinning means there is no reset in between to run it
@@ -466,6 +471,16 @@ func (s *Source) Identify(ctx context.Context) (model.ServerInfo, model.Capabili
 	// zero time, which the wire maps to "unknown" and the page renders as
 	// no uptime at all rather than as a duration counted from the year 1.
 	info.StartedAt = s.startTime(ctx)
+
+	// The flag gates the capability and nothing else. A source withdrawn
+	// from the capture machinery altogether could only tell the panel it
+	// cannot capture, when the true answer is that nobody asked for the
+	// feature; CanCapture is what distinguishes the two.
+	if s.captureAllowed {
+		if ok, _, err := s.CanCapture(ctx); err == nil && ok {
+			caps = caps.With(model.CapCaptureSession)
+		}
+	}
 
 	// Task 9's sampling goroutine reads s.info/s.caps, while the collector
 	// may be re-identifying, so the write goes under the same lock every

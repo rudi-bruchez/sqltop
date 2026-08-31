@@ -156,6 +156,9 @@ type Capturing struct {
 	// Running is what RunningCaptures reports: the captures somebody else
 	// already has on this instance.
 	Running []model.CaptureNote
+	// Refuse, when set, is why this source will not capture, which is the
+	// shape of a real source without -capture.
+	Refuse string
 
 	cmu     sync.Mutex
 	login   time.Time
@@ -169,7 +172,14 @@ func NewCapturing(rows []model.RequestSample) *Capturing {
 	return &Capturing{Source: New(rows), login: time.Now()}
 }
 
-func (c *Capturing) CanCapture(context.Context) (bool, string, error) { return true, "", nil }
+func (c *Capturing) CanCapture(context.Context) (bool, string, error) {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	if c.Refuse != "" {
+		return false, c.Refuse, nil
+	}
+	return true, "", nil
+}
 
 func (c *Capturing) SweepCaptures(context.Context) (int, error) { return 0, nil }
 
@@ -201,6 +211,21 @@ func (c *Capturing) PollCapture(_ context.Context, _ source.CaptureHandle, mark 
 		return nil, prog, nil
 	}
 	return append([]model.CapturedStatement(nil), c.Statements[mark:]...), prog, nil
+}
+
+// Started is the session ids a capture was asked for, in order.
+func (c *Capturing) Started() []int64 {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	return append([]int64(nil), c.started...)
+}
+
+// Stopped is the handles dropped so far, in order, so a test can tell an
+// event session that was really dropped from a panel that merely says so.
+func (c *Capturing) Stopped() []source.CaptureHandle {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	return append([]source.CaptureHandle(nil), c.stopped...)
 }
 
 func (c *Capturing) StopCapture(_ context.Context, h source.CaptureHandle) error {
