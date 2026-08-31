@@ -270,3 +270,27 @@ func TestPressingCWithoutTheFlagOpensThePanelAndSaysSo(t *testing.T) {
 		t.Errorf("the source was asked to start %d captures with the flag off", n)
 	}
 }
+
+// TestTheGracePeriodDoesNotEndACaptureItNeverSaw covers the one way the
+// browser-gone rule can end the wrong capture: the timer is armed by the last
+// stream leaving, whether or not anything is being captured, so a capture
+// begun during the grace period would be killed by a timer that predates it.
+func TestTheGracePeriodDoesNotEndACaptureItNeverSaw(t *testing.T) {
+	old := captureGrace
+	captureGrace = 40 * time.Millisecond
+	t.Cleanup(func() { captureGrace = old })
+
+	s, _ := newCapturingTestServer(t)
+	s.clientArrived()
+	s.clientLeft() // arms the grace period with nothing running
+
+	time.Sleep(10 * time.Millisecond)
+	if err := s.col.Captures().Toggle(context.Background(), 51); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond) // well past the grace period
+
+	if st := s.col.Captures().State(context.Background()); !st.Active {
+		t.Errorf("a capture started after the timer was armed was ended by it: %q", st.Stopped)
+	}
+}

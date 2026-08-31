@@ -463,7 +463,24 @@ func (s *Server) clientLeft() {
 	// A timer, not a deadline checked inside the stream's own select: that
 	// loop re-arms on every tick, so a timer built there would be rebuilt
 	// before it could ever fire.
+	armed := time.Now()
 	s.captureIdle = time.AfterFunc(captureGrace, func() {
+		// Two things can have changed by the time this runs, and neither is
+		// caught by disarming, because a timer already firing cannot be
+		// stopped. A client may have come back. And a capture may have been
+		// started since, by something that is not the page, which this
+		// timer was never armed for and has no business ending.
+		s.mu.Lock()
+		clients := s.clients
+		s.mu.Unlock()
+		if clients > 0 {
+			return
+		}
+		if m := s.col.Captures(); m != nil {
+			if st := m.State(context.Background()); st.Active && st.StartedAt.After(armed) {
+				return
+			}
+		}
 		s.stopCapture(model.StopByBrowserGone)
 	})
 }
