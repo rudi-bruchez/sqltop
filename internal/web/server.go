@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path"
 	"sync"
 	"time"
 
@@ -232,8 +233,12 @@ func (s *Server) routes() ([]route, error) {
 // stylesheet or a two hundred line script inside a Go string literal is
 // its own kind of mistake
 // waiting to happen.
-func composePage() ([]byte, error) {
-	html, err := assetsFS.ReadFile("assets/index.html")
+func composePage() ([]byte, error) { return compose("assets/index.html", "assets/app.js") }
+
+// compose builds one self-contained page from an HTML file, style.css and a
+// script, for the reason given on composePage.
+func compose(htmlPath, jsPath string) ([]byte, error) {
+	html, err := assetsFS.ReadFile(htmlPath)
 	if err != nil {
 		return nil, err
 	}
@@ -241,22 +246,22 @@ func composePage() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	js, err := assetsFS.ReadFile("assets/app.js")
+	js, err := assetsFS.ReadFile(jsPath)
 	if err != nil {
 		return nil, err
 	}
 
 	link := []byte(`<link rel="stylesheet" href="style.css">`)
 	if !bytes.Contains(html, link) {
-		return nil, fmt.Errorf("web: assets/index.html does not carry the expected stylesheet link")
+		return nil, fmt.Errorf("web: %s does not carry the expected stylesheet link", htmlPath)
 	}
 	styled := append([]byte("<style>\n"), css...)
 	styled = append(styled, []byte("\n</style>")...)
 	html = bytes.Replace(html, link, styled, 1)
 
-	script := []byte(`<script src="app.js"></script>`)
+	script := []byte(`<script src="` + path.Base(jsPath) + `"></script>`)
 	if !bytes.Contains(html, script) {
-		return nil, fmt.Errorf("web: assets/index.html does not carry the expected script tag")
+		return nil, fmt.Errorf("web: %s does not carry the expected script tag", htmlPath)
 	}
 	inlined := append([]byte("<script>\n"), js...)
 	inlined = append(inlined, []byte("\n</script>")...)
