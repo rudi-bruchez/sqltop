@@ -240,7 +240,9 @@ type ConnParams struct {
 func BuildDSN(p ConnParams) (string, error)
 
 // AuthMethods lists the methods of section 4.2 for this platform, in order.
-func AuthMethods() []AuthMethod // {ID, Label string}
+// Fields names which of login and password the page shows for a method, and
+// Note is the line under them (the NTLM remark of section 4.2).
+func AuthMethods() []AuthMethod // {ID, Label string; Fields []string; Note string}
 ```
 
 The URL is assembled as a `url.URL` value: `Scheme: "sqlserver"`,
@@ -282,8 +284,9 @@ carry the token.
 `GET /api/connect` answers the options, which `main` provides:
 
 ```json
-{"methods": [{"id": "sql", "label": "SQL Server login"}],
- "env_path": "/home/dba/sqltop/.env"}
+{"methods": [{"id": "sql", "label": "SQL Server login", "fields": ["login", "password"]}],
+ "env_path": "/home/dba/sqltop/.env",
+ "save": true}
 ```
 
 `POST /api/connect` takes the fields of `ConnParams` plus `"save_env": true`
@@ -386,6 +389,12 @@ func Set(path, key, value string) error
 
 A failed write does not undo the connection. The page shows `env_error` as a
 warning next to the redacted connection string.
+
+A save the next run would not read is not offered. When `sqltop.yaml` names
+an instance whose `dsn` is set and does not mention `SQLTOP_CONN` (a
+`dsn: ${OTHER}` whose variable is unset, say), the options carry
+`"save": false`, the checkbox is replaced by one line saying that saving to
+`.env` would change nothing, and a `save_env` posted anyway is ignored.
 
 ## 8. Logging
 

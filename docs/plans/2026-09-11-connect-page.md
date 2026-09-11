@@ -190,6 +190,38 @@ func TestSetKeepsTheModeOfAnExistingFile(t *testing.T) {
 	}
 }
 
+func TestSetWritesThroughASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.env")
+	link := filepath.Join(dir, ".env")
+	if err := os.WriteFile(target, []byte("A=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := Set(link, "SQLTOP_CONN", "v"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the link was replaced by a regular file")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "A=1\nSQLTOP_CONN=v\n" {
+		t.Errorf("the link's target holds %q", got)
+	}
+}
+
 func TestSetRefusesALineBreakAndLeavesTheFileAlone(t *testing.T) {
 	for _, v := range []string{"a\nb", "a\rb"} {
 		dir := t.TempDir()
@@ -243,9 +275,27 @@ Expected: a compile failure, `undefined: Set`.
 
 - [ ] Step 3: Implement
 
-Four edits to `internal/dotenv/dotenv.go`. `Load`'s long doc comment stays exactly as it is.
+Five edits to `internal/dotenv/dotenv.go`.
 
-First, the package comment's first line becomes `// Package dotenv reads KEY=VALUE pairs from a file into the environment,` followed by a new line `// and writes one back.`, and the imports become:
+First, in `Load`'s doc comment, the sentence that quotes a startup message Task 7 removes, and tells the history of a review, becomes a statement that stays true. Replace
+
+```
+// never stops the tool; but skipping it in silence, which is what this used
+// to do, turns a colon typed instead of an equals sign into "no instance to
+// connect to" at startup with nothing to connect the two. Reported after an
+// external reviewer typed exactly that typo and watched the error say
+// nothing useful.
+```
+
+with
+
+```
+// never stops the tool; but skipping it in silence turns a colon typed
+// instead of an equals sign into a missing connection string, with nothing
+// at startup to connect the two.
+```
+
+Second, the package comment's first line becomes `// Package dotenv reads KEY=VALUE pairs from a file into the environment,` followed by a new line `// and writes one back.`, and the imports become:
 
 ```go
 import (
@@ -259,7 +309,7 @@ import (
 )
 ```
 
-Second, add `entry` and `read` above `Load`. Third, replace `Load`'s function body (not its comment) with the one below, which goes through `read` and otherwise behaves exactly as before. Fourth, add `Set` after `Load`.
+Third, add `entry` and `read` above `Load`. Fourth, replace `Load`'s function body (not its comment) with the one below, which goes through `read` and otherwise behaves exactly as before. Fifth, add `Set` after `Load`.
 
 ```go
 // entry is one line of the file as Load reads it.
@@ -331,6 +381,11 @@ func Set(path, key, value string) error {
 	if strings.ContainsAny(value, "\r\n") {
 		return fmt.Errorf("dotenv: the value for %s contains a line break", key)
 	}
+	// Through a link, the file to rewrite is its target: renaming over the
+	// link would replace it with a copy and leave the target stale.
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		path = p
+	}
 	mode := fs.FileMode(0o600)
 	old, err := os.ReadFile(path)
 	switch {
@@ -395,15 +450,16 @@ The deferred `os.Remove` is a no-op once the rename has succeeded, since the tem
 - [ ] Step 4: Run the tests to watch them pass
 
 Run: `go test ./internal/dotenv -count=1 -v 2>&1 | grep -E '^(--- |ok|FAIL)'`
-Expected: `ok`. `go test ./internal/dotenv -run 'TestSet' -count=1 -v | grep -c '^--- PASS'` prints `5`; the existing `Load` tests pass unchanged.
+Expected: `ok`. `go test ./internal/dotenv -run 'TestSet' -count=1 -v | grep -c '^--- PASS: TestSet'` prints `6` on Linux; the existing `Load` tests pass unchanged.
 
 - [ ] Step 5: Break it and watch the right tests fail
 
-Do each of these one at a time, run `go test ./internal/dotenv -count=1`, write down which test failed, then restore the file from a copy you made first (never `git checkout`, `git restore` or `git stash`):
+Each breakage below is written so that it still compiles: a compile error is not the test failing. Do them one at a time, run `go test ./internal/dotenv -count=1`, write down which test failed, then restore the file from a copy you made first (never `git checkout`, `git restore` or `git stash`):
 
-1. In `Set`, replace `e != nil && e.ok && e.key == key` with `strings.HasPrefix(body, key+"=")`. Expected: the `export`, `spaces around the equals sign` and `leading spaces` subtests fail.
-2. Delete the `tmp.Chmod(mode)` block. Expected: `TestSetKeepsTheModeOfAnExistingFile` fails with mode 0600.
+1. In `Set`, replace `e != nil && e.ok && e.key == key` with `e != nil && strings.HasPrefix(body, key+"=")`. Expected: the `export`, `spaces around the equals sign` and `leading spaces` subtests fail.
+2. Replace `tmp.Chmod(mode)` with `tmp.Chmod(mode &^ 0o077)`. Expected: `TestSetKeepsTheModeOfAnExistingFile` fails with mode 0600.
 3. Delete the `strings.ContainsAny` check. Expected: `TestSetRefusesALineBreakAndLeavesTheFileAlone` fails.
+4. Delete the `filepath.EvalSymlinks` block. Expected: `TestSetWritesThroughASymlink` fails on the replaced link.
 
 - [ ] Step 6: Gates and commit
 
@@ -539,6 +595,12 @@ func TestBuildDSNRefusesAnIncompleteForm(t *testing.T) {
 		{"port zero", ConnParams{Server: "db01,0", Auth: "sql", Login: "sa"}, "port"},
 		{"port too large", ConnParams{Server: "db01,65536", Auth: "sql", Login: "sa"}, "port"},
 		{"empty instance", ConnParams{Server: `db01\`, Auth: "sql", Login: "sa"}, "instance"},
+		{"space in the name", ConnParams{Server: "db 01", Auth: "sql", Login: "sa"}, "server name"},
+		{"slash in the name", ConnParams{Server: "db01/x", Auth: "sql", Login: "sa"}, "server name"},
+		{"question mark in the name", ConnParams{Server: "db01?x", Auth: "sql", Login: "sa"}, "server name"},
+		{"hash in the name", ConnParams{Server: "db01#x", Auth: "sql", Login: "sa"}, "server name"},
+		{"at sign in the name", ConnParams{Server: "sa@db01", Auth: "sql", Login: "sa"}, "server name"},
+		{"space in the instance", ConnParams{Server: `db01\SA LES`, Auth: "sql", Login: "sa"}, "server name"},
 		{"unknown method", ConnParams{Server: "db01", Auth: "kerberos"}, "authentication"},
 		{"empty sql login", ConnParams{Server: "db01", Auth: "sql"}, "login"},
 		{"empty domain login", ConnParams{Server: "db01", Auth: "domain", Password: "x"}, "login"},
@@ -746,6 +808,11 @@ func splitServer(s string) (host, instance string, port int, err error) {
 	if host == "" {
 		return "", "", 0, errors.New("the server is empty")
 	}
+	// These would end the host inside the URL, and the driver would then
+	// fail with a bare "invalid URL format" instead of a word about the field.
+	if strings.ContainsAny(host+instance, " \t/?#@") {
+		return "", "", 0, errors.New("the server name cannot contain a space or any of / ? # @")
+	}
 	return host, instance, port, nil
 }
 
@@ -827,12 +894,13 @@ Expected: `5` on Linux (the subtests are counted separately and do not start wit
 
 - [ ] Step 5: Break it and watch the right tests fail
 
-One at a time, restoring from a copy each time:
+One at a time, restoring from a copy each time. Each still compiles:
 
-1. Replace `net.JoinHostPort(host, strconv.Itoa(port))` with `host + ":" + strconv.Itoa(port)`. Expected: `ipv6 with a port` fails.
-2. Wrap the host in brackets whenever it contains a colon, port or not. Expected: `ipv6 without a port` fails.
+1. Replace `u.Host = net.JoinHostPort(host, strconv.Itoa(port))` with the two lines `_ = net.JoinHostPort` and `u.Host = host + ":" + strconv.Itoa(port)`. Expected: `ipv6 with a port` fails.
+2. Before `u.Host = host`, add `if strings.Contains(host, ":") { host = "[" + host + "]" }`. Expected: both IPv6 cases fail, the one with a port on doubled brackets.
 3. Delete the `EqualFold` block that strips `tcp:`. Expected: both prefix cases fail.
 4. Build the user as `url.User(login)` for `domain`. Expected: `domain account` fails on its password.
+5. Delete the `strings.ContainsAny(host+instance, ...)` check. Expected: the six name cases of `TestBuildDSNRefusesAnIncompleteForm` fail.
 
 - [ ] Step 6: Gates and commit
 
@@ -890,23 +958,42 @@ import (
 	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
+// hintFor is the advice of the row matching on in. The tests name rows by
+// their key and by a word the advice must carry, never by position: an
+// expectation read out of the table by index moves with the table, and a
+// reordering would pass.
+func hintFor(t *testing.T, in, word string) string {
+	t.Helper()
+	for _, h := range hints {
+		if h.in == in {
+			if !strings.Contains(h.hint, word) {
+				t.Fatalf("the advice for %q no longer mentions %q: %q", in, word, h.hint)
+			}
+			return h.hint
+		}
+	}
+	t.Fatalf("no hint row matches on %q", in)
+	return ""
+}
+
 // TestHintPicksTheFirstMatchingRow uses the messages the driver actually
 // returned against the container. The certificate one carries both
 // "TLS Handshake failed" and "x509:", which is why the table is ordered.
 func TestHintPicksTheFirstMatchingRow(t *testing.T) {
 	for _, c := range []struct {
-		err  string
-		want string
+		err, in, word string
 	}{
-		{"mssql: connect: no instance matching 'NOPE' returned from host '127.0.0.1'", hints[0].hint},
-		{"mssql: connect: TLS Handshake failed: tls: failed to verify certificate: x509: cannot validate certificate for 127.0.0.1 because it doesn't contain any IP SANs", hints[1].hint},
-		{"mssql: connect: TLS Handshake failed: EOF", hints[2].hint},
-		{"mssql: connect: mssql: login error: Login failed for user 'sa'.", hints[3].hint},
-		{"mssql: connect: unable to open tcp connection with host '127.0.0.1:1': dial tcp 127.0.0.1:1: connect: connection refused", ""},
+		{"mssql: connect: no instance matching 'NOPE' returned from host '127.0.0.1'", "no instance matching", "host,port"},
+		{"mssql: connect: TLS Handshake failed: tls: failed to verify certificate: x509: cannot validate certificate for 127.0.0.1 because it doesn't contain any IP SANs", "x509:", "certificate"},
+		{"mssql: connect: TLS Handshake failed: EOF", "TLS Handshake failed", "TDS 8"},
+		{"mssql: connect: mssql: login error: Login failed for user 'sa'.", "Login failed for user", "SQL Server authentication"},
 	} {
-		if got := Hint(errors.New(c.err)); got != c.want {
-			t.Errorf("Hint(%q) = %q, want %q", c.err, got, c.want)
+		if got, want := Hint(errors.New(c.err)), hintFor(t, c.in, c.word); got != want {
+			t.Errorf("Hint(%q) = %q, want %q", c.err, got, want)
 		}
+	}
+	if got := Hint(errors.New("mssql: connect: unable to open tcp connection with host '127.0.0.1:1': dial tcp 127.0.0.1:1: connect: connection refused")); got != "" {
+		t.Errorf("a refused TCP connection got the hint %q", got)
 	}
 	if Hint(nil) != "" {
 		t.Error("Hint(nil) is not empty")
@@ -928,7 +1015,11 @@ func containerParams(t *testing.T) ConnParams {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ConnParams{Server: fmt.Sprintf("%s,%d", cfg.Host, cfg.Port), Auth: "sql", Login: cfg.User, Password: cfg.Password}
+	server := cfg.Host
+	if cfg.Port != 0 { // 0 when the DSN names none, which BuildDSN would refuse as a port
+		server = fmt.Sprintf("%s,%d", cfg.Host, cfg.Port)
+	}
+	return ConnParams{Server: server, Auth: "sql", Login: cfg.User, Password: cfg.Password}
 }
 
 func TestConnectPageParamsOpenTheContainer(t *testing.T) {
@@ -952,13 +1043,13 @@ func TestHintsMatchWhatTheDriverSays(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		edit func(*ConnParams)
-		in   string // what the error must contain
-		row  int
+		in   string // what the error must contain, and the row it selects
+		word string // what that row's advice must say
 	}{
-		{"named instance", func(p *ConnParams) { p.Server = `127.0.0.1\NOPE` }, "no instance matching", 0},
-		{"certificate", func(p *ConnParams) { p.Encrypt = "true" }, "x509:", 1},
-		{"strict", func(p *ConnParams) { p.Encrypt = "strict" }, "TLS Handshake failed", 2},
-		{"wrong password", func(p *ConnParams) { p.Password += "-wrong" }, "Login failed for user", 3},
+		{"named instance", func(p *ConnParams) { p.Server = `127.0.0.1\NOPE` }, "no instance matching", "host,port"},
+		{"certificate", func(p *ConnParams) { p.Encrypt = "true" }, "x509:", "certificate"},
+		{"strict", func(p *ConnParams) { p.Encrypt = "strict" }, "TLS Handshake failed", "TDS 8"},
+		{"wrong password", func(p *ConnParams) { p.Password += "-wrong" }, "Login failed for user", "SQL Server authentication"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := good
@@ -978,8 +1069,8 @@ func TestHintsMatchWhatTheDriverSays(t *testing.T) {
 			if !strings.Contains(err.Error(), c.in) {
 				t.Fatalf("the driver said %q, which does not contain %q", err, c.in)
 			}
-			if got := Hint(err); got != hints[c.row].hint {
-				t.Errorf("hint %q, want row %d", got, c.row)
+			if got, want := Hint(err), hintFor(t, c.in, c.word); got != want {
+				t.Errorf("hint %q, want %q", got, want)
 			}
 		})
 	}
@@ -989,7 +1080,7 @@ func TestHintsMatchWhatTheDriverSays(t *testing.T) {
 - [ ] Step 2: Run the tests to watch them fail
 
 Run: `go test ./internal/source/mssql -run 'TestHint' -count=1`
-Expected: a compile failure, `undefined: Hint`.
+Expected: a compile failure naming `hints` or `Hint` as undefined; which one the compiler reports first does not matter.
 
 - [ ] Step 3: Implement
 
@@ -1033,8 +1124,9 @@ Expected: three top-level tests, `--- PASS: TestHintPicksTheFirstMatchingRow`, `
 
 - [ ] Step 5: Break it and watch the right tests fail
 
-1. Swap the `x509:` and `TLS Handshake failed` rows. Expected: the certificate case fails in both tests.
-2. Change `Login failed for user` to `Login failed for` plus a typo. Expected: `wrong password` fails.
+1. Swap the `x509:` and `TLS Handshake failed` rows. Expected: the certificate case fails in both tests, getting the handshake advice; the strict case still passes.
+2. In the table only, change `Login failed for user` to `Login failed for usr`. Expected: `hintFor` fails in both tests with "no hint row matches".
+3. In the `x509:` row's advice, replace every `certificate` with `cert`. Expected: `hintFor` fails in both tests naming the missing word, which is what stops a reworded hint from passing unnoticed.
 
 - [ ] Step 6: Gates and commit
 
@@ -1109,7 +1201,7 @@ func TestNewServerOnServesOnTheListenersAddressAndToken(t *testing.T) {
 - [ ] Step 2: Run it to watch it fail
 
 Run: `go test ./internal/web -run TestNewServerOn -count=1`
-Expected: a compile failure, `undefined: Listen`.
+Expected: a compile failure naming `Listen` or `NewServerOn` as undefined.
 
 - [ ] Step 3: Implement
 
@@ -1172,7 +1264,7 @@ func NewServerOn(c *collector.Collector, w *window.Window, l *Listener) *Server 
 }
 ```
 
-Replace the `authenticate` method with a function of the token, keeping its doc comment (reworded from "authenticate accepts" to "requireToken accepts") and keeping it in this file, where `TestConstantTimeCompareIsUsedForTheToken` looks for it:
+Replace the `authenticate` method with a function of the token. Its doc comment stays word for word, except that its first word, `authenticate`, becomes `requireToken`. It stays in this file, where `TestConstantTimeCompareIsUsedForTheToken` looks for it:
 
 ```go
 func requireToken(token string, next http.Handler) http.Handler {
@@ -1194,7 +1286,11 @@ func requireToken(token string, next http.Handler) http.Handler {
 }
 ```
 
-In `Handler`, the last line becomes `return securityHeaders(requireToken(s.token, mux))`. In the comment on `routes()`, change "wraps it in authenticate" to "wraps it in requireToken". In `server_test.go`, the comment on `TestEveryRouteRequiresTheToken` that quotes `securityHeaders(s.authenticate(...))` becomes `securityHeaders(requireToken(...))`. Grep afterwards: `grep -rn 'authenticate' internal/web` must show only prose, no call.
+In `Handler`, the last line becomes `return securityHeaders(requireToken(s.token, mux))`.
+
+Then, in the comments of `server.go` and `server_test.go`, every occurrence of the whole word `authenticate` becomes `requireToken`, and the one quotation `securityHeaders(s.authenticate(...))` in `server_test.go` becomes `securityHeaders(requireToken(...))`. Words that merely contain it, `unauthenticated` and `authenticated`, stay. Besides the call, the doc comment and the declaration handled above, there are eleven such comment lines today: `server.go` lines 106, 152, 185 and 281, `server_test.go` lines 131, 241, 280, 462, 467, 507 and 509 (line 509 is the quotation). Afterwards `grep -nw authenticate internal/web/*.go` prints nothing.
+
+Finally, the comment on `routes()` begins "routes is the single place a path is registered." Make that sentence "routes is the single place a path of the monitor is registered; the connect page's two are in AskConnection, behind the same requireToken." and leave the rest of that comment as it is.
 
 - [ ] Step 4: Run the whole package
 
@@ -1204,7 +1300,7 @@ Expected: `ok`. Then `go test ./internal/web -run TestNewServerOn -count=1 -v | 
 - [ ] Step 5: Break it and watch the right tests fail
 
 1. In `NewServerOn`, give the server a fresh token from `rand.Read` instead of `l.token`. Expected: `TestNewServerOnServesOnTheListenersAddressAndToken` fails on both the URL and the 200.
-2. Replace `subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1` with `got != token`. Expected: `TestConstantTimeCompareIsUsedForTheToken` fails.
+2. Replace `subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1` with `subtle.ConstantTimeCompare([]byte(got), []byte(got)) != 1`, which compiles and accepts any token. Expected: `TestTokenIsRequired`, `TestWrongTokenIsRejected` and the 401 half of `TestNewServerOnServesOnTheListenersAddressAndToken` fail.
 
 - [ ] Step 6: Gates and commit
 
@@ -1248,7 +1344,8 @@ Interfaces:
   - `type ConnectError struct { Status int; Message, Hint string }`, implementing `error`
   - `func (l *Listener) AskConnection(ctx context.Context, options any, connect ConnectFunc) error`
   - `var connectTimeout = 30 * time.Second`
-  - Page element ids the browser test uses: `connectForm`, `server`, `methods` (radios `name="auth"`), `loginRow`, `login`, `passwordRow`, `password`, `methodNote`, `database`, `encrypt`, `trustRow`, `trust`, `saveEnv`, `envPath`, `saveNote`, `go`, `status`, `error`, `hint`.
+  - Page element ids the browser test uses: `connectForm`, `server`, `methods` (radios `name="auth"`), `loginRow`, `login`, `passwordRow`, `password`, `methodNote`, `database`, `encrypt`, `trustRow`, `trust`, `saveRow`, `saveEnv`, `envPath`, `saveNote`, `saveOff`, `go`, `status`, `error`, `hint`.
+  - The options object the page reads: `methods` (a list of `{id, label, fields, note}`), `env_path` (string), and `save` (boolean; `false` hides the save box and shows `saveOff`; absent counts as `true`).
 
 - [ ] Step 1: Write the failing tests
 
@@ -1293,9 +1390,18 @@ func askConnection(t *testing.T, connect ConnectFunc) (*Listener, string, <-chan
 	}
 	t.Cleanup(func() { l.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	errc := make(chan error, 1)
-	go func() { errc <- l.AskConnection(ctx, testOptions, connect) }()
+	returned := make(chan struct{})
+	go func() {
+		errc <- l.AskConnection(ctx, testOptions, connect)
+		close(returned)
+	}()
+	// A phase still running when its test ends shuts down afterwards, and
+	// its shutdown reads shutdownGrace, which a later test writes. Wait for it.
+	t.Cleanup(func() {
+		cancel()
+		<-returned
+	})
 	return l, "http://" + l.ln.Addr().String(), errc, cancel
 }
 
@@ -1361,6 +1467,11 @@ func TestConnectPhaseServesThePageAndTheOptions(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK || !strings.Contains(string(body), `id="connectForm"`) {
 		t.Fatalf("GET / = %d without the form", res.StatusCode)
+	}
+	// The one page that takes a password carries the monitor's headers.
+	if res.Header.Get("Referrer-Policy") != "no-referrer" || res.Header.Get("Cache-Control") != "no-store" {
+		t.Errorf("the connect page is served with Referrer-Policy %q and Cache-Control %q",
+			res.Header.Get("Referrer-Policy"), res.Header.Get("Cache-Control"))
 	}
 	for _, sub := range []string{`href="style.css"`, `src="connect.js"`} {
 		if strings.Contains(string(body), sub) {
@@ -1512,8 +1623,17 @@ func TestHandoverAnswersARequestSentBetweenTheTwoServers(t *testing.T) {
 	w := window.New(time.Minute, 1000)
 	c := collector.New(fake.New(nil), w, collector.NewBudget(50, testTiers()))
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = NewServerOn(c, w, l).Serve(ctx) }()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = NewServerOn(c, w, l).Serve(ctx)
+	}()
+	// Serve's shutdown reads shutdownGrace, which the next test writes: it
+	// must be over before this test is.
+	defer func() {
+		cancel()
+		<-served
+	}()
 
 	select {
 	case code := <-got:
@@ -1828,8 +1948,9 @@ Create `internal/web/assets/connect.html`. The icon is the monitor page's data U
     </label>
     <label id="trustRow" hidden><input type="checkbox" id="trust"> trust the server certificate</label>
   </details>
-  <label><input type="checkbox" id="saveEnv"> save the connection string to <code id="envPath"></code></label>
+  <label id="saveRow"><input type="checkbox" id="saveEnv"> save the connection string to <code id="envPath"></code></label>
   <p id="saveNote" class="note" hidden>The password will be stored in clear text in that file.</p>
+  <p id="saveOff" class="note" hidden>sqltop.yaml names an instance whose connection string does not read SQLTOP_CONN, so saving to .env would change nothing.</p>
   <button type="submit" id="go">connect</button>
 </form>
 <p id="status" role="status" aria-live="polite"></p>
@@ -1873,7 +1994,7 @@ function showFields() {
   $("passwordRow").hidden = !f.has("password");
   $("login").placeholder = m.id === "domain" ? "DOMAIN\\user" : "";
   say("methodNote", m.note || "");
-  $("saveNote").hidden = !f.has("password");
+  $("saveNote").hidden = !f.has("password") || $("saveRow").hidden;
   $("trustRow").hidden = $("encrypt").value !== "true";
 }
 
@@ -1891,6 +2012,9 @@ function setup(opts) {
     $("methods").append(label);
   }
   $("envPath").textContent = opts.env_path || ".env";
+  // A saved string nobody reads would be reported as saved and change nothing.
+  $("saveRow").hidden = opts.save === false;
+  $("saveOff").hidden = opts.save !== false;
   showFields();
 }
 
@@ -1915,7 +2039,7 @@ function submit(e) {
     database: $("database").value,
     encrypt: $("encrypt").value,
     trust: $("encrypt").value === "true" && $("trust").checked,
-    save_env: $("saveEnv").checked,
+    save_env: !$("saveRow").hidden && $("saveEnv").checked,
   };
   say("error", "");
   say("hint", "");
@@ -1986,14 +2110,15 @@ Append to `internal/web/assets/style.css`:
 - [ ] Step 6: Run the tests to watch them pass
 
 Run: `go test ./internal/web -run 'TestConnectPhase|TestConnectRefuses|TestSecondAttempt|TestConnectError|TestAttemptHasADeadline|TestHandover|TestAskConnection' -count=1 -v 2>&1 | grep -c '^--- PASS'`
-Expected: `9`. Then the whole package: `go test ./internal/web -count=1` says `ok`, and `deno lint internal/web/assets/connect.js` is clean.
+Expected: `9`. Then the same filter under the race detector, several times, since the tests share `shutdownGrace` and a phase or a monitor outliving its test is exactly what it catches: `go test -race ./internal/web -run '<the same filter>' -count=5` says `ok`. Then the whole package: `go test ./internal/web -count=1` says `ok`, and `deno lint internal/web/assets/connect.js` is clean.
 
 - [ ] Step 7: Break it and watch the right tests fail
 
-1. Replace `handoff{l.ln}` with `l.ln`. Expected: `TestHandoverAnswersARequestSentBetweenTheTwoServers` fails, the queued request refused or the monitor's `Serve` erroring on a closed socket.
+1. Replace `handoff{l.ln}` with `l.ln`. Expected: `TestHandoverAnswersARequestSentBetweenTheTwoServers` fails at once, because `Shutdown` really closes the socket and `AskConnection` returns the error of `SetDeadline` on it (`use of closed network connection`), before any request is queued.
 2. Replace `gracefulShutdown(srv)` with `srv.Shutdown(context.Background())`. Expected: `TestHandoverIsNotHeldByAnIdleConnection` fails at about five seconds.
-3. Replace `p.busy.TryLock()` with `p.busy.Lock()` and drop the `if`. Expected: `TestSecondAttemptWhileOneRunsIsRefusedAtOnce` fails on the elapsed time.
-4. Remove the `context.WithTimeout`. Expected: `TestAttemptHasADeadline` fails, or hangs to the client's five seconds.
+3. Replace `if !p.busy.TryLock() {` with `p.busy.Lock(); if false {`. Expected: `TestSecondAttemptWhileOneRunsIsRefusedAtOnce` fails after five seconds, the second POST blocked behind the first until the client times out; it never reaches the elapsed-time check.
+4. Replace `ctx, cancel := context.WithTimeout(req.Context(), connectTimeout)` with `ctx, cancel := context.WithCancel(req.Context())`. Expected: `TestAttemptHasADeadline` fails when the client gives up at five seconds.
+5. Replace `securityHeaders(requireToken(l.token, mux))` with `requireToken(l.token, mux)`. Expected: `TestConnectPhaseServesThePageAndTheOptions` fails on the headers.
 
 - [ ] Step 8: Gates and commit
 
@@ -2202,7 +2327,20 @@ out.failure = await json(`({
   hint: document.getElementById("hint").textContent,
   enabled: !document.getElementById("go").disabled,
 })`);
+out.env = await json(`({
+  path: document.getElementById("envPath").textContent,
+  note: !document.getElementById("saveNote").hidden,
+})`);
 
+// The successful attempt also carries the two boxes a DBA ticks, so the
+// test sees them reach the server rather than only appear on screen.
+await ev(`(() => {
+  const s = document.getElementById("encrypt");
+  s.value = "true";
+  s.dispatchEvent(new Event("change"));
+  document.getElementById("trust").checked = true;
+  document.getElementById("saveEnv").checked = true;
+})()`);
 await submit("db01");
 out.landed = await waitFor(
   `document.getElementById("gridBody") !== null && [...document.querySelectorAll("#gridBody tr")].some((r) => r.children.length > 1 && !r.hidden)`,
@@ -2276,8 +2414,15 @@ func TestConnectPageInABrowser(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	served := make(chan struct{})
+	// Serve's shutdown reads shutdownGrace, which other tests write: it must
+	// be over before this test is.
+	defer func() {
+		cancel()
+		<-served
+	}()
 	go func() {
+		defer close(served)
 		if err := l.AskConnection(ctx, options, connect); err != nil {
 			return // the landed assertion below says what went wrong
 		}
@@ -2311,6 +2456,10 @@ func TestConnectPageInABrowser(t *testing.T) {
 			Error, Hint string
 			Enabled     bool
 		} `json:"failure"`
+		Env struct {
+			Path string
+			Note bool
+		} `json:"env"`
 		Landed bool `json:"landed"`
 	}
 	if err := json.Unmarshal([]byte(lastJSONLine(string(out))), &got); err != nil {
@@ -2342,6 +2491,9 @@ func TestConnectPageInABrowser(t *testing.T) {
 	if got.Failure.Error != "no such server" || got.Failure.Hint != "check the name" || !got.Failure.Enabled {
 		t.Errorf("a refused attempt shows %+v", got.Failure)
 	}
+	if got.Env.Path != "/somewhere/.env" || !got.Env.Note {
+		t.Errorf("the save box names %q with the clear-text note shown=%v; it must name the server's path and warn for a method with a password", got.Env.Path, got.Env.Note)
+	}
 	if !got.Landed {
 		t.Error("a successful attempt did not land on the monitor with rows")
 	}
@@ -2352,7 +2504,7 @@ func TestConnectPageInABrowser(t *testing.T) {
 	if err := json.Unmarshal(last, &posted); err != nil {
 		t.Fatalf("the last POST was not JSON: %s", last)
 	}
-	for k, v := range map[string]any{"server": "db01", "auth": "sql", "login": "dba", "password": "p@ss", "encrypt": "", "trust": false, "save_env": false} {
+	for k, v := range map[string]any{"server": "db01", "auth": "sql", "login": "dba", "password": "p@ss", "encrypt": "true", "trust": true, "save_env": true} {
 		if posted[k] != v {
 			t.Errorf("the page posted %s=%v, want %v; the whole body is %s", k, posted[k], v, last)
 		}
@@ -2374,9 +2526,11 @@ Expected: three `--- PASS`. A `--- SKIP` means chromium or deno is missing and n
 One at a time, each in `connect.js`, restoring from a copy:
 
 1. In `showFields`, set `$("passwordRow").hidden = false`. Expected: the `windows` fields assertion fails.
-2. In `waitForMonitor`, replace `location.assign("/" + q)` with nothing. Expected: `landed` fails.
+2. In `waitForMonitor`, replace `location.assign("/" + q)` with `void 0`, which keeps the script valid. Expected: `landed` fails.
 3. In the `.catch` of `submit`, drop the `say("hint", ...)` line. Expected: the failure assertion fails on the hint.
 4. In `submit`, send `password` whatever the method. This one is not caught when the last POST is a `sql` attempt; write that down as the breakage the test does not see, which is the expected answer.
+5. In `submit`, send `trust: false` always. Expected: the posted-body assertion fails on `trust`.
+6. In `submit`, send `save_env: false` always. Expected: the posted-body assertion fails on `save_env`.
 
 - [ ] Step 7: Gates and commit
 
@@ -2408,7 +2562,7 @@ Files:
 
 Interfaces:
 - Consumes: `mssql.ConnParams`, `mssql.BuildDSN`, `mssql.AuthMethods`, `mssql.Redacted`, `mssql.Hint` (Tasks 2 and 3); `dotenv.Set` (Task 1); `web.Listen`, `web.NewServerOn`, `(*web.Listener).AskConnection`, `web.ConnectFunc`, `web.ConnectResult`, `web.ConnectError` (Tasks 4 and 5).
-- Produces: `func attempt(envPath string, capture bool, opened **mssql.Source) web.ConnectFunc`, `func connectOptions(envPath string) map[string]any`, `func openBrowser(url string, disabled bool)`.
+- Produces: `func attempt(envPath string, save, capture bool, opened **mssql.Source) web.ConnectFunc`, `func connectOptions(envPath string, save bool) map[string]any`, `func saveReachesTheConnection(instances []config.Instance) bool`, `func openBrowser(url string, disabled bool)`.
 
 - [ ] Step 1: Write the failing tests
 
@@ -2431,14 +2585,33 @@ import (
 
 	"github.com/microsoft/go-mssqldb/msdsn"
 
+	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/dotenv"
 	"github.com/rudi-bruchez/sqltop/internal/source/mssql"
 	"github.com/rudi-bruchez/sqltop/internal/web"
 )
 
+// TestSaveReachesTheConnection: a string saved to .env is read on the next
+// run only when no configured instance supplies its own.
+func TestSaveReachesTheConnection(t *testing.T) {
+	for _, c := range []struct {
+		instances []config.Instance
+		want      bool
+	}{
+		{nil, true},
+		{[]config.Instance{{Name: "a", DSN: ""}}, true},
+		{[]config.Instance{{Name: "a", DSN: "${SQLTOP_CONN}"}}, true},
+		{[]config.Instance{{Name: "a", DSN: "${OTHER_CONN}"}}, false},
+	} {
+		if got := saveReachesTheConnection(c.instances); got != c.want {
+			t.Errorf("%+v: %v, want %v", c.instances, got, c.want)
+		}
+	}
+}
+
 func TestAttemptRefusesWhatCannotBeAConnectionString(t *testing.T) {
 	var opened *mssql.Source
-	f := attempt(filepath.Join(t.TempDir(), ".env"), false, &opened)
+	f := attempt(filepath.Join(t.TempDir(), ".env"), true, false, &opened)
 	for _, body := range []string{`{`, `{"server":"","auth":"sql","login":"sa"}`} {
 		_, err := f(context.Background(), []byte(body))
 		var ce *web.ConnectError
@@ -2456,7 +2629,7 @@ func TestAttemptRefusesWhatCannotBeAConnectionString(t *testing.T) {
 // at once.
 func TestAttemptReportsAFailedConnectionWithItsHint(t *testing.T) {
 	var opened *mssql.Source
-	f := attempt(filepath.Join(t.TempDir(), ".env"), false, &opened)
+	f := attempt(filepath.Join(t.TempDir(), ".env"), true, false, &opened)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := f(ctx, []byte(`{"server":"127.0.0.1\\NOPE","auth":"sql","login":"sa","password":"x"}`))
@@ -2475,21 +2648,44 @@ func TestAttemptReportsAFailedConnectionWithItsHint(t *testing.T) {
 func TestAttemptOpensTheContainerAndSavesTheString(t *testing.T) {
 	dsn := os.Getenv("SQLTOP_TEST_DSN")
 	if dsn == "" {
+		if os.Getenv("SQLTOP_REQUIRE_DB") != "" {
+			t.Fatal("SQLTOP_TEST_DSN is unset and SQLTOP_REQUIRE_DB is set; run: eval \"$(scripts/testdb.sh)\"")
+		}
 		t.Skip("SQLTOP_TEST_DSN is unset; run: eval \"$(scripts/testdb.sh)\"")
 	}
 	cfg, err := msdsn.Parse(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
+	server := cfg.Host
+	if cfg.Port != 0 {
+		server = fmt.Sprintf("%s,%d", cfg.Host, cfg.Port)
+	}
 	body, _ := json.Marshal(map[string]any{
-		"server": fmt.Sprintf("%s,%d", cfg.Host, cfg.Port), "auth": "sql",
+		"server": server, "auth": "sql",
 		"login": cfg.User, "password": cfg.Password, "save_env": true,
 	})
-	env := filepath.Join(t.TempDir(), ".env")
-	var opened *mssql.Source
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	res, err := attempt(env, false, &opened)(ctx, body)
+
+	// With saving pointless, a ticked box writes nothing.
+	off := filepath.Join(t.TempDir(), ".env")
+	var discarded *mssql.Source
+	res, err := attempt(off, false, false, &discarded)(ctx, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discarded.Close()
+	if res.EnvWritten != "" {
+		t.Errorf("saving was off and the attempt reports writing %q", res.EnvWritten)
+	}
+	if _, err := os.Stat(off); !os.IsNotExist(err) {
+		t.Errorf("saving was off and %s exists (%v)", off, err)
+	}
+
+	env := filepath.Join(t.TempDir(), ".env")
+	var opened *mssql.Source
+	res, err = attempt(env, true, false, &opened)(ctx, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2535,7 +2731,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
+	"github.com/rudi-bruchez/sqltop/internal/config"
 	"github.com/rudi-bruchez/sqltop/internal/dotenv"
 	"github.com/rudi-bruchez/sqltop/internal/source/mssql"
 	"github.com/rudi-bruchez/sqltop/internal/web"
@@ -2548,14 +2746,22 @@ type connectRequest struct {
 }
 
 // connectOptions is what the page may offer on this platform.
-func connectOptions(envPath string) map[string]any {
-	return map[string]any{"methods": mssql.AuthMethods(), "env_path": envPath}
+func connectOptions(envPath string, save bool) map[string]any {
+	return map[string]any{"methods": mssql.AuthMethods(), "env_path": envPath, "save": save}
+}
+
+// saveReachesTheConnection reports whether a SQLTOP_CONN saved to .env is
+// read on the next run: not when sqltop.yaml names an instance whose
+// connection string does not mention it, which would make the page report a
+// save that changes nothing.
+func saveReachesTheConnection(instances []config.Instance) bool {
+	return len(instances) == 0 || instances[0].DSN == "" || strings.Contains(instances[0].DSN, "SQLTOP_CONN")
 }
 
 // attempt is what the connect page calls for each try. The source of the
 // try that succeeds is left in *opened for main to go on with, so the
 // server sees one login rather than two.
-func attempt(envPath string, capture bool, opened **mssql.Source) web.ConnectFunc {
+func attempt(envPath string, save, capture bool, opened **mssql.Source) web.ConnectFunc {
 	return func(ctx context.Context, body []byte) (web.ConnectResult, error) {
 		var req connectRequest
 		if err := json.Unmarshal(body, &req); err != nil {
@@ -2573,7 +2779,7 @@ func attempt(envPath string, capture bool, opened **mssql.Source) web.ConnectFun
 		*opened = src
 		res := web.ConnectResult{DSN: mssql.Redacted(dsn)}
 		log.Printf("connected to %s", res.DSN)
-		if req.SaveEnv {
+		if req.SaveEnv && save {
 			if err := dotenv.Set(envPath, "SQLTOP_CONN", dsn); err != nil {
 				res.EnvError = err.Error()
 			} else {
@@ -2632,12 +2838,16 @@ In `cmd/sqltop/main.go`, add `"path/filepath"` to the imports. Replace everythin
 		src.AllowCapture(*capture)
 		if err := src.Open(ctx, dsn); err != nil {
 			l.Close()
+			if ctx.Err() != nil {
+				return // Ctrl-C while connecting is a request to stop, not a failure
+			}
 			log.Fatal(err)
 		}
 	} else {
 		log.Printf("no instance configured; connect from %s", l.URL())
 		openBrowser(l.URL(), *noBrowser)
-		if err := l.AskConnection(ctx, connectOptions(envFile), attempt(envFile, *capture, &src)); err != nil {
+		save := saveReachesTheConnection(cfg.Instances)
+		if err := l.AskConnection(ctx, connectOptions(envFile, save), attempt(envFile, save, *capture, &src)); err != nil {
 			if src != nil {
 				src.Close()
 			}
@@ -2706,7 +2916,7 @@ The one comment rewritten on the way is `colDone`'s, which carried a task refere
 - [ ] Step 5: Run the tests, with the container, in one invocation
 
 Run: `eval "$(scripts/testdb.sh)" && go test ./cmd/sqltop -count=1 -v 2>&1 | grep -E '^(--- |ok|FAIL)'`
-Expected: three `--- PASS`, none skipped.
+Expected: four `--- PASS`, none skipped.
 
 - [ ] Step 6: Run the binary end to end against the container
 
@@ -2745,6 +2955,8 @@ Expected, in order: the options JSON listing `sql` and `domain` and the absolute
 
 1. In `attempt`, set `*opened = src` before `Open` instead of after. Expected: `TestAttemptReportsAFailedConnectionWithItsHint` fails on the source left behind.
 2. In `attempt`, save `res.DSN` to `.env` instead of `dsn`. Expected: `TestAttemptOpensTheContainerAndSavesTheString` fails, the saved password reading `xxxxx`.
+3. In `attempt`, replace `req.SaveEnv && save` with `req.SaveEnv`. Expected: `TestAttemptOpensTheContainerAndSavesTheString` fails on "saving was off".
+4. In `saveReachesTheConnection`, drop the `strings.Contains` clause. Expected: `TestSaveReachesTheConnection` fails on `${SQLTOP_CONN}`.
 
 - [ ] Step 8: Gates and commit
 
@@ -2872,12 +3084,16 @@ for the password alone is inserted unescaped.
 
 - [ ] Step 3: `.env.example` and `CLAUDE.md`
 
-`.env.example`, the first two comment lines become:
+`.env.example` becomes exactly this, its whole content:
 
 ```
 # Connection string for the instance sqltop opens by default. Left empty,
 # sqltop serves a connect page that builds one and can save it here.
 # Referenced from sqltop.yaml as ${SQLTOP_CONN}.
+SQLTOP_CONN=
+
+# DSN used by the integration tests. Set it with: eval "$(scripts/testdb.sh)"
+SQLTOP_TEST_DSN=
 ```
 
 `CLAUDE.md`, in "Before committing", `deno lint internal/web/assets/app.js` becomes `deno lint internal/web/assets/app.js internal/web/assets/connect.js`.
@@ -2927,6 +3143,10 @@ Spec coverage, section by section:
 - 10 (unverifiable here): nothing to build; the named-instance success path, NTLM and winsspi against a domain stay open.
 - 11 (documents): Task 8.
 
-Placeholders: one deliberate instruction to copy rather than type, the icon's data URI in Task 5 Step 5, with the exact source named. Task 7 Step 6 names a helper that does not exist and says not to write it; the values are read by eye.
+Placeholders: none. The icon's data URI is written out, with a `diff` to prove it matches the monitor's.
 
-Type consistency: `ConnParams`, `BuildDSN`, `AuthMethod`, `AuthMethods`, `Redacted`, `Hint`, `Listener`, `Listen`, `NewServerOn`, `requireToken`, `ConnectFunc`, `ConnectResult`, `ConnectError`, `AskConnection`, `connectTimeout`, `attempt`, `connectOptions`, `openBrowser` are each defined once and used with the same signature everywhere after.
+Security headers on the connect phase: asserted in `TestConnectPhaseServesThePageAndTheOptions`, and Task 5 breakage 5 removes them to see it fail.
+
+Breakages: every "break it" step is written to compile, since a compile error is not a test failing, and each names the test and the reason that actually fires, as measured by the five readers who executed this plan.
+
+Type consistency: `ConnParams`, `BuildDSN`, `AuthMethod`, `AuthMethods`, `Redacted`, `Hint`, `hintFor`, `Listener`, `Listen`, `NewServerOn`, `requireToken`, `ConnectFunc`, `ConnectResult`, `ConnectError`, `AskConnection`, `connectTimeout`, `attempt`, `connectOptions`, `saveReachesTheConnection`, `openBrowser` are each defined once and used with the same signature everywhere after.
