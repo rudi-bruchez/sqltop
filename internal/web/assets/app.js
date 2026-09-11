@@ -481,7 +481,7 @@ function refresh(keepSelection) {
   if (keepSelection) anchor();
   layout();
   renderDetail();
-  $("rowCount").textContent = n0(view.length) + (view.length === data.length ? " requests" : " of " + n0(data.length) + " requests");
+  if (isGrid(activeView)) $("rowCount").textContent = n0(view.length) + (view.length === data.length ? " requests" : " of " + n0(data.length) + " requests");
 }
 
 function anchor() {
@@ -771,8 +771,13 @@ function markTabs() {
 // alone otherwise, so their queries only run while somebody is reading the
 // answer; the grid needs no request, being a projection of the retention
 // window the stream already delivers.
+//
+// An open history panel holds the grid only, so the hold, its marker and the
+// panel's poller all change with the view. Left alone, a list view carried a
+// "paused" marker while it went on refreshing, and y could not clear it there.
 function setView(id) {
   if (!layouts.has(id) || id === activeView) return;
+  const was = frozen();
   activeView = id;
   markTabs();
   document.querySelector(".gridScroll").hidden = !isGrid(id);
@@ -781,6 +786,8 @@ function setView(id) {
   buildColumnPanel();
   applyColumns();
   if (!isGrid(id)) pollView(true);
+  else pollDetail(true);
+  applyFreeze(was, false);
 }
 
 // blockingRows keeps the chains and drops everything else. The rows arrive
@@ -825,7 +832,10 @@ function pollView(force) {
     // when p was pressed still resolves, and drawing it would repaint a view
     // the user has just held still. Checking only before rescheduling let
     // exactly one more redraw through, which is what this looked like.
-    .then((j) => { if (activeView === v && (force || !frozen())) renderList(v, j); })
+    .then((j) => {
+      j.readAt = new Date();
+      if (activeView === v && (force || !frozen())) renderList(v, j);
+    })
     .catch((e) => showListError(v, e.message))
     .finally(() => {
       if (activeView === v && !frozen()) pollTimer = setTimeout(() => pollView(), Math.max(periodMs || 1000, POLL_FLOOR[v] || 5000));
@@ -844,6 +854,10 @@ function renderActiveList() {
 // grid's per-cell diffing, and textContent escapes by construction.
 function renderList(view, payload) {
   lastList[view] = payload;
+  // The read time is the only sign a list refreshed: log sizes and an empty
+  // transaction list look the same from one read to the next.
+  $("rowCount").textContent = n0((payload.rows || []).length) + " " + view + ", read at " +
+    payload.readAt.toLocaleTimeString("en-GB");
   const panel = $("panel-" + view);
   panel.textContent = "";
   panel.appendChild(listTable(view, payload.rows || []));

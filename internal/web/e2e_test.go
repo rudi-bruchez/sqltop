@@ -616,6 +616,15 @@ func TestEndToEndInABrowser(t *testing.T) {
 		t.Errorf("the grid moved from seq %s to %s while the history panel was open; the panel is there to be read, and it cannot be read while the rows under it are replaced",
 			got.Freeze.History.Before, got.Freeze.History.After)
 	}
+	if got.Freeze.ListMarked {
+		t.Error("a list view shows the paused marker left by the history panel, although it holds only the grid and the list goes on refreshing")
+	}
+	if !got.Freeze.BackMarked {
+		t.Error("back on the grid with the history still open, the display is held and the marker is gone")
+	}
+	if !strings.Contains(got.Freeze.ListFoot, "sessions, read at ") {
+		t.Errorf("the status bar on the sessions view reads %q; it should count sessions and say when they were read", got.Freeze.ListFoot)
+	}
 	if got.Freeze.AfterHistory.Before == got.Freeze.AfterHistory.After {
 		t.Errorf("the grid was still stuck at seq %s after the history panel was closed; the freeze has to lift with the panel",
 			got.Freeze.AfterHistory.After)
@@ -913,6 +922,9 @@ type e2eResult struct {
 		PausedFlag        bool     `json:"pausedFlag"`
 		HistoryPausedFlag bool     `json:"historyPausedFlag"`
 		HistoryMarked     bool     `json:"historyMarked"`
+		ListMarked        bool     `json:"listMarked"`
+		ListFoot          string   `json:"listFoot"`
+		BackMarked        bool     `json:"backMarked"`
 		History           struct {
 			Before string `json:"before"`
 			After  string `json:"after"`

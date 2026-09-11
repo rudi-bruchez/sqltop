@@ -751,10 +751,22 @@ out.freeze = {};
   await sleep(900);
   out.freeze.history = { before: histSeq, after: await ev(`document.getElementById("seq").textContent`) };
 
+  // The hold is the grid's: a list view keeps refreshing, so it must not
+  // carry the marker, and coming back to the grid puts it back. Longer than a
+  // tick, so a snapshot lands here and gets its chance to overwrite the footer.
+  await ev(key("u"));
+  await sleep(1200);
+  out.freeze.listMarked = await ev(`!document.getElementById("pauseMark").hidden`);
+  out.freeze.listFoot = await ev(`document.getElementById("rowCount").textContent`);
+  await ev(key("r"));
+  await sleep(300);
+  out.freeze.backMarked = await ev(`!document.getElementById("pauseMark").hidden`);
+
   // Closing it lets the screen go again.
   await ev(key("y"));
   const resumedFrom = await ev(`document.getElementById("seq").textContent`);
-  await sleep(900);
+  // Over the one-second tick, or the window can fall between two of them.
+  await sleep(1200);
   out.freeze.afterHistory = { before: resumedFrom, after: await ev(`document.getElementById("seq").textContent`) };
 
   // An explicit pause outlives the history panel: p was the user saying stop,
