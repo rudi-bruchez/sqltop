@@ -32,9 +32,31 @@ directly.
   (`azidentity` and its dependencies), the largest dependency this project
   would ever take. Section 11 corrects `docs/SPECS.md`, which lists Entra as
   supported.
-- No keytab. A keytab is how a service authenticates unattended, and this
-  tool exists to be watched (`docs/SPECS.md` section 12). A hand-written
-  connection string can still carry `krb5-keytabfile`.
+- No Kerberos. The binary links go-mssqldb's `krb5` provider, but the pure Go
+  library under it (gokrb5 v8.4.4, the latest release, February 2023) cannot
+  read the configuration of the distributions where a DBA is most likely to
+  have a ticket:
+  - the stock Fedora and RHEL `/etc/krb5.conf` (package `krb5-libs`,
+    unmodified) contains `dns_canonicalize_hostname = fallback`, which gokrb5
+    parses as a boolean and rejects, failing the whole file with
+    `invalid krb5 config libdefaults section line (dns_canonicalize_hostname = fallback): invalid boolean value`,
+    before any ticket is looked at (measured by three reviewers and by the
+    author, on Fedora 44);
+  - gokrb5 ignores `includedir`, so realms and KDCs declared under
+    `/etc/krb5.conf.d/`, where IPA and SSSD enrolment put them, are invisible
+    to it;
+  - it reads a credential cache only from a file, while those distributions
+    default to `KEYRING:` (`/etc/krb5.conf`) or `KCM:`
+    (`/etc/krb5.conf.d/kcm_default_ccache`), so a plain `kinit` leaves a
+    ticket it cannot use.
+
+  A form cannot make that work, and a form field taking a krb5.conf path
+  would add a defect of its own: gokrb5's parse errors quote the offending
+  line, so anyone holding the token could read one line of any file the tool
+  can read, one attempt at a time. Kerberos stays possible through a
+  hand-written connection string, with a krb5.conf gokrb5 can parse and a
+  `FILE:` cache; section 11 puts that in `docs/SPECS.md` section 3.3 and the
+  README.
 - Nothing is written to `sqltop.yaml`. Secrets never go there
   (`docs/SPECS.md` section 8.3); the only file this page may write is `.env`,
   and only when asked.
@@ -47,7 +69,9 @@ directly.
    overridden by `cfg.Instances[0].DSN` after `os.ExpandEnv`.
 2. The listening socket and the token are created first, by a new
    `web.Listen(cfg.Server)`. Today `web.NewServer` does both inside itself;
-   they move out so that two servers can share them in turn.
+   they move out so that two servers can share them in turn. `NewServer`
+   keeps its signature for the tests and calls `Listen`; a second
+   constructor, `NewServerOn(c, w, l *Listener)`, takes an existing one.
 3. With a connection string, nothing else changes: a source is opened, the
    capture sweep runs behind `-capture`, the collector starts, and a
    `web.Server` is built on the listener from step 2.
@@ -60,6 +84,15 @@ directly.
 5. Ctrl-C during the connect phase cancels the context; `AskConnection`
    returns `ctx.Err()` and `main` exits without opening anything.
 
+Two behaviours change, both on purpose:
+
+- A configured instance whose DSN expands to empty (`dsn: ${SQLTOP_CONN}`
+  with the variable unset) exits with `log.Fatal` today. It now opens the
+  connect page, like having no instance at all.
+- The listener now binds before the connection is attempted, so a busy port
+  fails before the server is contacted rather than after. Same failure,
+  earlier, with nothing sent to the server.
+
 Nothing is sent to the monitored server before an attempt, and a failed
 attempt closes the source it created. The read-only rule of `docs/SPECS.md`
 section 2 is unaffected: this phase runs no query of its own beyond the login
@@ -68,10 +101,9 @@ and the session initialisation `mssql.Source.Open` already performs.
 ### 3.2 Handing the socket over
 
 The two phases serve on one `*net.TCPListener` so that the address, the port
-and the token in the already-open tab stay valid, and so that no request is
-ever refused between them: a connection arriving during the handover waits in
-the kernel's accept queue and is accepted by whichever server calls `Accept`
-next.
+and the token in the already-open tab stay valid, and so that a connection
+arriving during the handover waits in the kernel's accept queue and is
+accepted by whichever server calls `Accept` next.
 
 The obstacle is `http.Server.Shutdown`, which closes every listener it
 served on. The connect phase therefore serves on a wrapper whose `Close` does
@@ -83,20 +115,32 @@ type handoff struct{ *net.TCPListener }
 func (h handoff) Close() error { return h.SetDeadline(time.Now()) }
 ```
 
-`Shutdown` marks the server as shutting down, then calls `Close`; the blocked
-`Accept` returns a timeout error; `http.Server.Serve` sees that it is shutting
-down and returns `http.ErrServerClosed` (net/http `server.go`, the first test
-after `l.Accept()`). `AskConnection` then clears the deadline with
-`SetDeadline(time.Time{})` before returning, so the next server's `Accept`
+The connect phase stops through the existing `gracefulShutdown`
+(`internal/web/server.go`): `Shutdown` with `shutdownGrace` (two seconds),
+then `Close` if connections are still open. Both mark the server as shutting
+down and call the wrapper's `Close`; the blocked `Accept` returns a timeout
+error; `http.Server.Serve` sees that it is shutting down and returns
+`http.ErrServerClosed` (the first test after `l.Accept()` in net/http
+`server.go`). Both `Shutdown` and `Close` wait for the serve loop to exit
+before returning (`listenerGroup.Wait()`), so `AskConnection` then clears the
+deadline with `SetDeadline(time.Time{})` and the next server's `Accept`
 blocks normally.
+
+The grace matters. A browser opens connections speculatively and may leave
+one idle; net/http holds `Shutdown` for five seconds on a connection that has
+sent nothing (the `StateNew` rule in `closeIdleConns`), measured at 5.84 s by
+one reviewer, and a connection stuck mid-request would hold it forever. With
+the grace, the handover takes at most two seconds, and a connection dropped
+by the fallback `Close` is one the page retries (section 3.3).
 
 ### 3.3 The browser side of the handover
 
 After a successful attempt the page does not reload at once. The connect
-phase may still be running when the reload arrives, possibly on the same
-keep-alive connection, and it would answer with the connect page again. The
-page instead polls `GET /api/status?t=<token>` every 250 ms. The connect
-phase does not serve that route (404); the monitor does (200). On the first
+phase may still be running when the reload arrives, and it would answer with
+the connect page again. The page instead polls `GET /api/status?t=<token>`
+every 250 ms. The connect phase does not serve that route (404); the monitor
+does (200). A network error, which is what a connection dropped during the
+handover looks like, is treated like a 404: wait and poll again. On the first
 200 the page loads `/?t=<token>`.
 
 ## 4. The page
@@ -121,6 +165,16 @@ Server Browser (`tcpDialer.CallBrowser` in go-mssqldb `protocol.go`: the
 Browser is asked only when an instance is set and the port is zero), which is
 what SSMS does too.
 
+A named instance without a port costs a UDP request to SQL Server Browser on
+port 1434. When the port is refused, the lookup fails at once (measured
+against the container: `no instance matching 'NOPE' returned from host
+'127.0.0.1'` in under a millisecond). When the request is dropped silently,
+as a firewall does, the driver waits for the whole attempt's context before
+failing (measured by a reviewer at the context's deadline exactly). While an
+attempt with an instance and no port is running, the page says so: "resolving
+the instance through SQL Server Browser; if it does not answer, this fails
+after 30 seconds".
+
 ### 4.2 Authentication methods
 
 The list depends on the operating system the binary runs on
@@ -132,53 +186,22 @@ deciding it itself.
 | `sql` | SQL Server login | login, password | all |
 | `windows` | Windows, current account | none | windows only |
 | `domain` | Windows, domain account | `DOMAIN\user`, password | all |
-| `kerberos` | Kerberos ticket (kinit) | credential cache, krb5.conf | all but windows |
 
 `windows` works because go-mssqldb registers `winsspi` as the default
 integrated provider in Windows builds (`auth_windows.go`), used whenever the
 connection string carries no user.
 
-`domain` is NTLM. go-mssqldb registers its `ntlm` provider on every platform
-and selects it when the user name contains a backslash
-(`integratedauth/ntlm/ntlm.go`, `getAuth`). The page states under the
-fields that a domain policy can refuse NTLM, in which case Kerberos is the
-way.
+`domain` goes through whichever provider is the platform's default. On
+Windows that is `winsspi` again, which accepts a `DOMAIN\user` and password
+(`integratedauth/winsspi/winsspi.go`) and negotiates Kerberos or NTLM itself.
+Elsewhere it is `ntlm` (`auth_unix.go`), which go-mssqldb selects when the
+user name contains a backslash (`integratedauth/ntlm/ntlm.go`, `getAuth`;
+without the backslash it falls back to SQL authentication, which is why the
+form requires one). Outside Windows the page states under the fields that a
+domain policy can refuse NTLM, and that Kerberos is then the way, by a
+hand-written connection string (section 2).
 
-`kerberos` uses the `krb5` provider this binary already links
-(`internal/source/mssql/mssql.go` imports it). Only the credential cache form
-is offered: a ticket obtained with `kinit` beforehand, no user, no password.
-
-### 4.3 Kerberos defaults, and the trap they avoid
-
-Two fields are prefilled from what the process can see:
-
-- credential cache: from `KRB5CCNAME` when it names a file, with a `FILE:`
-  prefix removed; otherwise `/tmp/krb5cc_<uid>` when that file exists;
-  otherwise empty.
-- krb5.conf: `KRB5_CONFIG` when set, otherwise `/etc/krb5.conf`.
-
-The trap: the pure Go Kerberos library reads a credential cache only from a
-file (`credentials.LoadCCache` in gokrb5, called from go-mssqldb
-`integratedauth/krb5/krb5.go`). Fedora and RHEL default to the KCM cache
-(`/etc/krb5.conf.d/kcm_default_ccache` sets `default_ccache_name = KCM:`,
-checked on the machine this was written on), so a user who ran a plain
-`kinit` has a ticket this tool cannot read. And when the connection string
-names no cache, the driver reads `KRB5CCNAME` verbatim, prefix included, and
-fails with `krb5-credcachefile does not exist`, which says nothing about why.
-
-So the cache path always goes into the connection string explicitly, prefix
-removed, and when `KRB5CCNAME` has a type other than `FILE:` (`KCM:`,
-`KEYRING:`, `DIR:`, `API:`, `MEMORY:`), the field is left empty and the page
-says, in one line, that this cache type cannot be read and gives the command
-that makes one that can:
-
-```
-kinit -c FILE:/tmp/krb5cc_<uid> user@REALM
-```
-
-with the actual uid substituted.
-
-### 4.4 The folded fields
+### 4.3 The folded fields
 
 Under one `<details>` element:
 
@@ -191,7 +214,9 @@ Under one `<details>` element:
     `encrypt` parameter means `EncryptionOff` with `trustServerCert = true`).
   - required (`encrypt=true`): a checkbox "trust the server certificate"
     appears, unchecked, which adds `trustservercertificate=true`.
-  - strict (`encrypt=strict`, TDS 8, SQL Server 2022 and later).
+  - strict (`encrypt=strict`, TDS 8, SQL Server 2022 and later). No trust
+    checkbox: the driver forces trust off in this mode whatever the
+    parameter says (`parseTLS`).
 
 ## 5. Building the connection string
 
@@ -202,19 +227,20 @@ JavaScript: `net/url` is what escapes a password containing `@`, `:`, `/`,
 ```go
 // ConnParams is what the connect page posts.
 type ConnParams struct {
-	Server     string `json:"server"`      // any form of section 4.1
-	Auth       string `json:"auth"`        // sql, windows, domain, kerberos
-	Login      string `json:"login"`       // sql: login; domain: DOMAIN\user
-	Password   string `json:"password"`    // sql and domain only
-	Database   string `json:"database"`    // optional
-	Encrypt    string `json:"encrypt"`     // "", "true" or "strict"
-	Trust      bool   `json:"trust"`       // only read when Encrypt is "true"
-	Krb5Cache  string `json:"krb5_cache"`  // kerberos only
-	Krb5Config string `json:"krb5_config"` // kerberos only
+	Server   string `json:"server"`   // any form of section 4.1
+	Auth     string `json:"auth"`     // sql, windows, domain
+	Login    string `json:"login"`    // sql: login; domain: DOMAIN\user
+	Password string `json:"password"` // sql and domain only
+	Database string `json:"database"` // optional
+	Encrypt  string `json:"encrypt"`  // "", "true" or "strict"
+	Trust    bool   `json:"trust"`    // only read when Encrypt is "true"
 }
 
 // BuildDSN returns a sqlserver:// URL, or an error naming the field at fault.
 func BuildDSN(p ConnParams) (string, error)
+
+// AuthMethods lists the methods of section 4.2 for this platform, in order.
+func AuthMethods() []AuthMethod // {ID, Label string}
 ```
 
 The URL is assembled as a `url.URL` value: `Scheme: "sqlserver"`,
@@ -222,36 +248,25 @@ The URL is assembled as a `url.URL` value: `Scheme: "sqlserver"`,
 otherwise, `Host` as the host joined with the port when there is one
 (`net.JoinHostPort`, which also brackets an IPv6 address), `Path` as `/`
 plus the instance when there is one, and `RawQuery` from a `url.Values` with
-`database`, `encrypt`, `trustservercertificate`, and for `kerberos`
-`authenticator=krb5`, `krb5-credcachefile` and `krb5-configfile`.
+`database`, `encrypt` and `trustservercertificate`.
 
 Rejected as form errors, before any connection is attempted: an empty
 server, an unknown auth id or one not offered on this platform, an empty
 login for `sql` and `domain`, a `domain` login without a backslash, an empty
-password for `sql` and `domain`, an empty credential cache or krb5.conf path
-for `kerberos`, an encrypt value outside the three.
+password for `domain`, an encrypt value outside the three. An empty password
+is accepted for `sql`: a SQL login created with `CHECK_POLICY = OFF` can
+have one, and refusing it would send that user back to writing the string by
+hand.
 
 What the page shows after success, and what the log prints, is
 `url.URL.Redacted()` of that URL, which replaces the password with `xxxxx`.
-It teaches the format, and it can be copied into `sqltop.yaml` with the
-password replaced by `${SQLTOP_CONN}` or kept in `.env`.
-
-Three more functions in the same file give the page what it offers:
-
-```go
-// AuthMethods lists the methods of section 4.2 for this platform, in order.
-func AuthMethods() []AuthMethod // {ID, Label string}
-
-// KerberosDefaults computes section 4.3. Pure: the environment, the uid and
-// the file test are passed in, so the cases are testable anywhere.
-func KerberosDefaults(getenv func(string) string, uid int, exists func(string) bool) Krb5Defaults
-
-type Krb5Defaults struct {
-	Cache   string `json:"cache"`
-	Config  string `json:"config"`
-	Problem string `json:"problem"` // the one-line explanation, or ""
-}
-```
+It teaches the format. To reuse it, the whole connection string goes into
+`.env` as `SQLTOP_CONN`, which is what the checkbox of section 7 does, and
+`sqltop.yaml` refers to it whole, as `dsn: ${SQLTOP_CONN}`, the form
+`docs/SPECS.md` section 8.3 already documents. Substituting a variable for
+the password alone does not work: `os.ExpandEnv` inserts it unescaped, and a
+password containing `@` or `:` then parses as a different host without any
+error.
 
 ## 6. The two routes of the connect phase
 
@@ -268,7 +283,6 @@ carry the token.
 
 ```json
 {"methods": [{"id": "sql", "label": "SQL Server login"}],
- "kerberos": {"cache": "/tmp/krb5cc_1000", "config": "/etc/krb5.conf", "problem": ""},
  "env_path": "/home/dba/sqltop/.env"}
 ```
 
@@ -284,8 +298,12 @@ or `false`, and answers:
 
 Each attempt creates a new `mssql.Source`, applies `AllowCapture(*capture)`,
 and calls `Open` under a context of 30 seconds derived from the request's. A
-failed `Open` already closes what it created (`mssql.Source.Open`), so a
-failure leaves nothing behind. One attempt runs at a time, under a mutex.
+failed `Open` already closes what it created (`mssql.Source.Open` closes the
+pool on both of its failure paths), so a failure leaves nothing behind but
+the failed-login entry any client leaves in the server's error log. One
+attempt runs at a time: the handler takes a `sync.Mutex` with `TryLock` and
+answers 409 when it cannot, rather than queueing the second request behind a
+thirty-second attempt.
 
 The hint is chosen by looking for a fixed string in the driver's error, and
 there are four:
@@ -293,9 +311,15 @@ there are four:
 | Error contains | Hint |
 |---|---|
 | `no instance matching` | SQL Server Browser did not return that instance. Type `host,port` instead; the port is in SQL Server Configuration Manager. |
-| `x509:` | The server certificate was refused. Leave encryption on the driver default, or tick "trust the server certificate". |
+| `x509:` | The server certificate was refused. Leave encryption on the driver default, or choose "required" and tick "trust the server certificate". |
+| `TLS Handshake failed` | The server did not complete the TLS handshake. With "strict", the server must support TDS 8 (SQL Server 2022 and later, with strict encryption configured); otherwise choose another encryption mode. |
 | `Login failed for user` | The server refused the login. For a SQL Server login, the server must also allow SQL Server authentication. |
-| `krb5` (case-insensitive) | Check the ticket with `klist -c <cache>`, and type the server's fully qualified name: Kerberos matches the name the service is registered under. |
+
+`no instance matching` covers both ways a Browser lookup fails: when the
+Browser answers without the instance, and when it does not answer at all,
+since go-mssqldb only logs the error of the UDP request (`tds.go`, in
+`dialConnection`) and then returns the one `ParseBrowserData` produces from
+the empty answer.
 
 `internal/web` does not know SQL Server. It takes the options as an opaque
 value and the attempt as a function:
@@ -321,8 +345,8 @@ func (l *Listener) AskConnection(ctx context.Context, options any, connect Conne
 
 `main` supplies the function: decode into `mssql.ConnParams`, `BuildDSN`,
 open a source, keep it for step 3 of section 3.1, and write `.env` when asked.
-Only the 200 path returns, and `AskConnection` shuts its server down after
-that response has been written.
+Only the 200 path returns, and `AskConnection` stops its server (section 3.2)
+after that response has been written.
 
 ## 7. Writing `.env`
 
@@ -337,15 +361,23 @@ The file is written only after a successful connection, by a new function:
 func Set(path, key, value string) error
 ```
 
-- The first line defining the key, with or without an `export ` prefix, is
-  replaced; any later definition of the same key is removed, since `Load`
-  keeps the first and would never read them anyway.
+- A line defines the key exactly when `Load` would read it as the key's
+  definition: after `strings.TrimSpace`, not empty, not starting with `#`,
+  with an `export ` prefix removed, cut at the first `=`, and the part before
+  it equal to the key once trimmed. So `SQLTOP_CONN = x`, `  SQLTOP_CONN=x`
+  and `export SQLTOP_CONN=x` all define it. The rule is one shared function
+  that `Load` also calls, so the two cannot drift apart.
+- The first line defining the key is replaced by `key=value`; any later
+  definition of the same key is removed, since `Load` keeps the first and
+  would never read them anyway.
 - Every other line, comments included, is kept byte for byte, in order.
 - If no line defines the key, `key=value` is appended, after a newline if
   the file does not end with one.
-- A missing file is created with mode 0600. An existing file keeps its mode.
-- The write goes to a temporary file in the same directory, then
-  `os.Rename` over the original.
+- The write goes to a temporary file created in the same directory with
+  `os.CreateTemp`, then `os.Rename` over the original. `os.Rename` installs
+  the temporary file's inode, mode included, so the temporary file is first
+  given the mode the original had (`os.Chmod` with the original's
+  `Mode().Perm()`). A missing file is created with mode 0600.
 - A value containing `\n` or `\r` is refused.
 - The value is written unquoted. A connection string from `BuildDSN`
   contains no whitespace, no quote and no newline, and `Load` reads such a
@@ -370,41 +402,50 @@ project's rules require.
 
 - `BuildDSN` on a table of cases, each parsed back with go-mssqldb's own
   `msdsn.Parse` and checked field by field (host, port, instance, user,
-  password, database, encryption, `Parameters`), so what is checked is what
-  the driver understands, not the string. The table covers every row of
-  section 4.1, every method of section 4.2, a password of
-  ``p@ss:w/o#r%d ?&=`` plus a non-ASCII character, `CORP\dba` as a domain
-  login, the three encryption values with and without trust, and the Kerberos
-  parameters.
+  password, database, encryption, trust), so what is checked is what the
+  driver understands, not the string. The table covers every row of section
+  4.1, every method of section 4.2, a password of ``p@ss:w/o#r%d ?&=`` plus a
+  non-ASCII character, an empty `sql` password, `CORP\dba` as a domain login,
+  an IPv6 host with and without a port, and the three encryption values with
+  and without trust.
 - Every form error listed in section 5, one case each.
-- `KerberosDefaults`: `FILE:/x`, `/x` without a prefix, `KCM:`, `KEYRING:`,
-  unset with `/tmp/krb5cc_<uid>` present, unset with it absent, and
-  `KRB5_CONFIG` set and unset.
 - `AuthMethods` on the current platform contains `sql` and `domain`, and
   contains `windows` exactly when `runtime.GOOS` is `windows`.
+- The hint table: each of the four strings selects its hint, and an error
+  containing none selects none.
 
 `internal/source/mssql`, against the container (`SQLTOP_TEST_DSN`):
 
 - A `ConnParams` of method `sql` with the server typed as `127.0.0.1,<port>`
   and the container's login builds a string that `Source.Open` connects with.
+- The same with a wrong password returns an error containing
+  `Login failed for user`, and with `encrypt=strict` one containing
+  `TLS Handshake failed`, so the hint table is checked against the driver
+  rather than against this document.
 
 `internal/dotenv`:
 
 - `Set` on: a missing file (created, mode 0600), a file without the key, a
-  file with the key once, with `export` in front, twice, a file without a
-  final newline, and a value with a newline (refused, file untouched). Each
-  result is read back with `Load` in a clean environment.
+  file with the key once, with `export` in front, with spaces around the
+  `=`, with leading spaces, twice, a file without a final newline, an
+  existing file of mode 0640 (still 0640 afterwards), and a value with a
+  newline (refused, file untouched). Each result is read back with `Load` in
+  a clean environment.
 
 `internal/web`, with a fake `ConnectFunc`:
 
 - Both routes refuse a request without the token, and a wrong `Host`.
 - `POST /api/connect` refuses other methods; a second POST while the first is
-  inside the function gets 409; a `*ConnectError` comes out with its status,
-  message and hint.
+  inside the function gets 409 at once, not after the first returns; a
+  `*ConnectError` comes out with its status, message and hint.
 - The handover: after a successful POST, `AskConnection` returns; a
-  `web.Server` built on the same `Listener` then answers `GET /api/status`
-  with the same token, on the same address. One request is sent while the
-  handover is in progress and must be answered by the monitor, not refused.
+  `web.Server` built on the same `Listener` with `NewServerOn` then answers
+  `GET /api/status` with the same token, on the same address. One request is
+  sent while the handover is in progress and must be answered by the monitor,
+  not refused.
+- The handover with an idle connection the connect phase accepted and that
+  never sent a request: `AskConnection` still returns within `shutdownGrace`
+  plus a margin, not after five seconds.
 - `AskConnection` returns `context.Canceled` when its context is cancelled.
 
 The browser test (`internal/web/e2e_test.go`), with a fake `ConnectFunc`:
@@ -417,24 +458,36 @@ The browser test (`internal/web/e2e_test.go`), with a fake `ConnectFunc`:
 Written down as open, the way `docs/SPECS.md` section 14 already lists
 Kerberos against a real domain:
 
-- A named instance through SQL Server Browser. SQL Server on Linux has no
-  Browser service, so the containers cannot exercise `db01\SALES` without a
-  port.
-- NTLM and Kerberos against a real Active Directory domain.
-- `winsspi` on a Windows machine joined to a domain.
+- A named instance whose SQL Server Browser answers with the instance's
+  port. The Linux containers run no Browser and refuse the request, so only
+  the failure path (`no instance matching`) is measurable here, and the
+  silent-drop timeout of section 4.1 only with a firewall rule added for the
+  purpose.
+- NTLM against a real Active Directory domain.
+- `winsspi` on a Windows machine joined to a domain, both for the current
+  account and for a `DOMAIN\user` with a password.
 
 ## 11. Changes to other documents
 
 `docs/SPECS.md`:
 
-- Section 3, the Auth row: SQL Server authentication, Windows through NTLM
-  and through Kerberos from Linux, Windows current account on Windows.
-  Microsoft Entra is not linked, with the reason of section 2 here, and moves
-  to section 13.
-- Section 3.3: add NTLM, and the credential cache trap of section 4.3.
+- Section 3, the Auth row: SQL Server authentication; Windows through the
+  current account on Windows and through a domain account everywhere (NTLM
+  outside Windows); Kerberos from Linux by hand-written connection string
+  only, under the conditions of section 3.3. Microsoft Entra is not linked,
+  with the reason of section 2 here, and moves to section 13.
+- Section 3.3: the `krb5` provider builds and links as stated, but "verified"
+  there covers the build only. Record the three limits of section 2 here
+  (the stock Fedora and RHEL krb5.conf rejected, `includedir` ignored, file
+  caches only), and what a working hand-written string needs: a krb5.conf
+  gokrb5 can parse, named with `krb5-configfile`, and a `FILE:` cache named
+  with `krb5-credcachefile`, obtained with
+  `kinit -c FILE:/tmp/krb5cc_$(id -u) user@REALM`.
 - Section 4.3: starting without a connection string serves the connect page
   on the same address and token.
 
 `README.md`: a short table of connection strings by case (default instance,
-named instance, explicit port, SQL login, domain account, Kerberos ticket),
-and a line saying that starting without one opens the connect page.
+named instance, explicit port, SQL login, domain account, and Kerberos by
+hand with the conditions above), a line saying that starting without one
+opens the connect page, and the `dsn: ${SQLTOP_CONN}` form for reusing it in
+`sqltop.yaml`.
