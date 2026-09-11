@@ -67,12 +67,20 @@ func (s *Server) WithConfig(cfg config.Config) *Server {
 	return s
 }
 
-// NewServer binds 127.0.0.1 and nothing else. There is deliberately no
-// option to widen it: this interface will eventually be able to kill
-// sessions on a production server, and a bind on all interfaces would hand
-// that to anyone on the network. cfg.Port is the only knob, and it still
-// only ever selects a port on the loopback address, never the interface.
-func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Server, error) {
+// Listener is the bound loopback socket and the token that guards it. It
+// is made first so that the connect page and the monitor can serve on one
+// address, one after the other.
+type Listener struct {
+	ln    *net.TCPListener
+	token string
+}
+
+// Listen binds 127.0.0.1 and nothing else. There is deliberately no option
+// to widen it: this interface will eventually be able to kill sessions on a
+// production server, and a bind on all interfaces would hand that to anyone
+// on the network. cfg.Port is the only knob, and it still only ever selects
+// a port on the loopback address, never the interface.
+func Listen(cfg config.Server) (*Listener, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Port))
 	if err != nil {
 		return nil, fmt.Errorf("web: listen: %w", err)
@@ -82,13 +90,36 @@ func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Se
 		ln.Close()
 		return nil, fmt.Errorf("web: token: %w", err)
 	}
+	return &Listener{ln: ln.(*net.TCPListener), token: hex.EncodeToString(raw[:])}, nil
+}
+
+// URL is the address with its token. Server.URL's comment says what putting
+// the token there costs.
+func (l *Listener) URL() string {
+	return fmt.Sprintf("http://%s/?t=%s", l.ln.Addr().String(), l.token)
+}
+
+// Close releases the socket, for a caller that stops before any server has.
+func (l *Listener) Close() error { return l.ln.Close() }
+
+// NewServer binds its own listener. See Listen.
+func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Server, error) {
+	l, err := Listen(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewServerOn(c, w, l), nil
+}
+
+// NewServerOn serves the monitor on an existing listener and its token.
+func NewServerOn(c *collector.Collector, w *window.Window, l *Listener) *Server {
 	// Built with the defaults rather than with a zero Config: every path
 	// that reads the configuration (the dashboard, the grid columns, the
 	// two endpoints that validate against it) then has one shape to handle
 	// instead of two, and a test server behaves like a real one that
 	// happened to find no file.
-	srv := &Server{col: c, win: w, token: hex.EncodeToString(raw[:]), listener: ln}
-	return srv.WithConfig(config.Default()), nil
+	srv := &Server{col: c, win: w, token: l.token, listener: l.ln}
+	return srv.WithConfig(config.Default())
 }
 
 // URL is what the tool prints and opens on startup. The token travels in the
@@ -103,7 +134,7 @@ func NewServer(c *collector.Collector, w *window.Window, cfg config.Server) (*Se
 // load, and because the token still protects the one thing that matters on
 // a loopback bind: another local account on the same shared machine.
 //
-// authenticate also accepts the token from an X-Sqltop-Token header, but
+// requireToken also accepts the token from an X-Sqltop-Token header, but
 // the shipped page never sends one: EventSource, which is what it uses for
 // /api/stream, cannot set arbitrary headers, and index composes the CSS and
 // JavaScript into the document it returns rather than asking the browser to
@@ -145,11 +176,13 @@ type route struct {
 	handler http.Handler
 }
 
-// routes is the single place a path is registered. Handler builds the mux
-// from exactly this list, and TestEveryRouteRequiresTheToken walks the same
-// list, so a route added here without thinking about authentication cannot
-// exist: it is either in this list, in which case Handler wraps it in
-// authenticate below like everything else, or it is not registered at all.
+// routes is the single place a path of the monitor is registered; the
+// connect page's two are in AskConnection, behind the same requireToken.
+// Handler builds the mux from exactly this list, and
+// TestEveryRouteRequiresTheToken walks the same list, so a route added here
+// without thinking about authentication cannot exist: it is either in this
+// list, in which case Handler wraps it in requireToken below like
+// everything else, or it is not registered at all.
 // That closes the mistake a second, outer mux with its own unauthenticated
 // route would otherwise open.
 func (s *Server) routes() ([]route, error) {
@@ -182,7 +215,7 @@ func (s *Server) routes() ([]route, error) {
 // The relative URLs those tags used to carry are exactly what broke the
 // page: a relative reference does not inherit the base URL's query string,
 // so a browser that requested them separately sent GET /style.css and GET
-// /app.js with no token at all, authenticate refused both with 401, and
+// /app.js with no token at all, requireToken refused both with 401, and
 // the reviewer who clicked the printed link got a bare unstyled heading
 // with no grid and no stream, verified against a real browser rather than
 // curl's explicit ?t=. Composing everything into one response removes the
@@ -278,11 +311,11 @@ func (s *Server) Handler() http.Handler {
 	// that page already holds.
 	//
 	// securityHeaders is outermost so it applies even to a request
-	// authenticate refuses: an attacker's page that got this far without
+	// requireToken refuses: an attacker's page that got this far without
 	// the token still should not learn anything from response headers
 	// either, and a 401 body should not carry a referrer any more than a
 	// 200 one should.
-	return securityHeaders(s.authenticate(mux))
+	return securityHeaders(requireToken(s.token, mux))
 }
 
 // securityHeaders sets response headers that cost nothing today and matter
@@ -327,7 +360,7 @@ func (s *Server) status(rw http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// authenticate accepts the token from the query string, where the opened URL
+// requireToken accepts the token from the query string, where the opened URL
 // puts it, or from a header, which the page uses afterwards. It is compared
 // with subtle.ConstantTimeCompare rather than Go's built-in != so the
 // comparison itself takes the same time regardless of how many leading
@@ -338,7 +371,7 @@ func (s *Server) status(rw http.ResponseWriter, _ *http.Request) {
 // constant-time compare apart from a short-circuiting one on its own.
 //
 // It also checks the Host header before the token: see hostAllowed.
-func (s *Server) authenticate(next http.Handler) http.Handler {
+func requireToken(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		if !hostAllowed(req.Host) {
 			http.Error(rw, "unauthorized", http.StatusUnauthorized)
@@ -348,7 +381,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		if got == "" {
 			got = req.Header.Get("X-Sqltop-Token")
 		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 			http.Error(rw, "unauthorized", http.StatusUnauthorized)
 			return
 		}
