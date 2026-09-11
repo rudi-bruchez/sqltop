@@ -127,6 +127,7 @@ func (p *connectPhase) attempt(rw http.ResponseWriter, req *http.Request) {
 		writeJSONStatus(rw, http.StatusConflict, map[string]string{"error": "already connected"})
 		return
 	}
+	// A form is a few hundred bytes; the cap only stops a runaway body.
 	body, err := io.ReadAll(http.MaxBytesReader(rw, req.Body, 64<<10))
 	if err != nil {
 		writeJSONStatus(rw, http.StatusBadRequest, map[string]string{"error": "unreadable request: " + err.Error()})

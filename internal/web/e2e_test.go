@@ -19,23 +19,6 @@ import (
 	"github.com/rudi-bruchez/sqltop/internal/window"
 )
 
-// TestEndToEndInABrowser loads the real page in a real browser and drives
-// the things only a browser can answer for.
-//
-// It exists because of an asymmetry this package could not otherwise close:
-// the Go side has a hundred and eighty tests and the JavaScript side had
-// two functions reachable from any of them, while 0.2 was mostly a release
-// of interface. Everything below had been verified once, by hand, by
-// someone driving a browser and reading the answers. This is that, kept.
-//
-// It is also the only kind of check that finds the class of bug that has
-// actually shipped here: a page whose stylesheet 401s because a relative
-// URL does not inherit a query string, and a favicon request nobody wrote
-// that gets refused for want of a token. curl finds neither.
-//
-// Hermetic on purpose: a fake source, no container, no network. It skips
-// when chromium or deno is missing rather than failing, on the same terms
-// as the linter gate, so a machine without them still builds and tests.
 // launchChromium starts a headless chromium for one test and returns deno's
 // path and chromium's DevTools port, or skips when either is missing.
 func launchChromium(t *testing.T) (deno, port string) {
@@ -79,6 +62,23 @@ func launchChromium(t *testing.T) (deno, port string) {
 	return deno, port
 }
 
+// TestEndToEndInABrowser loads the real page in a real browser and drives
+// the things only a browser can answer for.
+//
+// It exists because of an asymmetry this package could not otherwise close:
+// the Go side has a hundred and eighty tests and the JavaScript side had
+// two functions reachable from any of them, while 0.2 was mostly a release
+// of interface. Everything below had been verified once, by hand, by
+// someone driving a browser and reading the answers. This is that, kept.
+//
+// It is also the only kind of check that finds the class of bug that has
+// actually shipped here: a page whose stylesheet 401s because a relative
+// URL does not inherit a query string, and a favicon request nobody wrote
+// that gets refused for want of a token. curl finds neither.
+//
+// Hermetic on purpose: a fake source, no container, no network. It skips
+// when chromium or deno is missing rather than failing, on the same terms
+// as the linter gate, so a machine without them still builds and tests.
 func TestEndToEndInABrowser(t *testing.T) {
 	deno, port := launchChromium(t)
 

@@ -111,9 +111,10 @@ func stripLineComment(line string) string {
 	return line
 }
 
-// TestShippedJavaScriptPassesTheLinter runs deno lint over the one
-// JavaScript file this binary serves. It is here rather than only in a
-// checklist because the checklist is a thing to remember and this is not.
+// TestShippedJavaScriptPassesTheLinter runs deno lint over the two
+// JavaScript files this binary serves, the monitor's and the connect
+// page's. It is here rather than only in a checklist because the checklist
+// is a thing to remember and this is not.
 //
 // deno rather than eslint: a single static binary, no package.json, no
 // node_modules and no configuration file, in a repository that otherwise
