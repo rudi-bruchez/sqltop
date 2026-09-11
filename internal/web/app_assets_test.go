@@ -142,11 +142,11 @@ func TestShippedJavaScriptPassesTheLinter(t *testing.T) {
 		}
 	}
 	if err != nil {
-		t.Skip("deno not installed; install it to run this gate (https://deno.com), or run deno lint internal/web/assets/app.js by hand")
+		t.Skip("deno not installed; install it to run this gate (https://deno.com), or run deno lint internal/web/assets/app.js internal/web/assets/connect.js by hand")
 	}
-	out, err := exec.Command(deno, "lint", "assets/app.js").CombinedOutput()
+	out, err := exec.Command(deno, "lint", "assets/app.js", "assets/connect.js").CombinedOutput()
 	if err != nil {
-		t.Errorf("deno lint failed on assets/app.js:\n%s", out)
+		t.Errorf("deno lint failed on assets/app.js and assets/connect.js:\n%s", out)
 	}
 }
 
