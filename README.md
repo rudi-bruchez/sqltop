@@ -27,9 +27,28 @@ echo 'SQLTOP_CONN=sqlserver://user:password@server:1433?database=master' > .env
 go run ./cmd/sqltop
 ```
 
-It prints its version, then a line like `sqltop on http://127.0.0.1:8421/?t=...`.
+It prints its version, then a line like `sqltop on http://127.0.0.1:8420/?t=...`.
 Open that link as printed. The token is new on every run, so a bookmarked URL
 will not work.
+
+Started without a connection string, sqltop serves a connect page at that
+address instead: a server field that takes what SSMS takes (`db01`,
+`db01\SALES`, `db01,14330`), a login method, and a box to save the result to
+`.env`. By hand, the string looks like this:
+
+| Case | Connection string |
+|---|---|
+| default instance | `sqlserver://user:password@db01?database=master` |
+| named instance, through SQL Server Browser | `sqlserver://user:password@db01/SALES` |
+| explicit port | `sqlserver://user:password@db01:14330` |
+| Windows domain account (NTLM outside Windows) | `sqlserver://CORP%5Cdba:password@db01` |
+| current Windows account, on Windows | `sqlserver://db01` |
+| Kerberos ticket | see `docs/SPECS.md` section 3.3 |
+
+A password containing `@`, `:`, `/`, `#` or `%` must be percent-encoded; the
+connect page does it for you. To reuse the string in `sqltop.yaml`, keep it
+in `.env` and write `dsn: ${SQLTOP_CONN}` there, whole: a variable standing
+for the password alone is inserted unescaped.
 
 Options: `--config <path>` for an explicit configuration file, `--env <path>`
 for a `.env` elsewhere, `--show-config` to print the resolved configuration and

@@ -104,7 +104,7 @@ keeps the refresh budget of section 10.
 | Engine | SQL Server 2019 and later, on-premises; Azure SQL Database; Azure SQL Managed Instance | PostgreSQL, MySQL |
 | Degraded | SQL Server 2016 SP1 to 2017: everything works except live plan progress, which needs trace flag 7412 the tool will not set | |
 | Floor | SQL Server 2012 to 2016 RTM: connects, grid and dashboard work, no plan progress at all. Below 2012, the tool refuses to connect and says why rather than failing query by query | |
-| Auth | SQL authentication, Microsoft Entra, and Windows / Kerberos including from Linux | |
+| Auth | SQL authentication; Windows through the current account on Windows and through a domain account everywhere (NTLM outside Windows); Kerberos from Linux by a hand-written connection string only, see 3.3 | Microsoft Entra |
 | Permission | See the table below | |
 
 Targeting 2019 makes the flagship feature work with nothing to enable:
@@ -144,17 +144,40 @@ Database is to be confirmed against a live instance during implementation; the
 capability mechanism in section 4.1 exists so that this can be settled per
 figure without touching the UI.
 
-### 3.3 Windows authentication from Linux, verified
+### 3.3 Windows authentication from Linux
 
-The `krb5` provider of `github.com/microsoft/go-mssqldb` is pure Go. Verified by
-building: with `CGO_ENABLED=0`, a program importing both the driver and the
-provider links 32 `gokrb5` packages and produces a statically linked binary,
-and cross-compiles to `windows/amd64`, `darwin/arm64` and `linux/arm64` from a
-Linux host. Windows authentication therefore does not cost the single-static-
-binary constraint.
+Two ways, with different reach.
 
-Credentials come from a keytab, a credential cache, or a username and password,
-with a `krb5.conf`.
+A domain account and its password, sent as NTLM. go-mssqldb registers its
+`ntlm` provider on every platform and uses it outside Windows whenever the
+user name contains a backslash, `DOMAIN\user`. Pure Go, nothing to
+configure, and refused wherever a domain policy restricts NTLM.
+
+Kerberos, through the driver's `krb5` provider, which is pure Go: with
+`CGO_ENABLED=0`, a program importing both the driver and the provider links
+32 `gokrb5` packages, produces a statically linked binary, and cross-compiles
+to `windows/amd64`, `darwin/arm64` and `linux/arm64` from a Linux host.
+Building is all that was verified that way. Running it on Fedora 44 showed
+three limits of the gokrb5 library underneath (v8.4.4, its latest release):
+
+- the stock Fedora and RHEL `/etc/krb5.conf` carries
+  `dns_canonicalize_hostname = fallback`, which gokrb5 rejects as an invalid
+  boolean, failing the whole file before any ticket is read;
+- it ignores `includedir`, so realms declared under `/etc/krb5.conf.d/` are
+  invisible to it;
+- it reads a credential cache only from a file, where those distributions
+  default to `KEYRING:` or `KCM:`.
+
+A hand-written connection string therefore works only with a krb5.conf
+gokrb5 can parse, named with `krb5-configfile`, and a file cache named with
+`krb5-credcachefile`, and with the server's fully qualified name:
+
+    kinit -c FILE:/tmp/krb5cc_$(id -u) dba@CORP.EXAMPLE
+    sqlserver://db01.corp.example:1433?authenticator=krb5&krb5-configfile=/home/dba/krb5-sqltop.conf&krb5-credcachefile=/tmp/krb5cc_1000
+
+The connect page does not offer Kerberos, for these reasons
+(`docs/specs/2026-09-11-connect-page-design.md` section 2). Against a real
+domain it remains untested, see section 14.
 
 ## 4. Architecture
 
@@ -258,6 +281,11 @@ The port defaults to 8420 and is configurable. On startup the tool prints, and
 opens, a URL carrying a token generated for that run; requests without it are
 refused. That keeps other local users of a shared machine out. No CORS headers
 are emitted, since nothing legitimate is cross-origin here.
+
+Started without a connection string, neither `SQLTOP_CONN` nor an instance
+in the configuration file, the tool does not exit: it serves a connect page
+on the same address and token, and once a connection succeeds the monitor
+takes the same socket over. `docs/specs/2026-09-11-connect-page-design.md`.
 
 ### 4.4 Losing the connection
 
@@ -1364,6 +1392,11 @@ deduplicated SQL text table keyed by hash, and compressed plans stored once per
 plan handle. Not needed for the MVP, where the in-memory window is enough.
 
 PostgreSQL and MySQL sources.
+
+Microsoft Entra authentication. It needs `github.com/microsoft/go-mssqldb/azuread`,
+which pulls the Azure SDK (`azidentity` and its dependencies), the largest
+dependency this project would take, and section 2.1 asks for a stated reason
+before one comes in.
 
 ## 14. Settled
 
