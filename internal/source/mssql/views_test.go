@@ -53,6 +53,39 @@ func TestSessionsListsThisConnection(t *testing.T) {
 	}
 }
 
+// TestSessionsSurvivesALoginInProgress runs the real query over a row shaped
+// like a connection that is still logging in, because the live one lasts a
+// few milliseconds and a test waiting for it would pass by missing it.
+func TestSessionsSurvivesALoginInProgress(t *testing.T) {
+	db := adminConn(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const from = "FROM sys.dm_exec_sessions AS s"
+	if !strings.Contains(sessionsQuery, from) {
+		t.Fatalf("sessionsQuery no longer reads %q; this test substitutes that clause", from)
+	}
+	q := strings.Replace(sessionsQuery, from, `FROM (SELECT CAST(-1 AS smallint) AS session_id,
+	    N'' AS login_name, N'' AS host_name, N'' AS program_name, N'sleeping' AS status,
+	    1 AS database_id, CAST('19000101' AS datetime) AS login_time,
+	    CAST('19000101' AS datetime) AS last_request_end_time,
+	    0 AS cpu_time, CAST(0 AS bigint) AS logical_reads, CAST(0 AS bigint) AS writes,
+	    0 AS memory_usage, 0 AS open_transaction_count, CAST(1 AS bit) AS is_user_process) AS s`, 1)
+
+	var spid int64
+	var login, host, program, status, database string
+	var connected, sinceReset, idle, cpu, reads, writes, memory, tranSec int64
+	var openTran int
+	err := db.QueryRowContext(ctx, q).Scan(&spid, &login, &host, &program, &status, &database,
+		&connected, &sinceReset, &idle, &cpu, &reads, &writes, &memory, &openTran, &tranSec)
+	if err != nil {
+		t.Fatalf("a session still logging in fails the query: %v", err)
+	}
+	if sinceReset != 0 || idle != 0 {
+		t.Errorf("the 1900 placeholder read as since_reset=%ds idle=%ds; it means no figure", sinceReset, idle)
+	}
+}
+
 // TestTransactionsSeesAnOpenTransactionAndWhatItLocked is the one that
 // matters: an open write transaction on a second connection has to show up
 // with an age, a state, some log, and the object it took a lock on.
