@@ -242,7 +242,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 	// The views of spec section 7: one tab each, and the three that are
 	// not projections of the retention window fetch their own data only
 	// while their tab is open.
-	if want := []string{"requests", "blocking", "sessions", "transactions", "logs"}; !equalStrings(got.Views.Tabs, want) {
+	if want := []string{"requests", "blocking", "sessions", "transactions", "queries", "logs"}; !equalStrings(got.Views.Tabs, want) {
 		t.Errorf("the tab bar shows %v, want %v", got.Views.Tabs, want)
 	}
 	if got.Views.BarGap.Items < 3 || got.Views.BarGap.Min < 8 {
@@ -294,6 +294,30 @@ func TestEndToEndInABrowser(t *testing.T) {
 	if !strings.Contains(got.Views.Transactions.LockText, "Orders") {
 		t.Error("the lock table does not name the locked object, which is the question that view answers")
 	}
+	// The queries view. The fixture gives every one of its 200 rows a
+	// distinct statement and no query hash, so the window folds nothing and
+	// the list is the server's cap of 100 taken off the expensive end.
+	if !got.Views.Queries.Visible || got.Views.Queries.Rows != maxQueryRows {
+		t.Errorf("q left the queries panel visible=%v with %d rows, want %d", got.Views.Queries.Visible, got.Views.Queries.Rows, maxQueryRows)
+	}
+	// A short list that does not say it is short is a lie: the window holds
+	// twice what crossed the wire.
+	if !strings.Contains(got.Views.Queries.Count, "100 of 200 queries") {
+		t.Errorf("the status bar reads %q while showing a capped list; it must say how much it left out", got.Views.Queries.Count)
+	}
+	// 9987 is the highest CPU value the fixture's (i*7919)%10000 produces
+	// over 200 rows. Its presence on the first row is what proves the view
+	// is ordered by cost rather than by whatever the window walked first.
+	if !containsString(got.Views.Queries.FirstRow, "9,987") {
+		t.Errorf("the first queries row is %v; the most expensive statement comes first", got.Views.Queries.FirstRow)
+	}
+	if got.Views.Queries.RowLines != 1 {
+		t.Errorf("the first queries row's cells sit on %d different lines; they belong on one", got.Views.Queries.RowLines)
+	}
+	if len(got.Views.Queries.Headings) == 0 || got.Views.Queries.Headings[0] != "last seen" {
+		t.Errorf("the queries table's headings are %v", got.Views.Queries.Headings)
+	}
+
 	if !got.Views.Logs.Visible || got.Views.Logs.Rows != 2 {
 		t.Errorf("l left the log panel visible=%v with %d rows", got.Views.Logs.Visible, got.Views.Logs.Rows)
 	}
@@ -312,7 +336,7 @@ func TestEndToEndInABrowser(t *testing.T) {
 	// was blind to: cells dropping out of their rows, a window's surplus
 	// shared out equally, and hidden not hiding. All three are visible in
 	// these four numbers and in none of the others this test collects.
-	for _, view := range []string{"requests", "blocking", "sessions", "transactions", "logs"} {
+	for _, view := range []string{"requests", "blocking", "sessions", "transactions", "queries", "logs"} {
 		tables := got.Views.Geometry[view]
 		if len(tables) == 0 {
 			t.Errorf("the %s view drew no table to measure", view)
@@ -821,6 +845,14 @@ type e2eResult struct {
 			Rows    int    `json:"rows"`
 			Text    string `json:"text"`
 		} `json:"logs"`
+		Queries struct {
+			Visible  bool     `json:"visible"`
+			Headings []string `json:"headings"`
+			Rows     int      `json:"rows"`
+			FirstRow []string `json:"firstRow"`
+			RowLines int      `json:"rowLines"`
+			Count    string   `json:"count"`
+		} `json:"queries"`
 		PanelFollows struct {
 			Which  string   `json:"which"`
 			Fields []string `json:"fields"`

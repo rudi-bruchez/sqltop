@@ -282,6 +282,21 @@ const CELL_CAPTURE = {
   text: { text: (r) => r.text || "" },
 };
 
+const CELL_QUERIES = {
+  last_seen: { num: true, text: (r) => fDur(r.last_seen) + " ago" },
+  runs: { num: true, text: (r) => n0(r.runs) },
+  samples: { num: true, text: (r) => n0(r.samples) },
+  sessions: { num: true, text: (r) => n0(r.sessions) },
+  total_cpu: { num: true, text: (r) => n0(r.total_cpu) },
+  avg_elapsed: { num: true, text: (r) => n0(r.avg_elapsed) },
+  max_elapsed: { num: true, text: (r) => n0(r.max_elapsed) },
+  database: { text: (r) => r.database },
+  command: { text: (r) => r.command },
+  top_wait: { text: (r) => r.top_wait },
+  query_hash: { text: (r) => r.query_hash },
+  sql_text: { text: (r) => r.sql_text },
+};
+
 const CELL_LOGS = {
   database: { text: (r) => r.database },
   size_mb: { num: true, text: (r) => n2(r.size_mb) },
@@ -305,6 +320,7 @@ const CELLS = {
   history: CELL_HISTORY,
   sessionwaits: CELL_SESSIONWAITS,
   capture: CELL_CAPTURE,
+  queries: CELL_QUERIES,
 };
 
 // The columns actually drawn in the grid, in order. Built by applyColumns
@@ -782,7 +798,13 @@ function setView(id) {
   markTabs();
   document.querySelector(".gridScroll").hidden = !isGrid(id);
   $("detail").hidden = !isGrid(id) || detailMode === null;
-  for (const v of ["sessions", "transactions", "logs"]) $("panel-" + v).hidden = v !== id;
+  // Every list view, read from what the server sent rather than listed here:
+  // a hard-coded list leaves a new view populated and hidden, which looks
+  // exactly like a view that fetched nothing.
+  for (const v of viewKeys.values()) {
+    const p = $("panel-" + v);
+    if (p) p.hidden = v !== id;
+  }
   buildColumnPanel();
   applyColumns();
   if (!isGrid(id)) pollView(true);
@@ -810,7 +832,11 @@ function blockingRows(rows) {
 // the grid's one second would spend most of the tool's allowance on one tab;
 // at five seconds it is about a sixth of it, which is what an operator
 // watching a lock list is asking for.
-const POLL_FLOOR = { sessions: 2000, transactions: 5000, logs: 5000 };
+// queries sends nothing to the monitored server, so its floor is not about
+// the observation budget: the aggregation walks every tick in the window
+// under the read lock, which blocks the collector from appending the next
+// one. Five seconds keeps that out of the way of a one second grid.
+const POLL_FLOOR = { sessions: 2000, transactions: 5000, logs: 5000, queries: 5000 };
 
 // pollView asks for the active list view and schedules the next ask, at
 // whichever is slower, the sampling period or that view's own floor.
@@ -856,7 +882,11 @@ function renderList(view, payload) {
   lastList[view] = payload;
   // The read time is the only sign a list refreshed: log sizes and an empty
   // transaction list look the same from one read to the next.
-  $("rowCount").textContent = n0((payload.rows || []).length) + " " + view + ", read at " +
+  // total arrives only from a view that sends a top rather than everything it
+  // has, and saying so is the difference between a short list and a lie.
+  const shown = (payload.rows || []).length;
+  const count = payload.total > shown ? n0(shown) + " of " + n0(payload.total) : n0(shown);
+  $("rowCount").textContent = count + " " + view + ", read at " +
     payload.readAt.toLocaleTimeString("en-GB");
   const panel = $("panel-" + view);
   panel.textContent = "";

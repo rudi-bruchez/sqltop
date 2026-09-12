@@ -151,6 +151,56 @@ type StatementSeen struct {
 	TopWaitSamples int
 }
 
+// QuerySeen is one statement shape seen anywhere on the server over the
+// retention window, the row of the queries view. Where StatementSeen answers
+// what one session has been doing, this answers what the server has been
+// doing, which is where the query that is individually quick and collectively
+// ruinous becomes visible.
+//
+// Statements are grouped by the engine's QueryHash, which is computed over
+// the parameterised shape, so the same query under a thousand literals folds
+// into one row. That is the whole point here and the opposite of what the
+// request grid wants, where a literal change must never be hidden. The
+// database is in the key as well: one shape run against two databases is two
+// answers, and folding them would put one database name on a row that
+// aggregated both.
+type QuerySeen struct {
+	QueryHash string
+	Database  string
+	Command   string
+	// SQLText is the most recent text seen for the shape. One sample, not a
+	// canonical form: with literals folded there is no such thing.
+	SQLText string
+
+	FirstAt time.Time
+	LastAt  time.Time
+
+	// Runs is how many times the shape was seen to start. Two sightings on one
+	// session are the same run when they are one tick apart and the request
+	// had already been running for at least that long; consecutive ticks
+	// alone are not enough, since under a stretched period most statements
+	// are caught once per execution and two neighbouring sightings are then
+	// two executions. Not executions: a query that begins and ends between
+	// two ticks is never seen at all, and one seen in forty ticks ran once.
+	// It is the closest thing to a count of executions that sampling can
+	// honestly produce.
+	Runs int
+	// Samples is how many ticks contributed, across every run and session.
+	Samples  int
+	Sessions int
+
+	// The engine's request counters are cumulative for the life of a request,
+	// so a run contributes its own maximum rather than the sum of its
+	// samples. TotalCPUMs is then the sum over runs, which is the figure that
+	// sorts this view.
+	TotalCPUMs   int64
+	AvgElapsedMs int64
+	MaxElapsedMs int64
+
+	TopWait        string
+	TopWaitSamples int
+}
+
 // SessionWait is one wait type accumulated by one session, from
 // sys.dm_exec_session_wait_stats. The engine resets these when a pooled
 // connection is handed out again, so they cover the current use of the

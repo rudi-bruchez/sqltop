@@ -274,6 +274,48 @@ func (s *Server) history(rw http.ResponseWriter, req *http.Request) {
 	writeJSON(rw, map[string]any{"rows": out, "connected": connected, "since_reset": sinceReset})
 }
 
+// queryRow is one statement shape the server has been seen running.
+type queryRow struct {
+	LastSeen   int64  `json:"last_seen"`
+	Runs       int    `json:"runs"`
+	Samples    int    `json:"samples"`
+	Sessions   int    `json:"sessions"`
+	TotalCPU   int64  `json:"total_cpu"`
+	AvgElapsed int64  `json:"avg_elapsed"`
+	MaxElapsed int64  `json:"max_elapsed"`
+	Database   string `json:"database"`
+	Command    string `json:"command"`
+	TopWait    string `json:"top_wait"`
+	QueryHash  string `json:"query_hash"`
+	SQLText    string `json:"sql_text"`
+}
+
+// maxQueryRows is how much of the window's aggregate crosses the wire. The
+// list view draws one row per entry with no virtualisation, and a busy server
+// can hold several thousand distinct shapes in fifteen minutes. A hundred is
+// what a person reads before they reach for a filter instead, and the full
+// count travels with it so the page can say the list is a top.
+const maxQueryRows = 100
+
+// queries is what the whole server has been seen running, folded by statement
+// shape. Like history it sends no query to the monitored server: every sample
+// it reads was collected for the grid.
+func (s *Server) queries(rw http.ResponseWriter, req *http.Request) {
+	now := time.Now()
+	seen, total := s.win.Statements(maxQueryRows)
+	out := make([]queryRow, 0, len(seen))
+	for _, q := range seen {
+		out = append(out, queryRow{
+			LastSeen: int64(now.Sub(q.LastAt).Seconds()),
+			Runs:     q.Runs, Samples: q.Samples, Sessions: q.Sessions,
+			TotalCPU: q.TotalCPUMs, AvgElapsed: q.AvgElapsedMs, MaxElapsed: q.MaxElapsedMs,
+			Database: q.Database, Command: q.Command, TopWait: q.TopWait,
+			QueryHash: q.QueryHash, SQLText: q.SQLText,
+		})
+	}
+	writeJSON(rw, map[string]any{"rows": out, "total": total})
+}
+
 // waitRow is one wait type a session has accumulated.
 type waitRow struct {
 	WaitType  string  `json:"wait_type"`

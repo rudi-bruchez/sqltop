@@ -219,6 +219,32 @@ var ViewCatalogue = []ViewDef{
 		{"text", "statement", 400, true},
 	}},
 
+	// What the server has been running, folded by statement shape, the
+	// expensive first. The counterpart of the history panel next door: that
+	// one answers what a session did, this one what the server did, which is
+	// where a query that is individually quick and collectively ruinous
+	// becomes visible.
+	{ID: "queries", Title: "queries", Key: "q", Columns: []Column{
+		{"last_seen", "last seen", 90, true},
+		// Runs, not executions. A shape seen in forty ticks ran once, not
+		// forty times, and one that begins and ends between two ticks was
+		// never seen at all. samples is what runs was counted from, which is
+		// why it is here at all, and off: it is the working, not the answer.
+		{"runs", "runs", 60, true},
+		{"samples", "samples", 76, false},
+		{"sessions", "sessions", 76, true},
+		{"total_cpu", "total cpu ms", 100, true},
+		{"avg_elapsed", "avg elapsed", 100, true},
+		{"max_elapsed", "max elapsed", 100, true},
+		{"database", "database", 100, true},
+		{"command", "command", 90, false},
+		{"top_wait", "waited on", 130, true},
+		// The join key of spec section 8.1, off by default: it is how two
+		// views are tied together, not something to read.
+		{"query_hash", "query hash", 120, false},
+		{"sql_text", "SQL text", 520, true},
+	}},
+
 	{ID: "logs", Title: "transaction logs", Key: "l", Columns: []Column{
 		{"database", "database", 150, true},
 		{"size_mb", "size MB", 80, true},

@@ -419,6 +419,27 @@ out.views.panelFollows = await json(`(() => {
   return { which: before, fields: [...document.querySelectorAll("#colList input")].map((i) => i.dataset.f) };
 })()`);
 
+// The queries view reads the retention window rather than the server, so what
+// it shows depends on the fixture having been sampled for a few ticks by the
+// time the tab opens. rowCount is read too: it is the only place the page says
+// the list is a top rather than everything the window holds.
+await ev(key("q"));
+await sleep(700);
+out.views.geometry.queries = await json(geomOf("#panel-queries"));
+out.views.queries = await json(`(() => {
+  const p = document.getElementById("panel-queries");
+  const first = p.querySelectorAll("tbody tr")[0];
+  return {
+    visible: !p.hidden,
+    headings: [...p.querySelectorAll("th")].map((th) => th.textContent),
+    rows: p.querySelectorAll("tbody tr").length,
+    firstRow: [...(first || { cells: [] }).cells].map((td) => td.textContent),
+    rowLines: new Set([...(first || { cells: [] }).cells]
+      .map((td) => Math.round(td.getBoundingClientRect().top))).size,
+    count: document.getElementById("rowCount").textContent,
+  };
+})()`);
+
 await ev(key("r"));
 await sleep(400);
 out.views.backToGrid = await ev(`!document.querySelector(".gridScroll").hidden && view.length === data.length`);

@@ -107,6 +107,152 @@ func (w *Window) Depth() (oldest time.Time, samples int, capped bool) {
 	return w.ticks[0].at, w.samples, w.capped
 }
 
+// Statements is what the whole server has been seen running over the window,
+// grouped by statement shape. Spec section 7's queries view. Like
+// SessionStatements it costs the monitored server nothing, and unlike it this
+// walk runs on a poll rather than on a keypress, which is why the browser
+// holds it to a floor well above the grid's period: the read lock is held for
+// the whole walk and blocks Append.
+//
+// max caps what comes back, ordered by total CPU. The list view draws one row
+// per entry with no virtualisation, and a busy server can hold thousands of
+// distinct shapes in fifteen minutes; the caller is told the full count so it
+// can say that the list is a top and not the whole story.
+func (w *Window) Statements(max int) (out []model.QuerySeen, total int) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	type run struct {
+		// tick is the index of the last tick this run was seen in. A gap of
+		// more than one means the previous run ended and this is a new one.
+		tick       int
+		cpu        int64
+		elapsed    int64
+		elapsedSum int64 // closed runs only, for the average
+	}
+	type acc struct {
+		q        model.QuerySeen
+		waits    map[string]int
+		sessions map[int64]bool
+		// runs is keyed by session: two sessions running the same shape at
+		// the same instant are two runs, and neither interrupts the other.
+		runs map[int64]*run
+	}
+	byKey := map[string]*acc{}
+	var order []string
+
+	// endRun folds a finished run into its group. A run's contribution is its
+	// maximum, never the sum of its samples: the engine's request counters
+	// are cumulative, so every sample already contains the ones before it.
+	endRun := func(a *acc, r *run) {
+		a.q.Runs++
+		a.q.TotalCPUMs += r.cpu
+		r.elapsedSum += r.elapsed
+		if r.elapsed > a.q.MaxElapsedMs {
+			a.q.MaxElapsedMs = r.elapsed
+		}
+	}
+
+	for i, t := range w.ticks {
+		// How long ago the previous tick was. A request already alive then has
+		// been running at least this long, which is what tells a run that
+		// continues from a second execution of the same shape on the same
+		// session. Consecutive ticks alone are not enough: under the budget
+		// governor the period stretches to seconds, and most statements are
+		// caught once per execution.
+		var gapMs int64
+		if i > 0 {
+			gapMs = t.at.Sub(w.ticks[i-1].at).Milliseconds()
+		}
+
+		for _, r := range t.rows {
+			// The hash folds literals together, which is what this view is
+			// for. It is empty for some statements, and the text has to stand
+			// in there or every one of them folds into a single meaningless
+			// row.
+			shape := r.QueryHash
+			if shape == "" {
+				shape = "\x01" + r.SQLText
+			}
+			key := r.Database + "\x00" + shape
+			a := byKey[key]
+			if a == nil {
+				a = &acc{
+					q:        model.QuerySeen{QueryHash: r.QueryHash, Database: r.Database, Command: r.Command, FirstAt: t.at},
+					waits:    map[string]int{},
+					sessions: map[int64]bool{},
+					runs:     map[int64]*run{},
+				}
+				byKey[key] = a
+				order = append(order, key)
+			}
+
+			spid := r.Ref.SessionID
+			cur := a.runs[spid]
+			if cur == nil {
+				cur = &run{tick: i}
+				a.runs[spid] = cur
+			} else if cur.tick != i && !(cur.tick == i-1 && r.ElapsedMs >= gapMs) {
+				endRun(a, cur)
+				*cur = run{tick: i, elapsedSum: cur.elapsedSum}
+			}
+			cur.tick = i
+			if r.CPUMs > cur.cpu {
+				cur.cpu = r.CPUMs
+			}
+			if r.ElapsedMs > cur.elapsed {
+				cur.elapsed = r.ElapsedMs
+			}
+
+			a.q.LastAt = t.at
+			a.q.Samples++
+			a.q.SQLText = r.SQLText
+			a.sessions[spid] = true
+			if r.WaitType != "" {
+				a.waits[r.WaitType]++
+			}
+		}
+	}
+
+	out = make([]model.QuerySeen, 0, len(order))
+	for _, key := range order {
+		a := byKey[key]
+		for _, r := range a.runs {
+			endRun(a, r) // every run still open when the window ended
+		}
+		var elapsed int64
+		for _, r := range a.runs {
+			elapsed += r.elapsedSum
+		}
+		if a.q.Runs > 0 {
+			a.q.AvgElapsedMs = elapsed / int64(a.q.Runs)
+		}
+		a.q.Sessions = len(a.sessions)
+		for wt, n := range a.waits {
+			// Ties break on the name so the answer does not move between two
+			// calls over the same data.
+			if n > a.q.TopWaitSamples || (n == a.q.TopWaitSamples && wt < a.q.TopWait) {
+				a.q.TopWait, a.q.TopWaitSamples = wt, n
+			}
+		}
+		out = append(out, a.q)
+	}
+
+	// The expensive first, which is the question this view answers. Ties break
+	// on the most recently seen so the order is stable between two calls.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].TotalCPUMs != out[j].TotalCPUMs {
+			return out[i].TotalCPUMs > out[j].TotalCPUMs
+		}
+		return out[i].LastAt.After(out[j].LastAt)
+	})
+	total = len(out)
+	if max > 0 && len(out) > max {
+		out = out[:max]
+	}
+	return out, total
+}
+
 // SessionStatements is what one session has been seen doing over the whole
 // window, grouped by statement. It costs the monitored server nothing: every
 // sample it reads is already here, which is the point of keeping a window at

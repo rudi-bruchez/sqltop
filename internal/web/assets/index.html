@@ -70,13 +70,15 @@
   <div id="detailList" class="detailList" hidden></div>
 </section>
 
-<!-- The three views that are not projections of the retention window. Each
-     is filled on demand while its tab is open and left alone otherwise, so
-     the queries behind them, one of which walks the whole lock manager, run
-     only while somebody is reading the answer. -->
+<!-- The views that are not projections of the current tick. Each is filled on
+     demand while its tab is open and left alone otherwise, so the queries
+     behind them, one of which walks the whole lock manager, run only while
+     somebody is reading the answer. The last sends nothing to the monitored
+     server at all: it aggregates the retention window already in hand. -->
 <div class="listScroll" id="panel-sessions" hidden></div>
 <div class="listScroll" id="panel-transactions" hidden></div>
 <div class="listScroll" id="panel-logs" hidden></div>
+<div class="listScroll" id="panel-queries" hidden></div>
 
 <footer id="statusBar">
   <span id="rowCount">0 requests</span>
