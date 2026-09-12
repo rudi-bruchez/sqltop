@@ -14,7 +14,8 @@ rolling history so a query can still be read after it has finished.
   transactions with what they hold, and transaction logs.
 - Per selected row: the statement, its plan as it runs, the plan written to a
   file, and what that session has been running and waiting on.
-- Statement capture for a single session, while the tool is running.
+- Statement capture with Extended Event on the selected session can be quickly started 
+  and stopped, using one key.
 - SQL Server 2012 to 2025 and Azure SQL, with the degraded paths written down.
 - Runs in your browser, with very fast HTML generation using Go, and minimal Javascript. 
 
