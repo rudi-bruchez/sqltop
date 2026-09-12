@@ -45,14 +45,14 @@ English everywhere. Code, comments, UI, docs.
 
 ### 2.1 Implementation principles
 
-KISS, idiomatic Go, and an explicit watch on technical debt. Stated as rules
-that can actually be checked, because a principle nobody can fail is decoration.
+KISS, idiomatic Go, and an explicit watch on technical debt. The rules below
+are written so that they can be failed.
 
 Standard library first. A dependency needs a stated reason, in the commit that
 introduces it. The whole budget for the MVP is the SQL Server driver and its
 krb5 provider; `modernc.org/sqlite` joins it only when local persistence
-arrives. Tabulator was measured and rejected rather than kept out of taste, and
-Go dependencies face the same bar.
+arrives. Tabulator was measured and rejected, and Go dependencies face the same
+bar.
 
 No abstraction before the second implementation. The `Source` interface earns
 its place because Azure SQL Database is a real second implementation inside the
@@ -69,15 +69,13 @@ the interface shows and says so in the status bar; it does not panic, and it
 does not silently display stale numbers as if they were fresh.
 
 Options must earn themselves. Every entry in the configuration file exists
-because someone would realistically change it. A knob added "in case" is debt
-with a nice name.
+because someone would realistically change it; a knob added in case is debt.
 
-Debt is written down, not absorbed. A shortcut is recorded where it lives, with
-the reason and what it would take to undo. An undocumented shortcut is the only kind that is unacceptable.
+Debt is written down where it lives, with the reason and the way out. An
+undocumented shortcut is the one kind that is unacceptable.
 
-Measure before optimising. There is precedent: the renderer decision cost two
-days of benchmarking and overturned two of my own predictions. Guessing at
-performance in this codebase has a poor track record.
+Measure before optimising. The renderer decision cost two days of benchmarking
+and overturned two of my own predictions.
 
 `gofmt` clean and `go vet` clean before any commit.
 
@@ -86,16 +84,14 @@ arithmetic and shaping: counter delta and ratio computation, blocking-chain
 flattening, retention-window eviction, capability gating, configuration
 resolution order. Testing that a SQL string equals a SQL string proves nothing.
 
-The specific debt risk of this project, worth naming because it is not obvious:
-the hand-rolled renderer growing into a half-finished grid library. It was
-chosen for being ten times cheaper than Tabulator on the refresh loop, not for
-being a framework. Sorting, column resizing and filters are wanted and are
-specified. Virtual columns, plugin systems, a theming engine and a generic
-formatter API are not; each would trade away the reason the thing was chosen.
-If it ever needs those, the honest move is to revisit the measurement, not to
-grow a library by accident. Operative rule: any grid feature beyond sorting,
-filtering and column resizing must be justified by a measurement showing it
-keeps the refresh budget of section 10.
+The debt risk of this project is the hand-rolled renderer growing into a
+half-finished grid library. It was chosen for being ten times cheaper than
+Tabulator on the refresh loop. Sorting, column resizing and filters are
+specified; virtual columns, plugins, theming and a formatter API are not, and
+each would trade away the reason the renderer was chosen. Wanting them is a
+reason to revisit the measurement. Operative rule: any grid feature beyond
+sorting, filtering and column resizing must be justified by a measurement
+showing it keeps the refresh budget of section 10.
 
 ## 3. Target and requirements
 
@@ -128,7 +124,7 @@ reports the gap; it does not infer rights from the version alone.
 
 ### 3.2 Azure SQL Database is scoped to one database
 
-This is the deepest difference and it shapes the UI, not just the queries. A
+The deepest difference, and it shapes the UI as much as the queries. A
 connection to Azure SQL Database is bound to a single database; there is no
 `USE`, and no instance-wide view. Consequences:
 
@@ -138,11 +134,10 @@ connection to Azure SQL Database is bound to a single database; there is no
   sources. CPU in particular comes from `sys.dm_db_resource_stats`, at fifteen
   second granularity, not from the scheduler ring buffer.
 
-The tool states plainly, in the header, that it is looking at one database
-rather than an instance. Exactly which dashboard figures survive on Azure SQL
-Database is to be confirmed against a live instance during implementation; the
-capability mechanism in section 4.1 exists so that this can be settled per
-figure without touching the UI.
+The header says it is looking at one database, not an instance. Which dashboard
+figures survive there is still to be confirmed against a live instance; the
+capability mechanism of section 4.1 exists so that each figure can be settled
+without touching the UI.
 
 ### 3.3 Windows authentication from Linux
 
@@ -198,11 +193,10 @@ grid is a hand-rolled virtualised renderer; Tabulator was measured and rejected
 
 ### 4.1 The source layer
 
-Yes, there is a pluggable layer, and it is the part that decides whether this
-tool ever reaches PostgreSQL. The design point is that being agnostic does not
-mean pretending every engine is the same. It means the core model is neutral and
-that each source declares what it can do, so the UI adapts instead of the model
-lying.
+This is the layer that decides whether the tool ever reaches PostgreSQL. Being
+agnostic does not mean pretending every engine is the same: the core model is
+neutral, and each source declares what it can do, so the UI adapts instead of
+the model lying.
 
 ```go
 // Source is one connection to one instance. Everything above this line is
@@ -242,8 +236,8 @@ dashboard tiles and not others within the same family, so one unavailable tile
 must be able to disappear without taking its neighbours with it.
 
 A source is a Go package implementing that interface. Adding MySQL means adding
-a package and registering it; it means touching nothing in the core, the state
-window, or the UI.
+a package and registering it, and touching nothing in the core, the state
+window or the UI.
 
 Two rules keep the abstraction honest, learnt from the research notes:
 
@@ -328,7 +322,7 @@ panel. The collapsed or expanded state is part of the saved layout.
 
 ## 6. Server dashboard
 
-Always visible, refreshed continuously. This is the pulse of the instance.
+Always visible, refreshed continuously.
 
 Three mechanical points govern the whole section.
 
@@ -372,26 +366,24 @@ they are detected from the marker database each installs, `rdsadmin` and
 for a database that is absent and for one the login may not see, so the
 absence of a marker is never evidence of anything.
 
-Everything left over reads "on-premises or VM", and the "or VM" is not
-hedging for its own sake. Nothing available to this tool distinguishes a
-server in a cupboard from a virtual machine in somebody's cloud running an
-ordinary SQL Server, and a label that said "on-premises" would be exactly
-the plausible unfounded answer the rest of this section exists to prevent.
+Everything left over reads "on-premises or VM". Nothing available to this tool
+distinguishes a server in a cupboard from a virtual machine in somebody's cloud
+running an ordinary SQL Server, and a label saying "on-premises" would be the
+plausible unfounded answer this section exists to prevent.
 
-On the buffer cache hit ratio. It was asked for explicitly, so it is in. But
-Microsoft's own documentation states that the ratio covers the last few thousand
+On the buffer cache hit ratio. It was asked for explicitly, so it is in, but
+Microsoft's documentation states that the ratio covers the last few thousand
 page accesses and that "after a long period of time, the ratio moves very
-little". Read raw, it sits at 99-point-something on every server and tells you
-nothing. The tool therefore displays the windowed value, the delta of the
-counter against the delta of its base between two samples, which is what
-Microsoft describes as the way to get a reading for the last second. Page life
-expectancy is displayed next to it and is the figure to trust.
+little": read raw, it sits at 99-point-something on every server. The tool
+displays the windowed value, the delta of the counter against the delta of its
+base between two samples, which is Microsoft's own way of getting a reading for
+the last second. Page life expectancy sits next to it and is the figure to
+trust.
 
-The tiles carry numbers and nothing else. They carried a sparkline for two
-releases, and it was cut: a hundred pixels of line over a rolling window is
-too little to read a slope from and too much to ignore, and the honest way
-to show a figure moving is a chart in a view of its own with an axis on it.
-That is not built. Until it is, the number is the number.
+The tiles carry numbers and nothing else. A sparkline shipped for two releases
+and was cut: a hundred pixels of line over a rolling window is too little to
+read a slope from and too much to ignore. Showing a figure moving needs a chart
+with an axis, in a view of its own, and that is not built.
 
 ## 7. Views
 
@@ -410,9 +402,8 @@ PowerShell prototype. Shortcuts are shown in the tab labels.
 | Transactions | `x` | Every open user transaction with its age, state, type and log written, and underneath it what each holding session has locked | `sys.dm_tran_active_transactions`, `sys.dm_tran_database_transactions`, `sys.dm_tran_locks` |
 | Transaction logs | `l` | Every database's log: size, active portion, percent used, recovery model, and what is stopping the log being reused | `sys.dm_os_performance_counters`, `sys.databases` |
 
-The waits sub-mode toggle was `c` until the statement capture took that key.
-The capture ships and the waits view does not, and a mnemonic is worth more
-on a key somebody presses than on one nobody can yet.
+The waits sub-mode toggle was `c` until the statement capture took that key:
+the capture ships and the waits view does not.
 
 `u` for users and `x` for xact, which is the engine's own abbreviation, in
 `XACT_STATE` and in every `sys.dm_tran_` view. `t` is the throughput view
@@ -455,25 +446,22 @@ the used size, which is the active portion, next to `log_reuse_wait_desc`
 from `sys.databases`, which is the answer somebody looking at a full log
 actually wants and which a percentage on its own never gives.
 
-On the transactions view's two derived figures. The database a transaction
-is named with is the one it has written the most log in, and the count of
-databases it spans counts only those it has written log in, `tempdb`
-excluded. Neither is the obvious reading of
-`sys.dm_tran_database_transactions`, and the obvious reading is wrong: that
-view has a row per database a transaction has touched, and nearly every
-transaction touches `tempdb` and the resource database as well as the one
-its work is in, so counting rows says three for a single insert and taking
-the lowest database id names `master`. `docs/PERFORMANCE.md` records both,
-and the second, subtler version of the same mistake that followed the fix.
+On the transactions view's two derived figures. A transaction is named with the
+database it has written the most log in, and it spans the databases it has
+written any log in, `tempdb` excluded. The obvious reading of
+`sys.dm_tran_database_transactions` is wrong: that view has a row per database
+a transaction has touched, and nearly every transaction touches `tempdb` and
+the resource database as well as the one its work is in, so counting rows says
+three for a single insert and taking the lowest database id names `master`.
+`docs/PERFORMANCE.md` records both, and the subtler version of the same mistake
+that followed the fix.
 
 On Azure SQL Database, `OBJECT_NAME` with a database id resolves only inside
 the connected database, so a lock held elsewhere shows no name. That is the
 same "not resolvable cheaply" the column already means everywhere else.
 
-All three need `VIEW SERVER STATE`. A login without it gets the reason
-rather than a list of one session presented as the instance: a plausible
-answer that happens to be a lie is the thing the whole Available convention
-exists to prevent.
+All three need `VIEW SERVER STATE`. A login without it gets the reason, not a
+list of one session presented as the instance.
 
 Every duration in these views is computed on the server, against the
 server's clock. The tool may be on another machine with a clock minutes out,
@@ -484,9 +472,9 @@ last month is exactly what the sessions view is for.
 
 ### 7.1 Commands
 
-Four keys that are not views. They are single presses, like `top`, and they
-are ignored while the focus is in a filter box, or the letters would be
-commands instead of text.
+The keys that are not views. They are single presses, like `top`, and they are
+ignored while the focus is in a filter box, or the letters would be commands
+instead of text.
 
 | Key | Does |
 |---|---|
@@ -508,11 +496,10 @@ without being bound.
 On the arrows. The grid is virtualised, so the row the selection moves to is
 often not in the document: the selection is an index into the filtered view,
 the scroll follows it, and the renderer draws whatever that lands on. The
-scroll only moves when the row would otherwise be off screen, so holding a
-key walks the list rather than dragging the viewport a row at a time, and
-the heading rows count twice in that arithmetic, once because they sit in
-the flow above the body and once because they are sticky and cover what is
-under them. The ends stop rather than wrapping.
+scroll moves only when the row would otherwise be off screen, so holding a key
+walks the list instead of dragging the viewport. The heading rows count twice
+in that arithmetic, once for sitting in the flow above the body and once for
+being sticky and covering what is under them. The ends stop; they do not wrap.
 
 On `e`. It shows what `sys.dm_exec_query_profiles` reports for the selected
 request: one line per operator, what it has produced so far against what the
@@ -555,10 +542,10 @@ rather than the whole batch it came from, and the text form returns
 and twenty-eight levels deep failing outright. Those are exactly the plans
 somebody wants to look at.
 
-On `y`. This is the first thing in the tool that reads the retention window
-back. Section 12 justifies that window by a query which finished thirty
-seconds ago still being inspectable, and until this nothing reached it: the
-stream sent the newest tick and only the newest tick. `y` groups every
+On `y`. The first thing in the tool that reads the retention window back.
+Section 12 justifies that window by a query which finished thirty seconds ago
+still being inspectable, and until this the stream sent the newest tick and
+nothing else. `y` groups every
 sample of the selected session by statement and reports, per statement, when
 it was last seen, how long it was seen for, how many ticks it appeared in,
 its peak elapsed time, CPU and reads, and the wait it was most often seen
@@ -581,10 +568,9 @@ connection handed back to a pool and taken out again is reset by
 `sp_reset_connection`, and that reset moves `login_time` to now while
 `sys.dm_exec_connections.connect_time` stays where it was. It also zeroes
 `cpu_time`, `logical_reads`, `reads`, `writes`, `row_count`, `memory_usage`,
-`total_elapsed_time`, `total_scheduled_time` and `context_info`. All of that
-was measured against a container by diffing every column of the two views
-across a pooled reuse, and it is not something the documentation states in
-one place.
+`total_elapsed_time`, `total_scheduled_time` and `context_info`. That list was
+measured by diffing every column of both views across a pooled reuse; the
+documentation states it nowhere in one piece.
 
 So the sessions view reports both: `connected` from `connect_time`, which is
 the physical connection's age, and `since reset` from `login_time`, which is
@@ -594,22 +580,19 @@ what it scopes. Earlier releases read `login_time` alone and put the second
 number under the first one's name, which on a pooled application is a
 plausible number naming the wrong thing.
 
-Nothing can separate two uses of a pooled connection inside the retained
-samples, because the samples carry no login time. The heading states both
-clocks instead, so a reader can see that a connection open for six hours was
-handed out a moment ago and that the list therefore spans work the current
-operation had nothing to do with.
+The retained samples carry no login time, so nothing can separate two uses of
+a pooled connection inside them. The heading states both clocks instead: a
+connection open for six hours and handed out a moment ago carries work the
+current operation had nothing to do with.
 
 On `n`. It reads `sys.dm_exec_session_wait_stats`, which is SQL Server 2016
 and later plus both Azure engines, so it rides a capability and says why it
 is empty below that rather than failing. The same reset that moves
 `login_time` clears these counters, so they cover the current use of the
 connection, which is the scope somebody reading them wants. That reset is
-lazy: it rides on the next statement sent over the connection rather than on
-the moment it went back to the pool, so a connection idle in a pool still
-carries the waits of whatever it did last. A test written on the other
-assumption reported the documentation as wrong before the ordering was
-understood.
+lazy: it rides on the next statement sent over the connection, not on the
+moment it went back to the pool, so a connection idle in a pool still carries
+the waits of whatever it did last.
 
 On `s`. The grid is virtualised: the document holds about forty rows of
 however many the view has, so saving the document would save the scroll
@@ -617,11 +600,10 @@ position rather than the state. The page therefore writes the table out in
 full and posts one standalone document, styles inlined and no script, which
 the server writes to disk. The name resolves to the second, so two presses
 inside one second would collide; the second gets a numeric suffix rather
-than overwriting a file somebody asked for. Composing it in the browser
-rather than rendering it again in Go is deliberate: what the command saves
-is what is on screen, filters, sort and dashboard included, and a second
-renderer in Go would be a second implementation of the whole interface kept
-in step with the first by hope.
+than overwriting a file somebody asked for. The browser composes it, because
+what the command saves is what is on screen, filters, sort and dashboard
+included; rendering it again in Go would be a second implementation of the
+whole interface, kept in step with the first by hope.
 
 On `t`. It is the first slice of the detail panel of section 9, and it costs
 nothing: the statement is already in the browser, sent once per session in
@@ -653,18 +635,17 @@ The freeze covers every panel at once, and it covers a response that has
 already left. The panels backed by a request, the plan, the history and the
 session waits, each check the freeze where they draw and not only where they
 decide to ask again: a request in flight when the key is pressed resolves
-afterwards, and drawing it repainted a panel the user had just held still.
-That is one redraw after the pause, which is exactly the amount that makes
-the tool look unreliable without ever being reproducible on demand.
+afterwards, and drawing it repaints a panel the user has just held still. One
+redraw after the pause is the amount that makes a tool look unreliable while
+never being reproducible on demand.
 
 On `y`. An open history panel holds the display on its own, without `p`. The
 panel is a list of what a session has run, put on screen to be read, and it
 cannot be read while the grid behind it is replaced under the selection it
-belongs to. Closing the panel lifts that hold. It does not lift a pause taken
-with `p` beforehand: the pause is the user's, the hold is the panel's, and a
-panel must not answer a question the user did not ask. A held display shows
-the same marker as a paused one, since a screen that has stopped moving for
-no visible reason reads as a crash.
+belongs to. Closing the panel lifts that hold, and does not lift a pause taken
+with `p` beforehand: the pause is the user's, the hold is the panel's. A held
+display shows the same marker as a paused one, since a screen that has stopped
+moving for no visible reason reads as a crash.
 
 On `f`. It changes the sampling rate, not the rate at which the browser
 redraws. Sampling is the number the monitored instance pays for, and slowing
@@ -679,26 +660,23 @@ exactly when it mattered.
 
 ## 8. Request grid
 
-Not every row `sys.dm_exec_requests` can produce belongs in it. Measured
-under load, the large majority of what that view returns at any instant is
-the engine's own scheduler bookkeeping: worker threads named TASK MANAGER,
-LOG WRITER, RESOURCE MONITOR, BRKR TASK and the like, present continuously
-and never the reason a DBA opened this tool. Finding out what each row is
-doing in tempdb, one of the columns below, costs more server CPU than the
-rest of the query combined, because it means a separate lookup against
-`sys.dm_db_task_space_usage` for every row fetched; paying that cost for a
-row nobody reads is exactly the kind of self-inflicted load section 2
-rules out. The grid therefore keeps a row only when `sys.dm_exec_sessions`
-marks it as an actual login rather than one of the engine's own worker
-threads, or when it is blocking another session or is itself blocked, or
-when it is running a parallel plan. The first of those covers essentially
-all real work whatever its status or wait, because it asks the server
-directly what kind of session this is rather than reconstructing the
-answer from status text; the other two exist so that a worker thread doing
-something worth seeing, chiefly one on either side of a block, is never
-dropped for want of being a login. There is no setting to see the excluded
-rows: the filter exists to stop the tool paying for what nobody reads, not
-to be turned off.
+Not every row `sys.dm_exec_requests` can produce belongs in it. Measured under
+load, most of what that view returns at any instant is the engine's own
+scheduler bookkeeping: worker threads named TASK MANAGER, LOG WRITER, RESOURCE
+MONITOR, BRKR TASK and the like, present continuously and never the reason a
+DBA opened this tool. They are not free either. The tempdb column below costs
+more server CPU than the rest of the query combined, since it means a lookup
+against `sys.dm_db_task_space_usage` per row fetched.
+
+The grid keeps a row when `sys.dm_exec_sessions` marks it as an actual login,
+when it is blocking another session or is itself blocked, or when it is running
+a parallel plan. The first test covers essentially all real work whatever its
+status or wait, because it asks the server what kind of session this is instead
+of reconstructing the answer from status text. The other two keep a worker
+thread that is worth seeing, chiefly one on either side of a block.
+
+There is no setting to show the excluded rows. The filter exists to stop the
+tool paying for what nobody reads.
 
 ### 8.1 Columns
 
@@ -725,13 +703,12 @@ Filtering is per column, and combinable. Filtering by database and by command
 type is the pair that gets used most, hence their explicit mention.
 
 Sorting and filtering happen in the browser, on data already in the retention
-window. Section 10.1 records the measurement behind that: nine modes, every
-client-side candidate against a server-side twin, and the pairs do not
-separate. Doing the work in Go would also cost the three properties that
-matter here, namely a filter per viewer rather than per server, a filter that
-applies to the history rather than deciding what was ever collected, and rows
-that leave the grid because they ended rather than because they stopped
-matching, which the wire protocol cannot otherwise tell apart.
+window. Section 10.1 records the measurement: nine modes, every client-side
+candidate against a server-side twin, and the pairs do not separate. Doing the
+work in Go would also cost three things. Each viewer would share one filter.
+The filter would decide what was collected instead of what is shown, losing
+the history. And the wire protocol could no longer tell a row that ended from
+a row that stopped matching.
 
 #### Operators
 
@@ -769,15 +746,14 @@ routinely in a database they did not filter for.
 
 #### The scroll position when a filter shrinks the list
 
-Changing a filter re-anchors the view on the selected row, if it survives the
-filter, and goes to the top otherwise. Keeping the selection in view is the
-central gesture of the tool.
+Changing a filter re-anchors the view on the selected row when it survives the
+filter, and goes to the top otherwise.
 
-This is a real problem and not a hypothetical one. Filtering 800 rows down to
-110 while scrolled toward the bottom cost five scroll positions out of 122
-ticks on the bench, against none in the eight other modes, because the
-content became shorter than the offset and the browser clamped it, again on
-every tick as the row count moved.
+The problem is measured, not hypothetical. Filtering 800 rows down to 110 while
+scrolled toward the bottom cost five scroll positions out of 122 ticks on the
+bench, against none in the eight other modes: the content became shorter than
+the offset and the browser clamped it, again on every tick as the row count
+moved.
 
 ### 8.2 Column selection and saved layouts
 
@@ -814,11 +790,10 @@ collection scope in section 8.3, which turns a whole tier off for everybody
 and is worth something precisely because it removes a query rather than a
 tile.
 
-Persistence is the configuration file, not browser local storage. Reasons: it
-survives a change of browser, it can be copied between machines, it can be
-committed to a team repository, and a DBA who has built a good layout can hand
-it to a colleague. The server owns the file and the UI reads and writes it
-through an endpoint.
+Persistence is the configuration file, not browser local storage: a file
+survives a change of browser, copies between machines, goes into a team
+repository, and can be handed to a colleague. The server owns it, and the UI
+reads and writes it through an endpoint.
 
 The gestures. A column moves by dragging its heading, which is what people
 try first. Visibility is a panel of checkboxes reached from the status bar,
@@ -978,23 +953,23 @@ and no tab, because an open transaction and what it has locked are one
 question.
 
 Every refresh tier of section 10 is configurable here, including the live plan
-refresh period, and the collection budget past which the tool throttles itself. Connection secrets are not stored
-in this file: a DSN may reference `${SQLTOP_CONN}` and the value comes from the
-environment, loaded from `.env` at startup.
+refresh period, and the collection budget past which the tool throttles itself.
+Connection secrets are not stored in this file: a DSN may reference
+`${SQLTOP_CONN}`, and the value comes from the environment, loaded from `.env`
+at startup.
 
 ## 9. Query detail and live plan progress
 
-Selecting a row opens the detail panel. Selection must survive the refresh; that
-constraint drove the renderer decision and is measured in the bench.
+Selecting a row opens the detail panel. The selection must survive the refresh,
+a constraint that drove the renderer decision and is measured in the bench.
 
-Both halves of that panel exist, in one space so neither crowds the grid:
-`t` shows the statement and `e` follows the plan, and `d` writes the plan to
-a file. See section 7.1. What is not built is the plan drawn as a tree.
+Both halves of that panel exist, in one space so neither crowds the grid: `t`
+shows the statement, `e` follows the plan, and `d` writes the plan to a file.
+See section 7.1. The panel carries the full SQL text, the session context, the
+sample history for that request and the plan. What is not built is the plan
+drawn as a tree.
 
-The panel shows the full SQL text, the session context, the sample history for
-that request, and the execution plan.
-
-Live progress works like this. `sys.dm_exec_query_statistics_xml(session_id)`
+`sys.dm_exec_query_statistics_xml(session_id)`
 returns the showplan of an in-flight request carrying the actual row counts
 reached so far. Lightweight profiling v3 feeds it and is enabled by default from
 SQL Server 2019 and on Azure SQL Database, so nothing has to be turned on. The
@@ -1053,10 +1028,8 @@ frame. Measured at 4.8 ms in the bench, so there is headroom.
 Collection budget. Under 50 ms of server CPU time per second, all tiers
 combined.
 
-Measured on the server, not by stopwatch. An earlier draft of this spec said
-"measured client-side as the round-trip of the collection queries", which mixed
-two different quantities: a round trip includes network latency, so monitoring a
-distant server across a WAN would throttle the tool while the server was
+Measured on the server, not by stopwatch. A round trip includes network
+latency, so a distant server across a WAN would throttle the tool while being
 perfectly fine, and a saturated local server would slip past unnoticed.
 
 The tool reads its own cost instead. `sys.dm_exec_sessions` carries `cpu_time`
@@ -1068,7 +1041,7 @@ cost should show it.
 
 Every query carries `OPTION (MAXDOP 1)`, which keeps a monitoring query from
 taking parallel workers on the server it is watching. None carries
-`RECOMPILE`, and that is a change from earlier releases. It was measured at
+`RECOMPILE`. It was measured at
 7.6 ms of server CPU per call on the grid query against 0.4 ms without, and
 12.6 ms per second against 1.8 ms across the three tier queries together, all
 of it compilation. What it bought was ten fewer cached plans on a server that
@@ -1084,12 +1057,11 @@ and which build produced the load. An explicit name in the DSN always wins:
 somebody who named their connection did it for a firewall rule or a Resource
 Governor classifier that reads exactly that string.
 
-That name is not what the tool filters itself out of the grid with. The grid
-does that with `@@SPID` inside the query, which is exact, survives a
-reconnection changing the session id, and does not hide a colleague's sqltop
-watching the same instance. Hiding that would be hiding a real session that
-is really costing the server something, which is the opposite of the point;
-anyone who wants it gone has a filter on the program column.
+The grid filters the tool out by `@@SPID` inside the query, not by that name:
+it is exact, it survives a reconnection changing the session id, and it leaves
+a colleague's sqltop on the same instance visible. That colleague is a real
+session costing the server something, and anyone who wants it gone has a filter
+on the program column.
 
 Throttling is ordered, not proportional. When the budget is exceeded over a
 sliding ten second window, tiers degrade from the least valuable upward: first
@@ -1097,11 +1069,11 @@ tier C doubles its period, then tier B, and tier A last, since the request grid
 is the tool. On-demand work is never throttled, because it only happens when a
 human asked for it. Periods recover one step at a time once consumption has been
 under budget for thirty seconds. Every change is announced in the status bar,
-naming which tier slowed and why. The tool does not silently keep hammering, and
-it does not silently go quiet either.
+naming which tier slowed and why: the tool neither keeps hammering in silence
+nor goes quiet in silence.
 
 Refresh tiers. Not everything deserves one hertz. Every period below is a
-default and is configurable in the JSON file, section 8.3.
+default and is configurable in the file of section 8.3.
 
 | Tier | Period | Contents |
 |---|---|---|
@@ -1126,10 +1098,10 @@ server-wide profiling setting. The tool reads; it does not reconfigure.
 
 ### 10.1 The measurements behind these numbers
 
-The rendering budget and the wire protocol are not estimates. Four strategies
-were built against a synthetic load and measured before any of this was
-specified. The harness that produced them is a local one, deliberately not
-tracked in this repository, so its results live here.
+The rendering budget and the wire protocol are measurements. Four strategies
+were built against a synthetic load before any of this was specified. The
+harness is local and deliberately not tracked in this repository, so its
+results live here.
 
 Chrome 151, Linux x86_64, 800 rows, 1 Hz, 5 % churn:
 
@@ -1198,20 +1170,19 @@ connection, on the same terms as the reference table, and the client indexes
 by name through it. The order is checked against the row struct's own field
 tags by reflection, so the two cannot drift.
 
-For comparison, and because it was asked: minifying the page itself, which
-carries the whole interface inline, takes it from 32.0 kB to 18.8 kB. Over
-loopback that is 0.9 ms of transfer and 0.3 ms of JavaScript compilation
-becoming roughly half of each, once, at page load. The stream spends the
-saving in a sixteenth of one tick. The page is left readable.
+Minifying the page itself, which carries the whole interface inline, takes it
+from 32.0 kB to 18.8 kB: over loopback, 0.9 ms of transfer and 0.3 ms of
+JavaScript compilation become roughly half of each, once, at page load. The
+stream spends that saving in a sixteenth of one tick, so the page is left
+readable.
 
 ### Where sorting and filtering belong
 
-The caveat that used to stand here said the 16 ms budget had been measured on
-a grid that only displayed, and had to be re-measured before sorting and
-filtering were built rather than assumed to hold. It has been.
+The 16 ms budget was first measured on a grid that only displayed, so sorting
+and filtering were measured again rather than assumed to fit inside it.
 
-The worry was specific, and it was not about whether JavaScript can sort 800
-rows. The recycled row pool is keyed on session and request id. A sort on a
+The worry was not whether JavaScript can sort 800 rows. The recycled row pool
+is keyed on session and request id. A sort on a
 column that moves every tick gives almost every pooled row a new identity
 every tick, which throws away the "rewrite only the cells that changed"
 optimisation the 4.8 ms figure depends on. If that were where the cost sat,
@@ -1250,40 +1221,33 @@ The pairs do not separate. Every mode sits between 2.6 and 3.6 ms against a
 spread between repeats of the same mode. The direction is the argument, not
 the size: if doing the work in Go helped, the server twin would be
 consistently faster, and it is faster on one of the four pairs and slower on
-the other three, which is what noise looks like. Every client mode is at or
-below the no-sort-no-filter baseline, which is the clearest statement of the
-result available: the work costs less than the measurement can see.
+the other three, which is what noise looks like. Every client mode sits at or
+below the no-sort-no-filter baseline: the work costs less than the measurement
+can see.
 
 The frame time does not move at all. 16.7 ms on every mode is one frame at
 60 Hz: the page is hitting the display's own cadence and dropping nothing,
 with no frozen time and no lost selection anywhere.
 
-The feared cost did not materialise, and the reason is worth writing down so
-nobody re-derives the fear. The renderer only paints the visible window,
+The feared cost did not materialise. The renderer only paints the visible
+window,
 about 33 rows, and under a volatile sort the changed-cells optimisation was
 already barely helping: CPU, reads and elapsed move on every row every tick
 regardless. Reordering raises the changed cells per painted row from roughly
 eight to eighteen, which is a few hundred writes a second, not a few
 thousand.
 
-So sorting and filtering are client-side work on data already in the browser.
-That is also the answer that keeps the properties worth keeping: a filter per
-viewer rather than per server, a filter that applies to the retention window
-rather than deciding what was ever collected, and rows that leave the grid
-because they ended rather than because they stopped matching, which the
-protocol cannot otherwise tell apart.
+So sorting and filtering are client-side work on data already in the browser,
+which also keeps the three properties section 8.1 lists.
 
-The scroll losses are down but not gone, and the residue says what it is.
-Before the re-anchoring rule above existed, filtering cost five lost
-positions out of 122 ticks and every other mode lost none. With it, the
-filtering modes lose one to three, and the server filtering mode, where the
-page does no filtering at all, loses one as well. That residue is therefore
-not the filter: it is a list of 110 rows getting shorter and longer with
-ordinary session churn while the viewport sits near its end, which is what
-any shrinking list does in a browser. The re-anchoring rule covers the case
-it was written for, a filter changing, and this one is left alone
-deliberately rather than fixed by pinning a scroll position that the user
-did not ask to have pinned.
+The scroll losses are down but not gone. Before the re-anchoring rule above
+existed, filtering cost five lost positions out of 122 ticks and every other
+mode lost none. With it, the filtering modes lose one to three, and the server
+filtering mode, where the page does no filtering at all, loses one as well.
+That residue is not the filter: it is a list of 110 rows getting shorter and
+longer with ordinary session churn while the viewport sits near its end, which
+is what any shrinking list does in a browser. Pinning a scroll position the
+user did not ask to have pinned would be a worse answer, so it is left alone.
 
 The same nine modes under Firefox 154, same machine, same 800 rows at 1 Hz,
 same viewport, on a headless profile of its own:
@@ -1306,14 +1270,12 @@ lost. But Firefox comes out faster than Chrome, 1.3 ms against 2.6 to 3.6,
 where the original measurements in this section had it two to three times
 slower.
 
-That is not a finding about Firefox. Those original numbers were taken on a
-machine running its owner's ordinary Firefox with many windows open, and
-these were taken on a pristine headless profile with no extensions and
-nothing else running. The likely variable is the load on the machine, and
-the gap between those two conditions is plausibly larger than any gap
-between the two browsers. Neither figure describes what the tool will meet
-in practice, which is a browser with dozens of tabs and a dozen extensions,
-and nobody has measured that.
+That is not a finding about Firefox. The original numbers came from a machine
+running its owner's ordinary Firefox with many windows open, and these from a
+pristine headless profile. The load on the machine is the likely variable, and
+the gap between those conditions is plausibly larger than any gap between the
+browsers. Neither figure describes a browser with dozens of tabs and a dozen
+extensions, which is what the tool will meet, and nobody has measured that.
 
 Two things had to be fixed before the Firefox numbers meant anything, and
 both are recorded in the bench's own README. Firefox rounds
@@ -1336,11 +1298,11 @@ each time the client and server twins stayed inside each other's noise.
 
 The tool reports its own version, and starts at 0.1.
 
-Scheme. Zero-major while the shape can still change: 0.1 is the collector and a
-working request grid, 0.2 adds the dashboard, the views and the plan panel, and
-1.0 is the first version usable by someone who did not write it. Inside that,
-the middle number moves when a milestone lands and the last one when a fix
-ships. Nothing here promises API stability, because there is no API.
+Scheme. Zero-major while the shape can still change: 0.1 was the collector and
+a working request grid, and 1.0 is the first version usable by someone who did
+not write it. The CHANGELOG is the authority on what each release covers. The
+middle number moves when a milestone lands and the last one when a fix ships.
+Nothing here promises API stability, because there is no API.
 
 Where the number lives. A single constant in `internal/buildinfo`, no build
 flags and no code generation. The commit and the dirty flag come from
@@ -1350,23 +1312,22 @@ tree it came from. Nothing has to be passed at build time for that to work,
 which is the point: a version that depends on the build command is a version
 that is wrong the first time someone builds it differently.
 
-Where the number shows. `--version` prints it and exits. The tool logs it as
-its first line at startup, before anything can fail, because the first question
-about any report is which build produced it and a run that dies on a bad
-configuration file is exactly the report that arrives without one. The
-interface header carries the same string, so a screenshot and a log agree.
+Where the number shows. `sqltop --version` prints it and exits. The tool logs
+it as its first line at startup, before anything can fail, since a run that
+dies on a bad configuration file is exactly the report that would otherwise
+arrive without a build number. The status endpoint carries it, and the
+interface header shows it beside the instance name, so a screenshot and a log
+agree.
 
 Changing it. `scripts/bump-version.sh <version>` rewrites the constant and
 nothing else. It refuses anything that is not major.minor.patch, and it neither
 commits nor tags: whether a milestone actually works is a judgement, not a
 script's to make.
 
-Where it shows. `sqltop --version` prints it and exits. The status endpoint
-carries it, and the interface header shows it beside the instance name, because
-the first question about a bug report is which build produced it.
-
 Releases are tagged `v0.1.0` and so on, matching the constant. The tag is cut
-when the milestone works, not when the constant changes.
+when the milestone works, not when the constant changes. A workflow builds the
+five platform archives from that tag and refuses one that disagrees with the
+constant.
 
 ## 12. Explicitly not in scope
 
@@ -1403,8 +1364,8 @@ before one comes in.
 The questions this draft opened have been answered and folded in above: target
 2019 and later with graceful degradation below, Azure SQL Database in the MVP,
 Windows authentication from Linux, one instance displayed at a time behind a
-switcher, configurable refresh tiers, a JSON configuration file resolved from
-either the binary directory or the user directory, and no headless mode.
+switcher, configurable refresh tiers, a configuration file resolved from either
+the binary directory or the user directory, and no headless mode.
 
 What remains open is empirical rather than a matter of choice: exactly which
 dashboard figures survive on Azure SQL Database has to be confirmed against a
@@ -1427,7 +1388,5 @@ Not covered locally, and needing a real instance: Azure SQL Database, which
 cannot be containerised, and Kerberos authentication against a real domain.
 Those two stay open until someone points the tool at the real thing.
 
-One measurement gap is already known. The rendering bench measured a passive
-grid. The 16 ms budget has not been verified with sorting and filtering active,
-which change the per-refresh work. The bench exists and should be re-run once
-the grid has those functions rather than assuming the margin holds.
+The rendering gap that used to stand here is closed: section 10.1 carries the
+nine modes measured with sorting and filtering active, in two browsers.
