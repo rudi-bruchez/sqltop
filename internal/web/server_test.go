@@ -128,7 +128,7 @@ func TestStatusEndpointCarriesTheObservationCost(t *testing.T) {
 // opening the printed URL in a browser rather than curling it with an
 // explicit ?t=: a relative URL, <link href="style.css"> or <script
 // src="app.js">, does not inherit the page's own query string, so the
-// browser requested both with no token, authenticate refused both with
+// browser requested both with no token, requireToken refused both with
 // 401, and the page that loaded was a bare unstyled heading with no grid
 // and no stream. Every check this package ran before this fix round went
 // through curl with the token spelled out on every request, which is
@@ -238,7 +238,7 @@ func TestListenerRefusesAnyOtherAddress(t *testing.T) {
 // TestWrongTokenDoesNotRevealCloseness proves the refusal itself carries no
 // signal about how close a guess was: a token wrong in its last hex digit
 // gets the exact same status, body and headers as a token wrong in every
-// digit. Constant-time comparison in authenticate is what makes this true;
+// digit. Constant-time comparison in requireToken is what makes this true;
 // this test is what keeps it true if that ever regresses to a
 // short-circuiting compare.
 func TestWrongTokenDoesNotRevealCloseness(t *testing.T) {
@@ -277,7 +277,7 @@ func flipHexDigit(d byte) string {
 // TestConcurrentClientsGetCorrectAnswers drives many goroutines at the same
 // handler at once, half with the run's token and half without, and checks
 // each gets the answer its own request deserves. Run with -race, this is
-// what actually exercises the shared state authenticate and status touch
+// what actually exercises the shared state requireToken and status touch
 // (s.token, the collector and the window), rather than trusting that a
 // single sequential test generalises.
 func TestConcurrentClientsGetCorrectAnswers(t *testing.T) {
@@ -459,12 +459,12 @@ func TestGracefulShutdownForceClosesConnectionsPastTheGracePeriod(t *testing.T) 
 }
 
 // TestConstantTimeCompareIsUsedForTheToken guards a claim the comment on
-// authenticate makes: that the token compare is constant time. No
+// requireToken makes: that the token compare is constant time. No
 // behavioural test from outside the package can tell subtle.ConstantTimeCompare
 // apart from Go's built-in != on a real loopback round trip, tens of
 // microseconds of jitter swallow a sub-100-nanosecond timing difference, so
 // TestWrongTokenDoesNotRevealCloseness above would stay green even if
-// authenticate were rewritten to use != directly. This reads the source
+// requireToken were rewritten to use != directly. This reads the source
 // instead. Unusual for a Go test, but it is the only way to make the
 // comment's claim something this suite actually holds rather than merely
 // asserts.
@@ -504,9 +504,9 @@ func TestTokenIsRandomAnd128Bits(t *testing.T) {
 // test, not a proof: the reviewer's PoC for the mistake it guards against
 // added a route on an outer mux that wrapped Handler's own return value, a
 // route this test would not see because it walks routes(), not the mux
-// authenticate wraps. What it does catch is the more likely version of the
+// requireToken wraps. What it does catch is the more likely version of the
 // same mistake: a new path added inside routes() itself, or added to
-// Handler's mux without going through securityHeaders(s.authenticate(...)),
+// Handler's mux without going through securityHeaders(requireToken(...)),
 // since either would still show up here as a 200.
 func TestEveryRouteRequiresTheToken(t *testing.T) {
 	s := newTestServer(t)
@@ -563,5 +563,33 @@ func TestHostHeaderVariantsAreAccepted(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Errorf("Host = %q: status = %d, want 200", host, rec.Code)
 		}
+	}
+}
+
+// TestNewServerOnServesOnTheListenersAddressAndToken is what lets the connect
+// page and the monitor take turns on one socket: the monitor must answer on
+// the listener's address, to the listener's token, and to nothing else.
+func TestNewServerOnServesOnTheListenersAddressAndToken(t *testing.T) {
+	l, err := Listen(config.Server{Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := window.New(time.Minute, 1000)
+	c := collector.New(fake.New(nil), w, collector.NewBudget(50, testTiers()))
+	s := NewServerOn(c, w, l)
+	t.Cleanup(func() { s.Close() })
+
+	if s.URL() != l.URL() {
+		t.Errorf("server URL %q, listener URL %q", s.URL(), l.URL())
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, loopbackRequest(http.MethodGet, "/api/status?t="+l.token))
+	if rec.Code != http.StatusOK {
+		t.Errorf("status with the listener's token = %d, want 200", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, loopbackRequest(http.MethodGet, "/api/status?t=other"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status with another token = %d, want 401", rec.Code)
 	}
 }

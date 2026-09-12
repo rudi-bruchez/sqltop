@@ -128,7 +128,7 @@ because the fixture made them true by accident.
 
 `gofmt` clean and `go vet ./...` clean.
 
-`deno lint internal/web/assets/app.js` clean. Deno rather than eslint: one
+`deno lint internal/web/assets/app.js internal/web/assets/connect.js` clean. Deno rather than eslint: one
 static binary, no `package.json`, no `node_modules` and no configuration
 file, in a repository that otherwise has no JavaScript toolchain. The gate
 also runs from `go test ./internal/web`, which finds the binary on the PATH

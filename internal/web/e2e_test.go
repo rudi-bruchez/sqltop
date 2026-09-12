@@ -19,36 +19,18 @@ import (
 	"github.com/rudi-bruchez/sqltop/internal/window"
 )
 
-// TestEndToEndInABrowser loads the real page in a real browser and drives
-// the things only a browser can answer for.
-//
-// It exists because of an asymmetry this package could not otherwise close:
-// the Go side has a hundred and eighty tests and the JavaScript side had
-// two functions reachable from any of them, while 0.2 was mostly a release
-// of interface. Everything below had been verified once, by hand, by
-// someone driving a browser and reading the answers. This is that, kept.
-//
-// It is also the only kind of check that finds the class of bug that has
-// actually shipped here: a page whose stylesheet 401s because a relative
-// URL does not inherit a query string, and a favicon request nobody wrote
-// that gets refused for want of a token. curl finds neither.
-//
-// Hermetic on purpose: a fake source, no container, no network. It skips
-// when chromium or deno is missing rather than failing, on the same terms
-// as the linter gate, so a machine without them still builds and tests.
-func TestEndToEndInABrowser(t *testing.T) {
+// launchChromium starts a headless chromium for one test and returns deno's
+// path and chromium's DevTools port, or skips when either is missing.
+func launchChromium(t *testing.T) (deno, port string) {
+	t.Helper()
 	chrome := lookChromium()
 	if chrome == "" {
 		t.Skip("no chromium-browser or chromium on PATH; this test drives the real page in a real browser")
 	}
-	deno := findDeno()
+	deno = findDeno()
 	if deno == "" {
 		t.Skip("deno not installed; the DevTools protocol needs a WebSocket and Go's standard library has none")
 	}
-
-	srv, snapDir, stop := browserTestServer(t)
-	defer stop()
-
 	// Not t.TempDir: chromium goes on writing into its profile while it
 	// shuts down, and the framework's cleanup runs into a directory that
 	// is not empty yet and fails the test over nothing. This one is
@@ -68,16 +50,40 @@ func TestEndToEndInABrowser(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Skipf("could not start %s: %v", chrome, err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 		_ = os.RemoveAll(profile)
-	}()
-
-	port, err := devToolsPort(profile, 30*time.Second)
+	})
+	port, err = devToolsPort(profile, 30*time.Second)
 	if err != nil {
 		t.Fatalf("%v; chromium did not report a debugging port", err)
 	}
+	return deno, port
+}
+
+// TestEndToEndInABrowser loads the real page in a real browser and drives
+// the things only a browser can answer for.
+//
+// It exists because of an asymmetry this package could not otherwise close:
+// the Go side has a hundred and eighty tests and the JavaScript side had
+// two functions reachable from any of them, while 0.2 was mostly a release
+// of interface. Everything below had been verified once, by hand, by
+// someone driving a browser and reading the answers. This is that, kept.
+//
+// It is also the only kind of check that finds the class of bug that has
+// actually shipped here: a page whose stylesheet 401s because a relative
+// URL does not inherit a query string, and a favicon request nobody wrote
+// that gets refused for want of a token. curl finds neither.
+//
+// Hermetic on purpose: a fake source, no container, no network. It skips
+// when chromium or deno is missing rather than failing, on the same terms
+// as the linter gate, so a machine without them still builds and tests.
+func TestEndToEndInABrowser(t *testing.T) {
+	deno, port := launchChromium(t)
+
+	srv, snapDir, stop := browserTestServer(t)
+	defer stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()

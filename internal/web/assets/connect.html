@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sqltop: connect</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2314161a'/%3E%3Crect x='3' y='9' width='2' height='4' fill='%236fb3d2'/%3E%3Crect x='7' y='5' width='2' height='8' fill='%238fbf7f'/%3E%3Crect x='11' y='7' width='2' height='6' fill='%23d08770'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>sqltop</h1>
+  <div class="conn"><span>no instance configured</span></div>
+</header>
+
+<main class="connect">
+<form id="connectForm" autocomplete="off">
+  <label>server
+    <input type="text" id="server" required autofocus placeholder="db01, db01\SALES or db01,14330">
+  </label>
+  <fieldset id="methods"><legend>authentication</legend></fieldset>
+  <p id="methodNote" class="note" hidden></p>
+  <label id="loginRow">login <input type="text" id="login" autocomplete="username"></label>
+  <label id="passwordRow">password <input type="password" id="password" autocomplete="current-password"></label>
+  <details>
+    <summary>more</summary>
+    <label>database <input type="text" id="database" placeholder="the login's default"></label>
+    <p class="note">Azure SQL Database needs one.</p>
+    <label>encryption
+      <select id="encrypt">
+        <option value="">driver default</option>
+        <option value="true">required</option>
+        <option value="strict">strict (TDS 8)</option>
+      </select>
+    </label>
+    <label id="trustRow" hidden><input type="checkbox" id="trust"> trust the server certificate</label>
+  </details>
+  <label id="saveRow"><input type="checkbox" id="saveEnv"> save the connection string to <code id="envPath"></code></label>
+  <p id="saveNote" class="note" hidden>The password will be stored in clear text in that file.</p>
+  <p id="saveOff" class="note" hidden>sqltop.yaml names an instance whose connection string does not read SQLTOP_CONN, so saving to .env would change nothing.</p>
+  <button type="submit" id="go">connect</button>
+</form>
+<p id="status" role="status" aria-live="polite"></p>
+<p id="error" class="listError" hidden></p>
+<p id="hint" class="note" hidden></p>
+</main>
+
+<script src="connect.js"></script>
+</body>
+</html>

@@ -111,9 +111,10 @@ func stripLineComment(line string) string {
 	return line
 }
 
-// TestShippedJavaScriptPassesTheLinter runs deno lint over the one
-// JavaScript file this binary serves. It is here rather than only in a
-// checklist because the checklist is a thing to remember and this is not.
+// TestShippedJavaScriptPassesTheLinter runs deno lint over the two
+// JavaScript files this binary serves, the monitor's and the connect
+// page's. It is here rather than only in a checklist because the checklist
+// is a thing to remember and this is not.
 //
 // deno rather than eslint: a single static binary, no package.json, no
 // node_modules and no configuration file, in a repository that otherwise
@@ -142,11 +143,11 @@ func TestShippedJavaScriptPassesTheLinter(t *testing.T) {
 		}
 	}
 	if err != nil {
-		t.Skip("deno not installed; install it to run this gate (https://deno.com), or run deno lint internal/web/assets/app.js by hand")
+		t.Skip("deno not installed; install it to run this gate (https://deno.com), or run deno lint internal/web/assets/app.js internal/web/assets/connect.js by hand")
 	}
-	out, err := exec.Command(deno, "lint", "assets/app.js").CombinedOutput()
+	out, err := exec.Command(deno, "lint", "assets/app.js", "assets/connect.js").CombinedOutput()
 	if err != nil {
-		t.Errorf("deno lint failed on assets/app.js:\n%s", out)
+		t.Errorf("deno lint failed on assets/app.js and assets/connect.js:\n%s", out)
 	}
 }
 
