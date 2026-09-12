@@ -183,6 +183,37 @@ func TestSetKeepsTheModeOfAnExistingFile(t *testing.T) {
 	}
 }
 
+// TestSetNarrowsAWorldReadableFile covers the file the README's own snippet
+// produces: a shell redirection creates it at 0644 under the usual umask, and
+// every account on the host can then read a login that can read the whole
+// instance. The group grant next to it is left alone on purpose.
+func TestSetNarrowsAWorldReadableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	p := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(p, []byte("A=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod, because WriteFile's mode passes through the umask.
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Set(p, "SQLTOP_CONN", "sqlserver://sa:secret@db01"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o007 != 0 {
+		t.Errorf("mode is %v after Set; it holds a password, so the world reads nothing", fi.Mode().Perm())
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Errorf("mode is %v after Set, want 0640: the world dropped, the group kept", fi.Mode().Perm())
+	}
+}
+
 func TestSetWritesThroughASymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink needs a privilege on Windows")

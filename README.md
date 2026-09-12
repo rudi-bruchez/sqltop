@@ -86,12 +86,22 @@ is offered.
 ## Running it
 
 The connection string comes from the environment, never from the configuration
-file: it carries a password.
+file: it carries a password. Narrow the file as soon as it exists. Shell
+redirection creates it readable by every account on the host, and the login it
+holds can read the whole instance.
 
 ```
 echo 'SQLTOP_CONN=sqlserver://user:password@server:1433?database=master' > .env
+chmod 600 .env
 go run ./cmd/sqltop
 ```
+
+On Windows, where there is no `chmod`, the equivalent is to keep the file
+somewhere only your account can read. A `.env` sqltop writes itself, when the
+connect page saves one, is created at 0600; writing to a file that already
+exists takes the world's access away and leaves a group grant alone, so a file
+created by the line above is narrowed the first time the page saves to it. It
+is still worth the `chmod`: nothing narrows a file the tool never writes to.
 
 It prints a line like `sqltop on http://127.0.0.1:8420/?t=...`. Open it as
 printed: the token is new on every run, so a bookmark will not work. From a
@@ -154,6 +164,7 @@ what was resolved, and from which file.
 | Key | Does |
 |---|---|
 | `r` `b` `u` `x` `l` | Requests, blocking, sessions, transactions, transaction logs |
+| `q` | What the whole server has been seen running over the retention window, the expensive first |
 | `↑` `↓` | Move the selection through the grid |
 | `t` | Show the selected row's statement under the grid |
 | `e` | Follow the selected request through its plan as it runs |
@@ -165,6 +176,14 @@ what was resolved, and from which file.
 | `p` | Pause and resume the display, holding every panel as it stands |
 | `f` | Step the sampling period through 1, 2, 5, 10 and 30 seconds |
 | `h` | The same list, on screen |
+
+The three keys that write a file write it beside the binary, and what they write
+is production data: a snapshot is the visible grid with the SQL text of every
+row, literals included, next to the logins, hosts and programs that ran it, a
+saved plan carries the statement and its parameters, and a trace carries every
+statement one session ran. Those directories and their files are created for
+your account alone, but nothing removes them, so on a shared host they
+accumulate until you clear them.
 
 ## Versions
 

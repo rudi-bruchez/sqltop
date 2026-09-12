@@ -26,8 +26,16 @@ func Beside(name string) (string, error) {
 // writes over time. The names have one second of resolution, so two within
 // the same second would otherwise land on each other; the numeric suffix is
 // not a feature, it is the alternative to losing a file somebody asked for.
+//
+// Owner only, directory included. Everything written through here carries the
+// SQL text of production statements with their literals: a snapshot is the
+// visible grid, a saved plan is a statement and its parameters, a trace is
+// every statement one session ran. On the shared administration host this
+// package's own comment describes, the default mode would hand all of that to
+// every account on the machine, and nothing here is meant to be read by
+// anybody but the operator who asked for it.
 func Create(dir, base, ext string) (*os.File, string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, "", err
 	}
 	for n := 1; n <= 9; n++ {
@@ -36,7 +44,7 @@ func Create(dir, base, ext string) (*os.File, string, error) {
 			name = fmt.Sprintf("%s-%d%s", base, n, ext)
 		}
 		path := filepath.Join(dir, name)
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if os.IsExist(err) {
 			continue
 		}

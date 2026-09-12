@@ -61,7 +61,7 @@ func (s *Server) snapshot(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "could not work out where the executable lives", http.StatusInternalServerError)
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		http.Error(rw, "could not create "+dir, http.StatusInternalServerError)
 		return
 	}
@@ -112,7 +112,7 @@ func (s *Server) plansave(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "could not work out where the executable lives", http.StatusInternalServerError)
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		http.Error(rw, "could not create "+dir, http.StatusInternalServerError)
 		return
 	}

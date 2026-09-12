@@ -153,11 +153,19 @@ func BuildDSN(p ConnParams) (string, error) {
 	return u.String(), nil
 }
 
-// Redacted is dsn with its password replaced, for the page and the log. An
-// unparseable string gives nothing rather than itself.
+// Redacted is dsn with its password replaced, for the page and the log.
+// Anything this cannot redact gives nothing rather than itself.
+//
+// The scheme is checked, not merely the parse. url.Redacted only replaces a
+// password carried in the userinfo of a URL, and url.Parse accepts an ADO
+// connection string as a relative path without complaining, so
+// "server=db01;password=secret" used to come back through here unchanged and
+// unmarked: the caller had no way to tell a redaction from a passthrough. The
+// driver does take that form, and withAppName above has a branch for it, so it
+// is a string this function really can be handed.
 func Redacted(dsn string) string {
 	u, err := url.Parse(dsn)
-	if err != nil {
+	if err != nil || !strings.EqualFold(u.Scheme, "sqlserver") {
 		return ""
 	}
 	return u.Redacted()

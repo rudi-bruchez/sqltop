@@ -3,6 +3,7 @@ package outdir
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,34 @@ func TestCreateMakesTheDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
+}
+
+// TestCreateWritesForTheOwnerAlone guards what these files contain rather than
+// how they are named: production SQL text, literals included. A default mode
+// would publish it to every account on the host.
+func TestCreateWritesForTheOwnerAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	dir := filepath.Join(t.TempDir(), "snapshots")
+	path, err := Write(dir, "server-2026-09-13-101500", ".html", []byte("<p>SELECT * FROM Payroll WHERE ssn = '123-45-6789'</p>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("%s has mode %v, want 0600: it carries production SQL", path, fi.Mode().Perm())
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if di.Mode().Perm() != 0o700 {
+		t.Errorf("%s has mode %v, want 0700", dir, di.Mode().Perm())
+	}
 }
 
 func TestBesideIsUnderTheExecutable(t *testing.T) {

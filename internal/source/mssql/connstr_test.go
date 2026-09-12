@@ -200,4 +200,15 @@ func TestRedactedHidesThePassword(t *testing.T) {
 	if got := Redacted("::not a url"); got != "" {
 		t.Errorf("an unparseable string redacts to %q, want empty", got)
 	}
+	// The format this used to fail on, which is the one the test above cannot
+	// see: url.Parse takes an ADO string as a relative path and url.Redacted
+	// has no userinfo to replace, so it came back whole.
+	for _, ado := range []string{
+		"server=db01;user id=sa;password=hunter2;database=X",
+		"Server=db01,1433;Database=X;User Id=sa;Password=hunter2;Encrypt=true",
+	} {
+		if got := Redacted(ado); got != "" {
+			t.Errorf("Redacted(%q) gives %q; it cannot redact that form, so it must give nothing", ado, got)
+		}
+	}
 }

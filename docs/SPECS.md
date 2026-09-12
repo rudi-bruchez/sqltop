@@ -15,7 +15,7 @@ misbehaving:
 2. What is running? Request grid.
 3. Who is stuck, and behind whom? Blocking view.
 4. What is the server waiting on? Waits view.
-5. What keeps coming back? Repetitive queries view.
+5. What keeps coming back? Queries view.
 6. Why is this one query slow, right now, while it runs? Live plan progress.
 
 It is a diagnostic instrument, not a monitoring platform. It has no agent, no
@@ -307,7 +307,7 @@ bench measurements:
 +------------------------------------------------------------------+
 | server dashboard          collapsible, one line when collapsed   |
 +------------------------------------------------------------------+
-| tabs  requests | blocking | waits | repetitive | throughput | programs |
+| tabs  requests | blocking | waits | queries | throughput | programs |
 +------------------------------------------------------------------+
 |                                                                  |
 |  grid                                                            |
@@ -395,7 +395,7 @@ PowerShell prototype. Shortcuts are shown in the tab labels.
 | Requests | `r` | Every active request, one row each. The default | `sys.dm_exec_sessions`, `sys.dm_exec_requests`, `sys.dm_exec_sql_text` |
 | Blocking | `b` | Blocking chains only, flattened with a depth column, ordered so a blocker is immediately above those it blocks. Head blockers highlighted | Same, plus `sys.dm_os_waiting_tasks` |
 | Waits | `w` | Two sub-modes toggled with `g`: current waits per request, and cumulative wait statistics differentiated over the window | `sys.dm_os_waiting_tasks`, `sys.dm_os_wait_stats` |
-| Repetitive queries | `q` | Aggregation of the retention window by `query_hash`: executions seen, distinct sessions, total CPU, average and maximum elapsed, one sample text. This is what catches the query that is individually fast and collectively ruinous | Derived from stored samples |
+| Queries | `q` | Aggregation of the retention window by `query_hash` and database: runs seen, distinct sessions, total CPU, average and maximum elapsed, one sample text, the expensive first. This is what catches the query that is individually fast and collectively ruinous | Derived from stored samples |
 | Throughput | `v` | Request counts and rates over the window: active requests, batch requests/sec, compilations, recompilations, by database and by command. `v` for volume: `t` shows the selected statement and `f` is the refresh rate | Derived, plus `SQL Statistics` |
 | Programs | `a` | Aggregation by program name and login. `a` for applications: `p` is pause | Derived |
 | Sessions | `u` | Every open user session: who, from where, connected for how long, idle for how long, and whether a transaction is open and since when | `sys.dm_exec_sessions`, `sys.dm_tran_session_transactions`, `sys.dm_tran_active_transactions` |
@@ -414,6 +414,49 @@ switching between them does not re-query the server. The blocking view is
 one of them and needs no query of its own: the rows arrive already
 flattened, a blocker immediately above what it blocks, so that view is a
 membership decision over rows the stream already delivered.
+
+### 7.1 What the queries view can honestly count
+
+The view aggregates by the engine's `query_hash`, which is computed over the
+parameterised shape, so one query under a thousand literals folds into one
+row. That is the point here and the opposite of what the request grid wants,
+where a literal change must never be hidden. The database is in the key as
+well: one shape run against two databases is two answers, and folding them
+would put one database name on a row that counted both. Where the engine
+supplies no hash, the statement text stands in, or every such statement would
+fold into a single meaningless row.
+
+It counts runs, not executions. The window samples; it does not record. A
+shape seen in forty consecutive ticks on one session ran once, not forty
+times, and one that began and ended between two ticks was never seen at all.
+A run is the closest thing to an execution count that sampling can honestly
+produce. The request id cannot stand in for one: it is 0 on every session not
+using MARS. The sample count is shown next to it, off by default, because it
+is the working rather than the answer.
+
+Two sightings on one session continue the same run when they are one tick
+apart and the request had already been running for at least the gap between
+those ticks. Adjacency alone is not enough, and the difference is not
+theoretical: measured against a real engine with the budget governor holding
+the period at five seconds, a query averaging 700 ms was caught once per
+execution, so fifteen pairs of neighbouring sightings were fifteen pairs of
+separate executions being reported as fifteen single runs. A request alive at
+the previous tick has been running at least as long as the interval, and one
+that has not was not there.
+
+The cost figures are per run. `sys.dm_exec_requests` reports counters
+cumulative for the life of a request, so a run contributes its own maximum
+and never the sum of its samples, which would multiply a long query by how
+often it was looked at.
+
+A hundred rows cross the wire, taken off the expensive end, with the full
+count beside them so the status bar can say the list is a top. The list views
+draw one row each with no virtualisation, and a busy server holds several
+thousand distinct shapes in fifteen minutes.
+
+The walk holds the window's read lock, which blocks the collector from
+appending the next tick, and unlike the session history next door it runs on
+a poll rather than on a keypress. The browser holds it to five seconds.
 
 ### 7.2 The three views that are not projections
 
@@ -470,7 +513,7 @@ than no figure at all. Seconds rather than milliseconds, because `DATEDIFF`
 in milliseconds overflows a little past 24 days and a session open since
 last month is exactly what the sessions view is for.
 
-### 7.1 Commands
+### 7.3 Commands
 
 The keys that are not views. They are single presses, like `top`, and they are
 ignored while the focus is in a filter box, or the letters would be commands
@@ -696,7 +739,7 @@ specifically and are already prototyped in the bench.
 | `wait_type`, `wait_ms`, `wait_resource` | Colour-coded by wait family |
 | `open_tran`, `isolation_level` | |
 | `percent_complete` | Populated only for the operations SQL Server reports it for, such as `BACKUP` and `DBCC`. Blank elsewhere; the live plan is the answer for ordinary queries |
-| `query_hash` | Hidden by default, the join key for the repetitive queries view |
+| `query_hash` | Hidden by default, the join key for the queries view |
 | `sql_text` | Current statement, extracted by offsets, not the whole batch |
 
 Filtering is per column, and combinable. Filtering by database and by command
@@ -956,7 +999,12 @@ Every refresh tier of section 10 is configurable here, including the live plan
 refresh period, and the collection budget past which the tool throttles itself.
 Connection secrets are not stored in this file: a DSN may reference
 `${SQLTOP_CONN}`, and the value comes from the environment, loaded from `.env`
-at startup.
+at startup. A `.env` the tool writes is created at 0600, and writing to one
+that already exists takes the world's access away while leaving a group grant
+alone: a group can be somebody's deliberate choice on a shared administration
+host, the world never is. The directories the tool writes beside the binary,
+`snapshots/`, `plans/` and `traces/`, are 0700 with 0600 files, because each of
+them carries the SQL text of production statements with their literals.
 
 ## 9. Query detail and live plan progress
 
@@ -965,7 +1013,7 @@ a constraint that drove the renderer decision and is measured in the bench.
 
 Both halves of that panel exist, in one space so neither crowds the grid: `t`
 shows the statement, `e` follows the plan, and `d` writes the plan to a file.
-See section 7.1. The panel carries the full SQL text, the session context, the
+See section 7.3. The panel carries the full SQL text, the session context, the
 sample history for that request and the plan. What is not built is the plan
 drawn as a tree.
 

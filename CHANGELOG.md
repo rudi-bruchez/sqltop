@@ -4,7 +4,37 @@ Versioning follows `docs/SPECS.md` section 11: zero-major while the shape can
 still change, and the tag is cut when the milestone works rather than when the
 constant changes.
 
-## Unreleased
+## 0.7.0, 13 September 2026
+
+- A queries view, on `q`: what the whole server has been seen running over the
+  retention window, folded by statement shape and by database, the expensive
+  first. It is the view of `docs/SPECS.md` section 7 that had been specified
+  since the start and never built, and it sends nothing to the monitored
+  server, since every sample it reads was already collected for the grid.
+  It counts runs rather than executions, a run being a streak of consecutive
+  ticks on one session, because a window that samples cannot count what began
+  and ended between two ticks. Section 7.1 records what that does and does not
+  mean.
+- Switching tabs no longer relies on a hard-coded list of panels, which left a
+  newly added view fetching its rows, drawing them, and staying hidden.
+- The files this tool writes beside the binary, under `snapshots/`, `plans/`
+  and `traces/`, are created for their owner alone. They carry the SQL text of
+  production statements with their literals, next to the logins and hosts that
+  ran them, and the default mode handed all of that to every account on the
+  machine. That matters most on the shared administration host this tool is
+  meant to be copied to.
+- Writing to a `.env` that already exists now takes the world's access away,
+  leaving a group grant alone. A file created at 0600 was never the problem;
+  the problem was the file the README told the reader to create, since a shell
+  redirection leaves it readable by everybody, and the connect page's save
+  wrote a freshly typed password straight back into it. The README now says to
+  narrow it, and says why.
+- `Redacted` refuses what it cannot redact instead of handing it back whole. It
+  only ever replaced a password carried in a URL's userinfo, and `url.Parse`
+  accepts an ADO connection string as a relative path without complaining, so
+  `server=db01;password=secret` came back unchanged and unmarked. Its test
+  covered the format that worked and the format that fails to parse, never the
+  one it got wrong.
 
 ## 0.6.0, 12 September 2026
 

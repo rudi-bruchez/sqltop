@@ -86,7 +86,8 @@ func Load(path string) ([]string, error) {
 // Set makes key=value the definition of key in the file at path. The first
 // line Load would read as that definition is replaced and any later one
 // dropped; every other line is kept byte for byte. A missing file is created
-// with mode 0600, an existing one keeps its mode.
+// with mode 0600; an existing one keeps its mode, except that the world loses
+// whatever it had.
 func Set(path, key, value string) error {
 	if strings.ContainsAny(value, "\r\n") {
 		return fmt.Errorf("dotenv: the value for %s contains a line break", key)
@@ -105,6 +106,14 @@ func Set(path, key, value string) error {
 			return err
 		}
 		mode = fi.Mode().Perm()
+		// Whatever else this file is, it is about to hold a password, and no
+		// account on the machine other than this one has business reading it.
+		// A group grant survives: on a shared administration host it can be
+		// somebody's deliberate choice, and silently undoing it would be its
+		// own surprise. A world grant is never that choice. It is what a shell
+		// redirection leaves behind, which is how most of these files are
+		// created.
+		mode &^= 0o007
 	case !errors.Is(err, fs.ErrNotExist):
 		return err
 	}
