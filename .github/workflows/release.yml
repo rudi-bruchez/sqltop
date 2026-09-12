@@ -67,23 +67,26 @@ jobs:
         run: |
           set -eu
           mkdir -p dist
+          # Each archive holds one directory, so unpacking several of them side
+          # by side does not mix five binaries into one place, and the README's
+          # instructions hold from one release to the next.
           for target in linux/amd64/linux_x64 linux/arm64/linux_arm64 darwin/amd64/osx_x64 darwin/arm64/osx_arm64 windows/amd64/win_x64; do
             os="${target%%/*}"; rest="${target#*/}"; arch="${rest%%/*}"; label="${rest#*/}"
             name="sqltop_${version}_${label}"
             bin="sqltop"
             if [ "$os" = "windows" ]; then bin="sqltop.exe"; fi
             echo "building $name"
+            mkdir -p "dist/$name"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-              go build -trimpath -o "dist/$bin" ./cmd/sqltop
-            cp LICENSE README.md CHANGELOG.md dist/
+              go build -trimpath -o "dist/$name/$bin" ./cmd/sqltop
+            cp LICENSE README.md CHANGELOG.md "dist/$name/"
             if [ "$os" = "windows" ]; then
-              (cd dist && zip -q "${name}.zip" "$bin" LICENSE README.md CHANGELOG.md)
+              (cd dist && zip -qr "${name}.zip" "$name")
             else
-              (cd dist && tar czf "${name}.tar.gz" "$bin" LICENSE README.md CHANGELOG.md)
+              (cd dist && tar czf "${name}.tar.gz" "$name")
             fi
-            rm -f "dist/$bin"
+            rm -rf "dist/$name"
           done
-          rm -f dist/LICENSE dist/README.md dist/CHANGELOG.md
           (cd dist && sha256sum * > "sqltop_${version}_checksums.txt")
           ls -l dist
 
@@ -95,7 +98,7 @@ jobs:
           set -eu
           tmp=$(mktemp -d)
           tar xzf "dist/sqltop_${version}_linux_x64.tar.gz" -C "$tmp"
-          got=$("$tmp/sqltop" --version)
+          got=$("$tmp/sqltop_${version}_linux_x64/sqltop" --version)
           case "$got" in
             "sqltop ${version} ("*) ;;
             *) echo "got '$got', want 'sqltop ${version} (<commit>)'"; exit 1 ;;

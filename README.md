@@ -3,19 +3,83 @@
 A `top` for SQL servers: real-time monitoring of active requests, with a short
 rolling history so a query can be reviewed after it has finished.
 
-Status: 0.4 released. The collector works; the request grid is live with
+Status: 0.6 released. The collector works; the request grid is live with
 sorting, per-column filtering and columns you can hide and reorder; the server
 dashboard is in; and there are views for blocking chains, open sessions, open
 transactions with the objects they have locked, and every database's
-transaction log; and selecting a row shows its statement or follows its plan
-as it runs, and writes that plan to a file. The waits, repetitive-query,
-throughput and programs views and the kill flow are still to come.
+transaction log. Selecting a row shows its statement, follows its plan as it
+runs, writes that plan to a file, lists what the session has been seen running
+and what it has waited on, and, behind a flag, captures every statement it
+sends. Started without a connection string, the tool asks for one in the
+browser instead of exiting. The repetitive-query, throughput and programs
+views and the kill flow are still to come.
 
 The rendering strategy for the main screen was settled by measurement against
 four candidates, using a local harness that is not tracked here. So was the
 decision to sort and filter in the browser rather than in the query, and the
 removal of a query hint that turned out to be most of what this tool cost the
 server it watches. `docs/PERFORMANCE.md` has the numbers.
+
+## Installing
+
+One static binary, nothing to install on the monitored server, nothing
+downloaded at runtime. Take the archive for your platform from the
+[releases](https://github.com/rudi-bruchez/sqltop/releases), check it against
+the published checksums, and run it:
+
+```
+sha256sum -c --ignore-missing sqltop_0.6.0_checksums.txt
+tar xzf sqltop_0.6.0_linux_x64.tar.gz
+./sqltop_0.6.0_linux_x64/sqltop --version
+```
+
+The archives are `linux_x64`, `linux_arm64`, `osx_x64`, `osx_arm64` and
+`win_x64`, each with the binary, this README, the changelog and the licence.
+Or build it yourself, which needs Go 1.27 and no C toolchain:
+
+```
+CGO_ENABLED=0 go build -o sqltop ./cmd/sqltop
+```
+
+What it can watch:
+
+| Engine | What works |
+|---|---|
+| SQL Server 2019 and later, Azure SQL Managed Instance | Everything |
+| Azure SQL Database | Scoped to one database, see `docs/SPECS.md` section 3.2 |
+| SQL Server 2016 SP1 to 2017 | Everything except live plan progress, which needs a trace flag this tool will not set |
+| SQL Server 2012 to 2016 RTM | Connects, grid and dashboard; no plan progress at all |
+| Below SQL Server 2012 | Refuses to connect, and says why |
+
+## Permissions
+
+The login needs one server-level right, and nothing else:
+
+| Target | Right |
+|---|---|
+| SQL Server 2019 and earlier | `VIEW SERVER STATE` |
+| SQL Server 2022 and later | `VIEW SERVER PERFORMANCE STATE` |
+| Azure SQL Managed Instance | `VIEW SERVER STATE` |
+| Azure SQL Database | `VIEW DATABASE STATE`, plus membership of `##MS_ServerStateReader##` granted from `master` for the server-wide views; without it a session sees only itself |
+
+```sql
+CREATE LOGIN sqltop WITH PASSWORD = '...';
+GRANT VIEW SERVER STATE TO sqltop;   -- VIEW SERVER PERFORMANCE STATE on 2022 and later
+```
+
+These are minimums rather than exact matches: `VIEW SERVER STATE` includes
+`VIEW SERVER PERFORMANCE STATE`, so a login holding the former still works on
+2022 and later. A missing right degrades one reading rather than stopping the
+tool: the preflight asks the server what this login can actually read, the
+interface greys what it cannot, and the status bar says so. The tempdb column
+is the usual example, since `sys.dm_db_task_space_usage` needs a right of its
+own.
+
+The `c` key, which captures one session's statements, is the exception: it
+needs `ALTER ANY EVENT SESSION` as well, and it only exists when the tool was
+started with `-capture`. Neither right implies the other, so the tool checks
+for both before offering the key, rather than creating a capture it could
+never read.
 
 ## Running it
 
@@ -56,12 +120,8 @@ exit, `--version` to print the build and exit. Without `--config` it looks
 beside the binary, then in the user configuration directory, then falls back to
 the defaults.
 
-To build first, which is what a static binary is for:
-
-```
-CGO_ENABLED=0 go build -o sqltop ./cmd/sqltop
-SQLTOP_CONN='...' ./sqltop
-```
+From a built binary rather than the source tree, the same thing reads
+`SQLTOP_CONN='...' ./sqltop`.
 
 The grid shows user work and leaves out the engine's own background tasks, so
 an idle instance shows an empty grid. That is deliberate: on a real server those
@@ -102,6 +162,11 @@ that, which is what you want over SSH.
 | `r` `b` `u` `x` `l` | Requests, blocking, sessions, transactions, transaction logs |
 | `↑` `↓` | Move the selection through the grid |
 | `t` | Show the selected row's statement under the grid |
+| `e` | Follow the selected request through its plan as it runs |
+| `d` | Write the selected request's plan to `plans/` beside the binary |
+| `y` | List what the selected session has been seen running, holding the display while it is open |
+| `n` | Show what the selected session has waited on |
+| `c` | Capture every statement the selected session runs, into `traces/`; only with `-capture` |
 | `s` | Save the visible state to `snapshots/` beside the binary |
 | `p` | Pause and resume the display, holding every panel as it stands |
 | `f` | Step the sampling period through 1, 2, 5, 10 and 30 seconds |
