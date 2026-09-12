@@ -14,11 +14,9 @@ rolling history so a query can still be read after it has finished.
   transactions with what they hold, and transaction logs.
 - Per selected row: the statement, its plan as it runs, the plan written to a
   file, and what that session has been running and waiting on.
-- Statement capture for a single session, behind a flag, removed when you stop
-  watching.
+- Statement capture for a single session, while the tool is running.
 - SQL Server 2012 to 2025 and Azure SQL, with the degraded paths written down.
-- Runs in your browser, and asks for a connection string there when you have
-  not given it one.
+- Runs in your browser, with very fast HTML generation using Go, and minimal Javascript. 
 
 Status: 0.6. Still to come: the repetitive-query, throughput and programs
 views, and the kill flow.
