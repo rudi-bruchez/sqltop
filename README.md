@@ -21,6 +21,10 @@ rolling history so a query can still be read after it has finished.
 Status: 0.6. Still to come: the repetitive-query, throughput and programs
 views, and the kill flow.
 
+![SQLTop showing blocked requests and the selected session's statement history](docs/screenshots/screenshot05-session-history.png)
+
+[More screenshots](docs/SCREENSHOTS.md)
+
 ## Installing
 
 Take the archive for your platform from the
