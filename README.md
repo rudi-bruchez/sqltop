@@ -3,23 +3,27 @@
 A `top` for SQL servers: live monitoring of active requests, with a short
 rolling history so a query can still be read after it has finished.
 
-Status: 0.6. The request grid is live, with sorting, per-column filters and
-columns you can hide and reorder. There is a server dashboard, and views for
-blocking chains, sessions, open transactions with what they have locked, and
-transaction logs. Select a row to see its statement, follow its plan as it
-runs, write that plan to a file, list what the session has been seen running
-and what it has waited on, or capture its statements behind a flag. Started
-with no connection string, sqltop asks for one in the browser. Still to come:
-the repetitive-query, throughput and programs views, and the kill flow.
+- One static binary. Nothing installed on the server it watches, nothing
+  downloaded at runtime, no agent and no repository database.
+- Read-only through the DMVs, on one server-level right.
+- A live request grid with sorting, per-column filters, and columns you can
+  hide and reorder.
+- A server dashboard, plus views for blocking chains, sessions, open
+  transactions with what they hold, and transaction logs.
+- Per selected row: the statement, its plan as it runs, the plan written to a
+  file, and what that session has been running and waiting on.
+- Statement capture for a single session, behind a flag, removed when you stop
+  watching.
+- SQL Server 2012 to 2025 and Azure SQL, with the degraded paths written down.
+- Runs in your browser, and asks for a connection string there when you have
+  not given it one.
 
-Measurement settled the renderer (four candidates), sorting and filtering in
-the browser, and the removal of a query hint that was most of what this tool
-cost the server it watched. `docs/PERFORMANCE.md` has the numbers.
+Status: 0.6. Still to come: the repetitive-query, throughput and programs
+views, and the kill flow.
 
 ## Installing
 
-One static binary. Nothing is installed on the monitored server, and nothing
-is downloaded at runtime. Take the archive for your platform from the
+Take the archive for your platform from the
 [releases](https://github.com/rudi-bruchez/sqltop/releases), check it, run it:
 
 ```
