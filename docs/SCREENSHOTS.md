@@ -37,7 +37,7 @@ optimizer's estimates.
 
 ## Session history
 
-The rolling history keeps recently completed statements available alongside
-the current blocking chain, including their peak duration, CPU and wait type.
+The rolling history keeps recently completed statements on the selected session, 
+including their peak duration, CPU and wait type.
 
 ![SQLTop session history](screenshots/screenshot05-session-history.png)
