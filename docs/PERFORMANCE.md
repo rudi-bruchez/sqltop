@@ -1,9 +1,9 @@
 # Performance work, and what was measured
 
 Everything here was measured before it was kept, and several things were
-measured and then not kept. The rejections are the useful half of this
-document: they are the optimisations that look obviously worthwhile and are
-not, and without them written down someone re-derives them every six months.
+measured and dropped. The rejections are the useful half: optimisations that
+look obviously worthwhile and are not. Unwritten, they get re-derived every six
+months.
 
 The project rule this serves is in `CLAUDE.md`: measure before optimising,
 guessing at performance here has a poor record.
@@ -21,11 +21,9 @@ server.
 The rendering budget is 16 ms per refresh in the browser, which is one frame
 at 60 Hz. Spec section 10.1 holds the measurements.
 
-The wire between them is a third thing, and until it was measured nobody knew
-which of the two it belonged to. It turns out to belong to neither: at 800
-rows over loopback it is 153 kB a second, which costs no perceptible time at
-either end but is the largest number in the system and so attracts attention
-it does not deserve.
+The wire between them belongs to neither. At 800 rows over loopback it carries
+153 kB a second, which costs no perceptible time at either end. It is the
+largest number in the system, and it attracts attention it does not deserve.
 
 ## Server side, Go
 
@@ -152,14 +150,12 @@ change was made, and a test now fails if the trimming returns to the `WHERE`
 clause. It stays on the `SELECT` list, where it runs seventeen times rather
 than fifteen hundred and where the Go side genuinely needs it.
 
-This was found while answering a different question, which is worth
-recording because the wrong answer was the plausible one. Asked whether a
-configurable dashboard should trim the counter list to only the tiles on
-screen, the measurement said trimming from eighteen counters to one saves
-62 %. That looked like an argument for coupling the query to the UI. It was
-an argument that the predicate was bad: fixing it saves 49 % for everybody,
-with no configuration, no coupling, and all sixteen counters still
-collected.
+This came out of a different question, and the wrong answer was the plausible
+one. Asked whether a configurable dashboard should trim the counter list to the
+tiles on screen, the measurement said trimming from eighteen counters to one
+saves 62 %, which read as an argument for coupling the query to the UI. It was
+an argument that the predicate was bad: fixing it saves 49 % for everybody, with
+no configuration, no coupling, and all sixteen counters still collected.
 
 Scheduler load and the memory clerks travel together in a second query rather
 than two, because both are `sys.dm_os_` views needing the same right and
@@ -169,16 +165,15 @@ budget at a one second period. The memory clerk half is the one that grows
 with the size of the instance, so that figure is worth taking again on a
 large server.
 
-An external reviewer measured the same tier under its own load and got
-10.65 ms for the two queries together, which leaves roughly 6.5 ms for
-osViewsQuery against the 1.70 ms recorded above. Both figures are honest and
-they were taken under different loads on a machine that was not idle either
-time. The disagreement is the useful part: it says the memory-clerk half of
-that query grows with what the server is doing, not only with how big it
-is, and that the recorded figure should have said what the machine was
-doing when it was taken. Every measurement in this document was taken on
-this workstation against a container, with the tool and a load generator
-running and nothing else deliberately loading the machine.
+An external reviewer measured the same tier under its own load and got 10.65 ms
+for the two queries together, leaving roughly 6.5 ms for osViewsQuery against
+the 1.70 ms above. Both figures are honest, taken under different loads on a
+machine that was not idle either time. The disagreement is the useful part: the
+memory-clerk half of that query grows with what the server is doing, not only
+with how big it is, and the recorded figure should have said what the machine
+was doing. Every measurement in this document was taken on this workstation
+against a container, with the tool and a load generator running and nothing
+else deliberately loading the machine.
 
 tempdb's total is summed in Go from its three parts rather than asked of the
 server as a fourth aggregate. This is not a speed optimisation: two
@@ -226,12 +221,11 @@ unrepresentable cell would blank the grid.
 
 The interface is composed once and served inline: no stylesheet request, no
 script request, and an inline data URI for the icon. That began as a
-correctness fix rather than a speed one. A relative URL does not inherit the
-query string that carries the per-run token, so the browser fetched
-`/style.css` and `/app.js` without it and got 401; every check until then had
-used curl with an explicit token. The favicon was the same bug with a
-different cause: the browser asks for `/favicon.ico` unprompted, and every
-route here requires a token by design.
+correctness fix, not a speed one. A relative URL does not inherit the query
+string carrying the per-run token, so the browser fetched `/style.css` and
+`/app.js` without it and got 401; every check until then had used curl with an
+explicit token. The favicon was the same bug with a different cause: the browser
+asks for `/favicon.ico` unprompted, and every route here requires a token.
 
 ## Browser side, JavaScript
 
@@ -277,7 +271,7 @@ time the processor is idle.
 | `(program)`, V8 internals and `JSON.parse` | 1017 ms | 22 ms |
 | `layout` | 143 ms | 3.2 ms |
 | garbage collector | 54 ms | 1.2 ms |
-| `sparkPoints` | 11 ms | 0.24 ms |
+| `sparkPoints`, since removed with the sparklines | 11 ms | 0.24 ms |
 | `n0` | 9.6 ms | 0.21 ms |
 
 `frame p95` is 16.7 ms on every mode measured, which is exactly one frame at
@@ -290,10 +284,11 @@ The client prunes its reference table on the same rule the server uses: a key
 no row used this tick is dropped. Without it a tab left open grew without
 bound, measured at roughly 1.3 MB an hour.
 
-Sparkline history is capped at 120 points per tile. Spec section 6 asks for a
-sparkline over the retention window, and this is deliberately not that: the
-window is fifteen minutes, nine hundred points at one tick a second, and a
-sparkline a hundred pixels wide draws that as a smear.
+Tiles carried a sparkline capped at 120 points while the feature existed. It was
+capped because the retention window holds nine hundred points at one tick a
+second, and a sparkline a hundred pixels wide draws that as a smear. The feature
+has since been cut, for that reason rather than for its cost; spec section 6
+records the decision.
 
 ## Measured and rejected
 
@@ -313,13 +308,12 @@ the same session `Cost` differentiates, forty calls each:
 | `countersQuery` | 1.35 and 1.30 ms | 1.50 and 1.25 ms |
 | `osViewsQuery` | 0.30 and 0.17 ms | 0.15 and 0.12 ms |
 
-Two runs each, and the two columns are inside each other's noise. There is
-nothing to win: the plan is already in the cache under its statement text,
-and finding it there costs a hash lookup. What preparing would buy is the
-three kilobytes of query text per call, which on a loopback or a local
-network is not a figure anybody can feel, against handles that live on the
-connection and would have to be invalidated and rebuilt every time the
-pinned connection is repaired. Rejected.
+Two runs each, and the two columns are inside each other's noise. The plan is
+already in the cache under its statement text, and finding it there costs a
+hash lookup. Preparing would save three kilobytes of query text per call, which
+nobody feels over loopback or a local network, and would add handles living on
+the connection that have to be invalidated and rebuilt every time the pinned
+connection is repaired. Rejected.
 
 ### Sorting and filtering in Go
 
@@ -338,11 +332,10 @@ simulation of one, every client mode landed at or below the
 no-sort-no-filter baseline: the work costs less than the measurement can
 see. The full table is in spec section 10.1.
 
-Client-side also keeps the properties worth keeping: a filter per viewer
-rather than per server, a filter over the retention window rather than one
-that decides what was ever collected, and rows that leave the grid because
-they ended rather than because they stopped matching, which the protocol
-cannot otherwise tell apart.
+Client-side also keeps three properties: one filter per viewer, a filter over
+the retention window instead of one deciding what gets collected, and the
+difference between a row that ended and a row that stopped matching, which the
+protocol cannot otherwise express.
 
 ### Minifying the page
 
@@ -372,8 +365,10 @@ something that is not loopback, which the security model currently forbids.
 
 ### The sparklines
 
-Suspected alongside the number formatter, profiled at 0.24 ms per tick.
-Untouched.
+Suspected alongside the number formatter, profiled at 0.24 ms per tick, and
+left alone: the cost was not there. They were removed later for being
+unreadable at a hundred pixels, which is a display decision and not this
+document's.
 
 ### Pre-built DOM nodes instead of markup writes
 
@@ -436,21 +431,20 @@ Attributing that to the browser would be a mistake: the likelier variable is
 the load, and the difference between the two conditions is plausibly larger
 than any difference between the two browsers.
 
-The rule that follows, and it is the only defensible one: a rendering figure
-means nothing without the state of the machine that produced it. Every table
-here now says what else was running. And the case nobody has measured is the
-realistic one, a browser with forty tabs and a dozen extensions, which is
-what the tool will actually run in.
+The rule that follows: a rendering figure means nothing without the state of
+the machine that produced it, so every table here says what else was running.
+The realistic case is still unmeasured, a browser with forty tabs and a dozen
+extensions, which is where the tool will actually run.
 
 ## Suggested by an external reviewer, and what came of each
 
 An external reviewer was given docs/QUERIES.md and the cost table above and
-asked what else could be done. Six suggestions came back. They are recorded
-here with their verdicts, because a rejected suggestion with no reason
-written down gets raised again by the next reviewer and paid for twice.
+asked what else could be done. Six suggestions came back, recorded here with
+their verdicts: a rejection with no reason written down gets raised again by the
+next reviewer and paid for twice.
 
-**Group the lock aggregate on the entity id and resolve the object name once
-per group.** The reasoning was that `OBJECT_NAME` is called once per lock and
+Group the lock aggregate on the entity id and resolve the object name once
+per group. The reasoning was that `OBJECT_NAME` is called once per lock and
 takes a schema latch each time. Measured, twice, and it was slower: 39.4 ms
 against 31.7 ms on the same lock population. The `CASE WHEN resource_type =
 'OBJECT'` guard already stops the function being called for the key and page
@@ -459,12 +453,12 @@ entity id splits what is now one row per index back into one row per
 partition. Rejected, with the caveat that the lock population moves under
 the measurement and neither figure is worth much on its own.
 
-**Restrict the lock view to sessions in a blocking chain.** The same reviewer
+Restrict the lock view to sessions in a blocking chain. The same reviewer
 argued against its own suggestion, correctly: an idle transaction holding a
 large lock count and blocking nobody yet is exactly what a DBA is looking
 for. Not done.
 
-**Take the SQL text out of the tick.** `sys.dm_exec_sql_text` is applied once
+Take the SQL text out of the tick. `sys.dm_exec_sql_text` is applied once
 per row in the grid query, and on a server with eight hundred active requests
 that is eight hundred calls into the plan cache for text the client already
 holds and caches by fingerprint. This is the most promising of the six and
@@ -476,19 +470,19 @@ client change and cannot lose much, and returning handles rather than text
 with a second query for the ones the tool has not seen, which needs a cache
 in the source and is the larger win if handle diversity is low.
 
-**Pre-aggregate `sys.dm_db_task_space_usage` by session and LEFT JOIN it,
-instead of applying it per row.** Plausible and not yet measured. Note that
+Pre-aggregate `sys.dm_db_task_space_usage` by session and LEFT JOIN it,
+instead of applying it per row. Plausible and not yet measured. Note that
 this is not the shape already rejected above under "the requests query":
 that one moved the filter, this one moves the aggregation.
 
-**Merge the round trips.** `countersQuery`, `osViewsQuery` and `costQuery`
+Merge the round trips. `countersQuery`, `osViewsQuery` and `costQuery`
 run on the same tier in the same tick and are three batches today. They could
 be one, read back with `Rows.NextResultSet`. It saves TDS framing and two
 round trips, which on a loopback connection is a fraction of a millisecond of
 wall clock and no server CPU at all. It would matter on a server across a
 WAN, which is in the list of things this project has never measured. Not done.
 
-**A larger TDS packet size.** Measured, on an 800 row result of about 400 kB,
+A larger TDS packet size. Measured, on an 800 row result of about 400 kB,
 four runs: 1.50 to 1.63 ms of wall clock at the default 4096 bytes, and 1.16
 to 1.31 ms at 16384 or 32767. A real 15 to 20 % of the transfer, and no
 change in server CPU that the noise allows to be read. Not taken yet for the
