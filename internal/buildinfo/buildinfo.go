@@ -14,9 +14,10 @@ import "runtime/debug"
 // and then sorting and filtering, 0.3 the blocking, session, transaction and
 // log views with the columns configurable per view, 0.4 the detail panel:
 // the statement, the plan as it runs, and saving one, 0.5 the scoped statement
-// capture and the first thing this tool creates on a server. The CHANGELOG is
-// the authority on what each one covers.
-const Version = "0.5.0"
+// capture and the first thing this tool creates on a server, 0.6 the connect
+// page, which is how the tool starts when nobody has written a connection
+// string yet. The CHANGELOG is the authority on what each one covers.
+const Version = "0.6.0"
 
 // Revision returns the commit this binary was built from, and whether the
 // tree was dirty. Both are empty and false when the build carried no VCS

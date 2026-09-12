@@ -6,6 +6,39 @@ constant changes.
 
 ## Unreleased
 
+## 0.6.0, 12 September 2026
+
+- Started without a connection string, sqltop no longer exits with one log
+  line. It serves a connect page on the address it prints, with the same
+  token, and builds the string from what a DBA types the way SSMS takes it:
+  `db01`, `db01\SALES`, `db01,14330`. On success the monitor takes the same
+  socket over, so the tab that was already open becomes the interface. The
+  result can be saved to `.env`, and the box is offered only when the next run
+  would actually read it.
+- Kerberos is deliberately not on that page. The pure Go library under the
+  driver cannot parse the stock Fedora and RHEL `krb5.conf`, ignores its
+  `includedir`, and reads a credential cache only from a file, where those
+  distributions default to `KEYRING:` or `KCM:`. `docs/SPECS.md` section 3.3
+  now says what a hand-written Kerberos string needs instead, and records that
+  Microsoft Entra was never linked into the binary.
+- The sessions view no longer fails while connections are being opened.
+  `sys.dm_exec_sessions` carries 1900-01-01 in `login_time` and
+  `last_request_end_time` for a session still logging in, and a hundred and
+  twenty-six years overflows `DATEDIFF` even in seconds, so one such row
+  failed the whole list. On a server whose pools open connections all the
+  time, that was most reads.
+- A list view no longer carries the marker of a history panel holding the
+  grid. The hold belongs to the grid, but the marker stayed on the
+  transactions and log views while they went on refreshing every five
+  seconds, and `y` could not clear it there, which read as those views not
+  refreshing at all.
+- The list views now say how many rows they read and when. A log list looks
+  the same from one read to the next, and nothing else on screen showed the
+  read happening.
+- The selected row is visible at a glance, a clear band with an accent bar,
+  where it used to sit one shade from the hover colour. The panels under the
+  grid all describe that row.
+
 - The default sampling cadence moves from one second to five, on the request
   tier and the counter tier together. The two move together because `f` and
   `/api/period` drive the request tier alone, and leaving the counters at a
