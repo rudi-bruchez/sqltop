@@ -7,7 +7,7 @@ rolling history so a query can still be read after it has finished.
   downloaded at runtime, no agent and no repository database.
 - Fast by measurement: 1.8 ms of server CPU per second at steady state, and a
   4.8 ms browser refresh at 800 rows ([details](docs/PERFORMANCE.md)).
-- Read-only through the DMVs, on one server-level right.
+- Read-only through the DMVs, on one server-level privilege.
 - A live request grid with sorting, per-column filters, and columns you can
   hide and reorder.
 - A server dashboard, plus views for blocking chains, sessions, open
