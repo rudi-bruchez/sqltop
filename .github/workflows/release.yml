@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (must already exist)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Check the tag matches the version constant
+        env:
+          # Bound through env rather than interpolated into the script: ${{ }} is
+          # expanded by the runner before bash parses the line, so an input
+          # carrying shell metacharacters would become script rather than a value.
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          tag="$RELEASE_TAG"
+          const="v$(grep -oP 'const Version = "\K[^"]+' internal/buildinfo/buildinfo.go)"
+          if [ "$tag" != "$const" ]; then
+            echo "tag $tag does not match internal/buildinfo ($const)"; exit 1
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt reports these files:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The tests that need a SQL Server, chromium or deno skip when they are
+      # absent, so this runs the hermetic half. The full suite against a real
+      # engine is the gate before the tag is cut, not after.
+      - name: Test
+        run: go test ./...
+
+      # Cross-compilation is free in Go, so one runner builds every target. A
+      # build matrix would spend five checkouts and five toolchain downloads to
+      # produce the same five binaries.
+      #
+      # No -X for the version: it lives in a constant, because a version that
+      # depends on the build command is wrong the first time someone builds it
+      # differently. The commit and the dirty flag come from the toolchain.
+      - name: Build
+        run: |
+          set -eu
+          mkdir -p dist
+          for target in linux/amd64/linux_x64 linux/arm64/linux_arm64 darwin/amd64/osx_x64 darwin/arm64/osx_arm64 windows/amd64/win_x64; do
+            os="${target%%/*}"; rest="${target#*/}"; arch="${rest%%/*}"; label="${rest#*/}"
+            name="sqltop_${version}_${label}"
+            bin="sqltop"
+            if [ "$os" = "windows" ]; then bin="sqltop.exe"; fi
+            echo "building $name"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -o "dist/$bin" ./cmd/sqltop
+            cp LICENSE README.md CHANGELOG.md dist/
+            if [ "$os" = "windows" ]; then
+              (cd dist && zip -q "${name}.zip" "$bin" LICENSE README.md CHANGELOG.md)
+            else
+              (cd dist && tar czf "${name}.tar.gz" "$bin" LICENSE README.md CHANGELOG.md)
+            fi
+            rm -f "dist/$bin"
+          done
+          rm -f dist/LICENSE dist/README.md dist/CHANGELOG.md
+          (cd dist && sha256sum * > "sqltop_${version}_checksums.txt")
+          ls -l dist
+
+      # Smoke-test the artifact most people will download rather than the tree
+      # it came from: unpack it, and check the binary reports the tagged version
+      # and was stamped from a clean checkout.
+      - name: Verify the linux archive
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          tar xzf "dist/sqltop_${version}_linux_x64.tar.gz" -C "$tmp"
+          got=$("$tmp/sqltop" --version)
+          case "$got" in
+            "sqltop ${version} ("*) ;;
+            *) echo "got '$got', want 'sqltop ${version} (<commit>)'"; exit 1 ;;
+          esac
+          case "$got" in
+            *dirty*) echo "the binary was built from a dirty tree: $got"; exit 1 ;;
+          esac
+          echo "archive verified: $got"
+
+      # The changelog section is the release note: it is written when the
+      # milestone is cut, and it says why rather than listing commits.
+      - name: Notes
+        run: |
+          set -eu
+          awk -v v="## ${version}" '$0 ~ "^"v {f=1; next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no section for ${version}"; exit 1
+          fi
+          previous=$(git tag --sort=-v:refname | grep -v "^v${version}$" | head -1)
+          if [ -n "$previous" ]; then
+            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...v%s\n' \
+              "$GITHUB_REPOSITORY" "$previous" "$version" >> notes.md
+          fi
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          tag="$RELEASE_TAG"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "$tag" --notes-file notes.md
+          fi
