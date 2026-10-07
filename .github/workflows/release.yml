@@ -40,6 +40,17 @@ jobs:
           fi
           echo "version=${tag#v}" >> "$GITHUB_ENV"
 
+      # The changelog section is the release note: written when the version is
+      # cut, it says why, which a list of commits cannot. Built right after the
+      # tag check, so a tag whose section is missing or empty fails early.
+      # Outside the checkout, so the tree stays clean for the build.
+      - name: Notes
+        run: |
+          set -eu
+          scripts/release-notes.sh "$version" "$GITHUB_REPOSITORY" \
+            "sqltop_${version}_checksums.txt" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
       - name: Format
         run: |
           unformatted=$(gofmt -l .)
@@ -108,21 +119,6 @@ jobs:
           esac
           echo "archive verified: $got"
 
-      # The changelog section is the release note: it is written when the
-      # milestone is cut, and it says why rather than listing commits.
-      - name: Notes
-        run: |
-          set -eu
-          awk -v v="## ${version}" '$0 ~ "^"v {f=1; next} /^## /{f=0} f' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then
-            echo "CHANGELOG.md has no section for ${version}"; exit 1
-          fi
-          previous=$(git tag --sort=-v:refname | grep -v "^v${version}$" | head -1)
-          if [ -n "$previous" ]; then
-            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...v%s\n' \
-              "$GITHUB_REPOSITORY" "$previous" "$version" >> notes.md
-          fi
-          cat notes.md
 
       - name: Publish
         env:
@@ -133,6 +129,7 @@ jobs:
           tag="$RELEASE_TAG"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "$tag" dist/* --title "$tag" --notes-file notes.md
+            gh release create "$tag" dist/* --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
           fi
