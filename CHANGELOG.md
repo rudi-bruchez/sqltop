@@ -4,7 +4,14 @@ Versioning follows `docs/SPECS.md` section 11: zero-major while the shape can
 still change, and the tag is cut when the milestone works rather than when the
 constant changes.
 
-## 0.7.0, 13 September 2026
+## 0.7.0, 8 October 2026
+
+This release adds the queries view, specified since the start and never built:
+what the server has been seen running over the retention window, folded by
+statement shape and by database. It also narrows what sqltop leaves readable
+on disk, since those files carry production SQL with its literals:
+`snapshots/`, `plans/` and `traces/` are created for their owner alone, and an
+existing `.env` loses the world's access when the tool writes to it.
 
 - A queries view, on `q`: what the whole server has been seen running over the
   retention window, folded by statement shape and by database, the expensive
